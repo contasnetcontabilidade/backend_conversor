@@ -38,3 +38,6 @@ app.use("/api", apiRouter);
 // Keep these at the end.
 app.use(notFoundHandler);
 app.use(errorHandler);
+
+// Vercel Node runtime expects a default-exported handler/server.
+export default app;
