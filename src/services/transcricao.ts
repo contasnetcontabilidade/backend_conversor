@@ -1,6 +1,8 @@
 ﻿﻿import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
+import os from "os";
+import { GoogleGenAI, createPartFromUri } from "@google/genai";
 import { nodewhisper } from "nodejs-whisper";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
@@ -8,6 +10,8 @@ import { resolveFromProjectRoot } from "../utils/paths";
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
 const DEFAULT_MODEL_NAME = process.env.WHISPER_MODEL ?? "base";
+const DEFAULT_GEMINI_TRANSCRIPTION_MODEL =
+  process.env.GEMINI_TRANSCRIPTION_MODEL ?? "gemini-2.5-flash";
 
 const MODELS_LIST = [
   "tiny",
@@ -24,6 +28,7 @@ const MODELS_LIST = [
 ] as const;
 
 type WhisperModel = (typeof MODELS_LIST)[number];
+type TranscriptionProvider = "whisper" | "gemini";
 
 export type TranscricaoInput = {
   audioPath?: string;
@@ -49,6 +54,248 @@ function runExclusive<T>(operation: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return result;
+}
+
+let geminiClient: GoogleGenAI | null = null;
+
+function getGeminiClient() {
+  if (geminiClient) {
+    return geminiClient;
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    throw new AppError({
+      statusCode: 500,
+      code: "GEMINI_API_KEY_MISSING",
+      message: "GEMINI_API_KEY nao definida no ambiente.",
+    });
+  }
+
+  geminiClient = new GoogleGenAI({ apiKey });
+  return geminiClient;
+}
+
+function resolveTranscriptionProvider(): TranscriptionProvider {
+  const fromEnv = (process.env.TRANSCRICAO_PROVIDER ?? "").trim().toLowerCase();
+  if (fromEnv === "whisper" || fromEnv === "gemini") {
+    return fromEnv;
+  }
+
+  // Em serverless da Vercel, Whisper local exige ffmpeg/cmake e nao e confiavel.
+  if (process.env.VERCEL) {
+    return "gemini";
+  }
+
+  return "whisper";
+}
+
+function inferAudioMimeType(filePath: string) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".wav":
+    case ".wave":
+      return "audio/wav";
+    case ".mp3":
+      return "audio/mpeg";
+    case ".m4a":
+      return "audio/m4a";
+    case ".aac":
+      return "audio/aac";
+    case ".ogg":
+    case ".opus":
+      return "audio/ogg";
+    case ".flac":
+      return "audio/flac";
+    case ".aiff":
+    case ".aif":
+      return "audio/aiff";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function buildFallbackSrt(transcript: string) {
+  const normalized = transcript
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return `1
+00:00:00,000 --> 00:59:59,000
+${normalized}
+`;
+}
+
+function writeSrtWithFallback(preferredSrtPath: string, content: string) {
+  try {
+    fs.writeFileSync(preferredSrtPath, content, "utf-8");
+    return preferredSrtPath;
+  } catch {
+    const fileName = path.basename(preferredSrtPath);
+    const fallbackSrtPath = path.join(
+      os.tmpdir(),
+      `${Date.now()}_${fileName}`,
+    );
+    fs.writeFileSync(fallbackSrtPath, content, "utf-8");
+    return fallbackSrtPath;
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForGeminiFileActive(fileName: string, timeoutMs = 120000) {
+  const client = getGeminiClient();
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const current = await client.files.get({ name: fileName });
+
+    if (current.state === "ACTIVE") {
+      return current;
+    }
+
+    if (current.state === "FAILED") {
+      throw new AppError({
+        statusCode: 502,
+        code: "GEMINI_FILE_PROCESSING_FAILED",
+        message: "Gemini nao conseguiu processar o audio enviado.",
+        details: { fileName },
+      });
+    }
+
+    await sleep(1000);
+  }
+
+  throw new AppError({
+    statusCode: 504,
+    code: "GEMINI_FILE_PROCESSING_TIMEOUT",
+    message: "Timeout aguardando processamento do audio na Gemini.",
+    details: { fileName, timeoutMs },
+  });
+}
+
+function normalizeGeminiTranscriptionError(error: unknown): AppError {
+  if (error instanceof AppError) {
+    return error;
+  }
+
+  const message = getErrorMessage(error);
+
+  if (/resource_exhausted|quota|429/i.test(message)) {
+    return new AppError({
+      statusCode: 429,
+      code: "GEMINI_QUOTA_EXCEEDED",
+      message: "Limite/quota da Gemini API excedido.",
+      details: { cause: message },
+    });
+  }
+
+  if (/api key|credentials|authentication|unauthorized|forbidden/i.test(message)) {
+    return new AppError({
+      statusCode: 500,
+      code: "GEMINI_AUTH_CONFIG_ERROR",
+      message: "Falha de autenticacao na Gemini API.",
+      details: { cause: message },
+    });
+  }
+
+  return new AppError({
+    statusCode: 502,
+    code: "GEMINI_TRANSCRICAO_FALHOU",
+    message: "Falha ao transcrever audio via Gemini.",
+    details: { cause: message },
+  });
+}
+
+async function transcreverComGemini(
+  audioPath: string,
+): Promise<TranscricaoResultado> {
+  const client = getGeminiClient();
+  const model = process.env.GEMINI_TRANSCRIPTION_MODEL?.trim()
+    ? process.env.GEMINI_TRANSCRIPTION_MODEL.trim()
+    : DEFAULT_GEMINI_TRANSCRIPTION_MODEL;
+
+  let uploadedName: string | undefined;
+
+  try {
+    const uploaded = await client.files.upload({
+      file: audioPath,
+      config: {
+        mimeType: inferAudioMimeType(audioPath),
+        displayName: path.basename(audioPath),
+      },
+    });
+
+    uploadedName = uploaded.name;
+    if (!uploadedName) {
+      throw new AppError({
+        statusCode: 502,
+        code: "GEMINI_UPLOAD_INVALID_RESPONSE",
+        message: "Gemini nao retornou o identificador do arquivo enviado.",
+      });
+    }
+
+    const activeFile = await waitForGeminiFileActive(uploadedName);
+    const fileUri = activeFile.uri?.trim();
+    const fileMimeType =
+      activeFile.mimeType?.trim() || inferAudioMimeType(audioPath);
+
+    if (!fileUri) {
+      throw new AppError({
+        statusCode: 502,
+        code: "GEMINI_UPLOAD_MISSING_URI",
+        message: "Gemini nao retornou URI do arquivo de audio.",
+      });
+    }
+
+    const response = await client.models.generateContent({
+      model,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: "Transcreva o audio integralmente e retorne somente o texto puro da transcricao em portugues do Brasil, sem markdown e sem comentarios extras.",
+            },
+            createPartFromUri(fileUri, fileMimeType),
+          ],
+        },
+      ],
+    });
+
+    const transcript = String(response.text ?? "").trim();
+    if (!transcript) {
+      throw new AppError({
+        statusCode: 502,
+        code: "GEMINI_EMPTY_TRANSCRIPTION",
+        message: "Gemini nao retornou texto da transcricao.",
+      });
+    }
+
+    const srtPath = writeSrtWithFallback(
+      `${audioPath}.srt`,
+      buildFallbackSrt(transcript),
+    );
+
+    return {
+      audioPath,
+      srtPath,
+      transcript,
+    };
+  } catch (error) {
+    throw normalizeGeminiTranscriptionError(error);
+  } finally {
+    if (uploadedName) {
+      try {
+        await client.files.delete({ name: uploadedName });
+      } catch {
+        // Sem impacto funcional: limpeza best-effort.
+      }
+    }
+  }
 }
 
 function resolveAudioPath(inputPath?: string): string {
@@ -221,13 +468,8 @@ function normalizeTranscriptionError(
 export async function transcreverAudio(
   input: TranscricaoInput = {},
 ): Promise<TranscricaoResultado> {
-  // 1) Resolve caminho e modelo.
+  // 1) Resolve caminho de audio.
   const audioPath = resolveAudioPath(input.audioPath);
-  const modelName = resolveModelName(input.modelName);
-  const autoDownloadModelName = resolveModelName(
-    input.autoDownloadModelName ?? modelName,
-  );
-  const withCuda = Boolean(input.withCuda);
 
   if (!fs.existsSync(audioPath)) {
     throw new AppError({
@@ -237,7 +479,18 @@ export async function transcreverAudio(
     });
   }
 
-  // 2) Roda a transcrição de forma exclusiva e segura.
+  const provider = resolveTranscriptionProvider();
+  if (provider === "gemini") {
+    return transcreverComGemini(audioPath);
+  }
+
+  const modelName = resolveModelName(input.modelName);
+  const autoDownloadModelName = resolveModelName(
+    input.autoDownloadModelName ?? modelName,
+  );
+  const withCuda = Boolean(input.withCuda);
+
+  // 2) Roda a transcricao local com Whisper de forma exclusiva e segura.
   return runExclusive(async () => {
     const originalCwd = process.cwd();
 
