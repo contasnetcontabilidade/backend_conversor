@@ -12,6 +12,14 @@ const DEFAULT_AUDIO_FILE =
 const DEFAULT_MODEL_NAME = process.env.WHISPER_MODEL ?? "base";
 const DEFAULT_GEMINI_TRANSCRIPTION_MODEL =
   process.env.GEMINI_TRANSCRIPTION_MODEL ?? "gemini-2.5-flash";
+const DEFAULT_GEMINI_TRANSCRIPTION_FALLBACK_MODELS =
+  process.env.GEMINI_TRANSCRIPTION_FALLBACK_MODELS ?? "gemini-2.5-flash-lite";
+const DEFAULT_GEMINI_TRANSCRIPTION_RETRY_ATTEMPTS = Number(
+  process.env.GEMINI_TRANSCRIPTION_RETRY_ATTEMPTS ?? "4",
+);
+const DEFAULT_GEMINI_TRANSCRIPTION_RETRY_BASE_DELAY_MS = Number(
+  process.env.GEMINI_TRANSCRIPTION_RETRY_BASE_DELAY_MS ?? "800",
+);
 
 const MODELS_LIST = [
   "tiny",
@@ -146,6 +154,56 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function clampPositiveInteger(
+  value: number,
+  fallback: number,
+  max: number,
+): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  return Math.min(Math.floor(value), max);
+}
+
+function resolveGeminiTranscriptionModels() {
+  const primaryModel = process.env.GEMINI_TRANSCRIPTION_MODEL?.trim()
+    ? process.env.GEMINI_TRANSCRIPTION_MODEL.trim()
+    : DEFAULT_GEMINI_TRANSCRIPTION_MODEL;
+
+  const fromEnv = (DEFAULT_GEMINI_TRANSCRIPTION_FALLBACK_MODELS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return Array.from(new Set([primaryModel, ...fromEnv]));
+}
+
+function isRetryableGeminiError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+
+  return (
+    /"status":"unavailable"|high demand|temporar|service unavailable|503/.test(
+      message,
+    ) ||
+    /resource_exhausted|quota|429/.test(message) ||
+    /deadline_exceeded|timeout|timed out|etimedout|econnreset|internal|500/.test(
+      message,
+    )
+  );
+}
+
+function getRetryDelayMs(attempt: number) {
+  const baseDelayMs = clampPositiveInteger(
+    DEFAULT_GEMINI_TRANSCRIPTION_RETRY_BASE_DELAY_MS,
+    800,
+    10_000,
+  );
+  const exponential = Math.min(baseDelayMs * 2 ** (attempt - 1), 8000);
+  const jitter = Math.floor(Math.random() * 250);
+  return exponential + jitter;
+}
+
 async function waitForGeminiFileActive(fileName: string, timeoutMs = 120000) {
   const client = getGeminiClient();
   const startedAt = Date.now();
@@ -183,6 +241,21 @@ function normalizeGeminiTranscriptionError(error: unknown): AppError {
   }
 
   const message = getErrorMessage(error);
+  const normalized = message.toLowerCase();
+
+  if (
+    /"status":"unavailable"|high demand|temporar|service unavailable|503/.test(
+      normalized,
+    )
+  ) {
+    return new AppError({
+      statusCode: 503,
+      code: "GEMINI_UNAVAILABLE",
+      message:
+        "Gemini indisponivel temporariamente (alta demanda). Tente novamente em instantes.",
+      details: { cause: message },
+    });
+  }
 
   if (/resource_exhausted|quota|429/i.test(message)) {
     return new AppError({
@@ -214,9 +287,12 @@ async function transcreverComGemini(
   audioPath: string,
 ): Promise<TranscricaoResultado> {
   const client = getGeminiClient();
-  const model = process.env.GEMINI_TRANSCRIPTION_MODEL?.trim()
-    ? process.env.GEMINI_TRANSCRIPTION_MODEL.trim()
-    : DEFAULT_GEMINI_TRANSCRIPTION_MODEL;
+  const models = resolveGeminiTranscriptionModels();
+  const maxAttempts = clampPositiveInteger(
+    DEFAULT_GEMINI_TRANSCRIPTION_RETRY_ATTEMPTS,
+    4,
+    10,
+  );
 
   let uploadedName: string | undefined;
 
@@ -251,27 +327,61 @@ async function transcreverComGemini(
       });
     }
 
-    const response = await client.models.generateContent({
-      model,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: "Transcreva o audio integralmente e retorne somente o texto puro da transcricao em portugues do Brasil, sem markdown e sem comentarios extras.",
-            },
-            createPartFromUri(fileUri, fileMimeType),
-          ],
-        },
-      ],
-    });
+    let transcript = "";
+    let lastError: unknown;
 
-    const transcript = String(response.text ?? "").trim();
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const model = models[(attempt - 1) % models.length];
+
+      try {
+        const response = await client.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: "Transcreva o audio integralmente e retorne somente o texto puro da transcricao em portugues do Brasil, sem markdown e sem comentarios extras.",
+                },
+                createPartFromUri(fileUri, fileMimeType),
+              ],
+            },
+          ],
+        });
+
+        transcript = String(response.text ?? "").trim();
+        if (!transcript) {
+          throw new AppError({
+            statusCode: 502,
+            code: "GEMINI_EMPTY_TRANSCRIPTION",
+            message: "Gemini nao retornou texto da transcricao.",
+            details: { model, attempt },
+          });
+        }
+
+        break;
+      } catch (error) {
+        lastError = error;
+        const canRetry = attempt < maxAttempts && isRetryableGeminiError(error);
+        if (!canRetry) {
+          throw error;
+        }
+
+        const delayMs = getRetryDelayMs(attempt);
+        console.warn(
+          `[transcricao] Gemini indisponivel (tentativa ${attempt}/${maxAttempts}) com modelo "${model}". Nova tentativa em ${delayMs}ms.`,
+          error,
+        );
+        await sleep(delayMs);
+      }
+    }
+
     if (!transcript) {
       throw new AppError({
         statusCode: 502,
         code: "GEMINI_EMPTY_TRANSCRIPTION",
-        message: "Gemini nao retornou texto da transcricao.",
+        message: "Gemini nao retornou texto da transcricao apos retries.",
+        details: { attempts: maxAttempts, models, cause: getErrorMessage(lastError) },
       });
     }
 
