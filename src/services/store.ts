@@ -24,8 +24,11 @@ const KEY = {
 
 let redis: Redis | null = null;
 function getRedis(): Redis | null {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  // Aceita tanto os nomes do Upstash quanto os da integracao KV da Vercel.
+  const url =
+    process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token =
+    process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
   if (!url || !token) return null;
   if (!redis) redis = new Redis({ url, token });
   return redis;

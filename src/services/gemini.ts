@@ -4,6 +4,7 @@ import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
+import { recordUsage } from "./usage";
 
 const DEFAULT_AUDIO_FILE = process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3-flash-preview";
@@ -206,9 +207,11 @@ Campos obrigatorios:
 Se nao houver pendencias, retorne array vazio em pendencias_acoes_necessarias.
 Nao invente informacoes.`;
 
+  const modelUsado = input.model?.trim() || DEFAULT_GEMINI_MODEL;
+
   try {
     const response = await getGeminiClient().models.generateContent({
-      model: input.model?.trim() || DEFAULT_GEMINI_MODEL,
+      model: modelUsado,
       contents: `${prompt}\n\nTRANSCRICAO:\n${transcricao}`,
       config: {
         responseMimeType: "application/json",
@@ -245,6 +248,14 @@ Nao invente informacoes.`;
         message: "Gemini nao retornou conteudo no resumo.",
       });
     }
+
+    // Registra o uso de tokens (para o painel de custos).
+    await recordUsage({
+      model: modelUsado,
+      op: "resumo",
+      inputTokens: response.usageMetadata?.promptTokenCount,
+      outputTokens: response.usageMetadata?.candidatesTokenCount,
+    });
 
     // 3) Valida e normaliza o JSON recebido.
     return {

@@ -15,6 +15,10 @@ import {
   gotoSetupController,
   gotoWebhookController,
 } from "../controllers/goto.controller";
+import {
+  adminPageController,
+  adminUsoController,
+} from "../controllers/admin.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { asyncHandler } from "../utils/http";
 
@@ -43,3 +47,7 @@ apiRouter.post("/goto/webhook/:token", asyncHandler(gotoWebhookController));
 apiRouter.get("/goto/eventos", asyncHandler(gotoEventosController));
 apiRouter.get("/goto/ably-token", asyncHandler(gotoAblyTokenController));
 apiRouter.post("/goto/chamado", asyncHandler(gotoChamadoController));
+
+// --- Painel admin de custos de IA ---
+apiRouter.get("/admin", adminPageController);
+apiRouter.get("/admin/uso", asyncHandler(adminUsoController));

@@ -6,6 +6,7 @@ import { GoogleGenAI, createPartFromUri } from "@google/genai";
 import { nodewhisper } from "nodejs-whisper";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
+import { recordUsage } from "./usage";
 
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
@@ -358,6 +359,14 @@ async function transcreverComGemini(
             details: { model, attempt },
           });
         }
+
+        // Registra o uso de tokens (para o painel de custos).
+        await recordUsage({
+          model,
+          op: "transcricao",
+          inputTokens: response.usageMetadata?.promptTokenCount,
+          outputTokens: response.usageMetadata?.candidatesTokenCount,
+        });
 
         break;
       } catch (error) {
