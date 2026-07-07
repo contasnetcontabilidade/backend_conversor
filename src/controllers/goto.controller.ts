@@ -102,53 +102,59 @@ export async function gotoWebhookController(req: Request, res: Response) {
     return;
   }
 
-  // Responde imediatamente (GoTo espera 2xx rapido).
-  res.sendStatus(200);
-
+  // IMPORTANTE: no Vercel (serverless) a funcao congela apos responder, entao
+  // fazemos o processamento (publicar no Ably) ANTES de enviar o 2xx. O publish
+  // e rapido (~100ms), bem dentro do tempo que o GoTo espera pelo ack.
   try {
     const body = req.body;
-    if (!isRecord(body)) return;
-
-    const type = String(body.type || body.eventType || "").toUpperCase();
-    if (type !== "ENDING") return;
-
-    const conversationSpaceId = String(
-      body.conversationSpaceId || body.conversationId || "",
-    );
-    if (!conversationSpaceId) return;
-
-    const { from, to } = extractParties(body);
-    const event: CallEndedEvent = {
-      id: String(body.id || `${conversationSpaceId}:${body.timestamp || ""}`),
-      conversationSpaceId,
-      direction: typeof body.direction === "string" ? body.direction : undefined,
-      from,
-      to,
-      endedAt:
-        typeof body.timestamp === "string"
-          ? body.timestamp
-          : new Date().toISOString(),
-      receivedAt: new Date().toISOString(),
-    };
-
-    // Roteia o evento para o ramal (usuario) da ligacao via Ably (push).
-    const ramais = extractExtensions(body);
-    if (isAblyConfigured() && ramais.length > 0) {
-      await Promise.all(
-        ramais.map((ramal) =>
-          publishCallEnded(ramal, event).catch((e) =>
-            console.error(`[goto] falha ao publicar ramal ${ramal}:`, getErrorMessage(e)),
-          ),
-        ),
+    if (isRecord(body)) {
+      const type = String(body.type || body.eventType || "").toUpperCase();
+      const conversationSpaceId = String(
+        body.conversationSpaceId || body.conversationId || "",
       );
-    } else {
-      // Fallback (sem Ably ou sem ramal): fila global consumida por polling.
-      await pushEvent(event);
+
+      if (type === "ENDING" && conversationSpaceId) {
+        const { from, to } = extractParties(body);
+        const event: CallEndedEvent = {
+          id: String(
+            body.id || `${conversationSpaceId}:${body.timestamp || ""}`,
+          ),
+          conversationSpaceId,
+          direction:
+            typeof body.direction === "string" ? body.direction : undefined,
+          from,
+          to,
+          endedAt:
+            typeof body.timestamp === "string"
+              ? body.timestamp
+              : new Date().toISOString(),
+          receivedAt: new Date().toISOString(),
+        };
+
+        // Roteia o evento para o(s) ramal(is) da ligacao via Ably (push).
+        const ramais = extractExtensions(body);
+        if (isAblyConfigured() && ramais.length > 0) {
+          await Promise.all(
+            ramais.map((ramal) =>
+              publishCallEnded(ramal, event).catch((e) =>
+                console.error(
+                  `[goto] falha ao publicar ramal ${ramal}:`,
+                  getErrorMessage(e),
+                ),
+              ),
+            ),
+          );
+        } else {
+          // Fallback (sem Ably ou sem ramal): fila global.
+          await pushEvent(event);
+        }
+      }
     }
   } catch (err) {
-    // Nunca falha o webhook por erro de processamento (ja respondeu 200).
     console.error("[goto] erro ao processar webhook:", getErrorMessage(err));
   }
+
+  res.sendStatus(200);
 }
 
 // GET /goto/ably-token?ramal=XXX — token temporario para o app assinar seu ramal.
