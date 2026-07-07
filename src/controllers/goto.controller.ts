@@ -111,26 +111,39 @@ export async function gotoWebhookController(req: Request, res: Response) {
     // Debug temporario: espelha o payload cru para inspecao do formato real.
     await publishDebug(body).catch(() => undefined);
     if (isRecord(body)) {
-      const type = String(body.type || body.eventType || "").toUpperCase();
+      // Formato real do GoTo: dados aninhados em content.{metadata,state}.
+      const content = isRecord(body.content) ? body.content : {};
+      const metadata = isRecord(content.metadata) ? content.metadata : {};
+      const state = isRecord(content.state) ? content.state : {};
+
+      const type = String(
+        state.type || body.type || body.eventType || "",
+      ).toUpperCase();
       const conversationSpaceId = String(
-        body.conversationSpaceId || body.conversationId || "",
+        metadata.conversationSpaceId ||
+          body.conversationSpaceId ||
+          body.conversationId ||
+          "",
       );
 
       if (type === "ENDING" && conversationSpaceId) {
         const { from, to } = extractParties(body);
+        const timestamp =
+          typeof state.timestamp === "string"
+            ? state.timestamp
+            : typeof body.timestamp === "string"
+              ? body.timestamp
+              : new Date().toISOString();
         const event: CallEndedEvent = {
-          id: String(
-            body.id || `${conversationSpaceId}:${body.timestamp || ""}`,
-          ),
+          id: String(state.id || body.id || `${conversationSpaceId}:${timestamp}`),
           conversationSpaceId,
           direction:
-            typeof body.direction === "string" ? body.direction : undefined,
+            typeof metadata.direction === "string"
+              ? metadata.direction
+              : undefined,
           from,
           to,
-          endedAt:
-            typeof body.timestamp === "string"
-              ? body.timestamp
-              : new Date().toISOString(),
+          endedAt: timestamp,
           receivedAt: new Date().toISOString(),
         };
 
@@ -253,20 +266,34 @@ function extractParties(body: Record<string, unknown>): {
   from?: string;
   to?: string;
 } {
-  const participants = body.participants;
-  if (!Array.isArray(participants)) return {};
-  const numbers: string[] = [];
-  for (const p of participants) {
-    if (isRecord(p)) {
-      const num =
-        (typeof p.number === "string" && p.number) ||
-        (isRecord(p.callee) && typeof p.callee.number === "string"
-          ? p.callee.number
-          : "");
-      if (num) numbers.push(num);
+  const content = isRecord(body.content) ? body.content : {};
+  const metadata = isRecord(content.metadata) ? content.metadata : {};
+
+  // Numero discado (formato real do GoTo).
+  const to =
+    typeof metadata.dialString === "string" ? metadata.dialString : undefined;
+
+  // Nome/ramal do participante interno (busca profunda por "name").
+  let from: string | undefined;
+  const visit = (node: unknown): void => {
+    if (from || !node) return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
     }
-  }
-  return { from: numbers[0], to: numbers[1] };
+    if (isRecord(node)) {
+      for (const [key, value] of Object.entries(node)) {
+        if (/^name$/i.test(key) && typeof value === "string" && value.trim()) {
+          from = value.trim();
+          return;
+        }
+        visit(value);
+      }
+    }
+  };
+  visit(body);
+
+  return { from, to };
 }
 
 function renderPage(title: string, message: string): string {
