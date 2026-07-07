@@ -7,6 +7,7 @@ import {
   transcricaoController,
 } from "../controllers/api.controller";
 import {
+  gotoAblyTokenController,
   gotoChamadoController,
   gotoEventosController,
   gotoOAuthCallbackController,
@@ -40,4 +41,5 @@ apiRouter.get("/goto/oauth/callback", asyncHandler(gotoOAuthCallbackController))
 apiRouter.post("/goto/setup/:token", asyncHandler(gotoSetupController));
 apiRouter.post("/goto/webhook/:token", asyncHandler(gotoWebhookController));
 apiRouter.get("/goto/eventos", asyncHandler(gotoEventosController));
+apiRouter.get("/goto/ably-token", asyncHandler(gotoAblyTokenController));
 apiRouter.post("/goto/chamado", asyncHandler(gotoChamadoController));

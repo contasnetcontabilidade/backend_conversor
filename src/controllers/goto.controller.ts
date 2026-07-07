@@ -14,6 +14,11 @@ import {
   setupCallEventsSubscription,
 } from "../services/gotoApi";
 import {
+  createRamalTokenRequest,
+  isAblyConfigured,
+  publishCallEnded,
+} from "../services/ably";
+import {
   CallEndedEvent,
   drainEvents,
   pushEvent,
@@ -126,11 +131,39 @@ export async function gotoWebhookController(req: Request, res: Response) {
       receivedAt: new Date().toISOString(),
     };
 
-    await pushEvent(event);
+    // Roteia o evento para o ramal (usuario) da ligacao via Ably (push).
+    const ramais = extractExtensions(body);
+    if (isAblyConfigured() && ramais.length > 0) {
+      await Promise.all(
+        ramais.map((ramal) =>
+          publishCallEnded(ramal, event).catch((e) =>
+            console.error(`[goto] falha ao publicar ramal ${ramal}:`, getErrorMessage(e)),
+          ),
+        ),
+      );
+    } else {
+      // Fallback (sem Ably ou sem ramal): fila global consumida por polling.
+      await pushEvent(event);
+    }
   } catch (err) {
     // Nunca falha o webhook por erro de processamento (ja respondeu 200).
     console.error("[goto] erro ao processar webhook:", getErrorMessage(err));
   }
+}
+
+// GET /goto/ably-token?ramal=XXX — token temporario para o app assinar seu ramal.
+export async function gotoAblyTokenController(req: Request, res: Response) {
+  const ramal =
+    typeof req.query.ramal === "string" ? req.query.ramal.trim() : "";
+  if (!ramal) {
+    throw new AppError({
+      statusCode: 400,
+      code: "RAMAL_REQUIRED",
+      message: "Informe o parametro 'ramal'.",
+    });
+  }
+  const tokenRequest = await createRamalTokenRequest(ramal);
+  res.status(200).json(tokenRequest);
 }
 
 // GET /goto/eventos — o desktop faz polling; drena eventos pendentes.
@@ -178,6 +211,23 @@ export async function gotoChamadoController(req: Request, res: Response) {
 }
 
 // ---- helpers ----
+
+// Extrai os ramais (extensionNumber dos participantes internos) da ligacao.
+function extractExtensions(body: Record<string, unknown>): string[] {
+  const participants = body.participants;
+  if (!Array.isArray(participants)) return [];
+  const exts = new Set<string>();
+  for (const p of participants) {
+    if (!isRecord(p)) continue;
+    const ext =
+      (typeof p.extensionNumber === "string" && p.extensionNumber) ||
+      (isRecord(p.type) && typeof p.type.extensionNumber === "string"
+        ? p.type.extensionNumber
+        : "");
+    if (ext) exts.add(ext);
+  }
+  return Array.from(exts);
+}
 
 function extractParties(body: Record<string, unknown>): {
   from?: string;
