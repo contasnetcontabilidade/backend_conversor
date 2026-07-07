@@ -17,6 +17,7 @@ import {
   createRamalTokenRequest,
   isAblyConfigured,
   publishCallEnded,
+  publishDebug,
 } from "../services/ably";
 import {
   CallEndedEvent,
@@ -107,6 +108,8 @@ export async function gotoWebhookController(req: Request, res: Response) {
   // e rapido (~100ms), bem dentro do tempo que o GoTo espera pelo ack.
   try {
     const body = req.body;
+    // Debug temporario: espelha o payload cru para inspecao do formato real.
+    await publishDebug(body).catch(() => undefined);
     if (isRecord(body)) {
       const type = String(body.type || body.eventType || "").toUpperCase();
       const conversationSpaceId = String(
@@ -218,20 +221,31 @@ export async function gotoChamadoController(req: Request, res: Response) {
 
 // ---- helpers ----
 
-// Extrai os ramais (extensionNumber dos participantes internos) da ligacao.
+// Extrai os ramais da ligacao. Faz busca profunda por qualquer campo
+// "extensionNumber" no payload, para ser resiliente a variacoes de formato.
 function extractExtensions(body: Record<string, unknown>): string[] {
-  const participants = body.participants;
-  if (!Array.isArray(participants)) return [];
   const exts = new Set<string>();
-  for (const p of participants) {
-    if (!isRecord(p)) continue;
-    const ext =
-      (typeof p.extensionNumber === "string" && p.extensionNumber) ||
-      (isRecord(p.type) && typeof p.type.extensionNumber === "string"
-        ? p.type.extensionNumber
-        : "");
-    if (ext) exts.add(ext);
-  }
+  const visit = (node: unknown): void => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (isRecord(node)) {
+      for (const [key, value] of Object.entries(node)) {
+        if (
+          /^extensionNumber$/i.test(key) &&
+          (typeof value === "string" || typeof value === "number") &&
+          String(value).trim()
+        ) {
+          exts.add(String(value).trim());
+        } else {
+          visit(value);
+        }
+      }
+    }
+  };
+  visit(body);
   return Array.from(exts);
 }
 
