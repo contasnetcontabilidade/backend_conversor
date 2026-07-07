@@ -71,6 +71,24 @@ export async function gotoOAuthCallbackController(req: Request, res: Response) {
     );
 }
 
+// POST /goto/setup/:token — cria o canal webhook + subscription (pos-deploy).
+// Protegido pelo mesmo token secreto do webhook.
+export async function gotoSetupController(req: Request, res: Response) {
+  const expected = process.env.GOTO_WEBHOOK_TOKEN;
+  if (!expected || req.params.token !== expected) {
+    res.sendStatus(404);
+    return;
+  }
+
+  const result = await setupCallEventsSubscription(publicWebhookUrl());
+  res.status(200).json({
+    ok: true,
+    channelId: result.channelId,
+    accountKey: result.accountKey,
+    webhookUrl: publicWebhookUrl(),
+  });
+}
+
 // POST /goto/webhook/:token — recebe eventos do GoTo. Ack rapido + enfileira.
 export async function gotoWebhookController(req: Request, res: Response) {
   const expected = process.env.GOTO_WEBHOOK_TOKEN;

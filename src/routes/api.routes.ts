@@ -11,6 +11,7 @@ import {
   gotoEventosController,
   gotoOAuthCallbackController,
   gotoOAuthStartController,
+  gotoSetupController,
   gotoWebhookController,
 } from "../controllers/goto.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
@@ -36,6 +37,7 @@ apiRouter.post(
 // --- Integracao GoTo ---
 apiRouter.get("/goto/oauth/start", asyncHandler(gotoOAuthStartController));
 apiRouter.get("/goto/oauth/callback", asyncHandler(gotoOAuthCallbackController));
+apiRouter.post("/goto/setup/:token", asyncHandler(gotoSetupController));
 apiRouter.post("/goto/webhook/:token", asyncHandler(gotoWebhookController));
 apiRouter.get("/goto/eventos", asyncHandler(gotoEventosController));
 apiRouter.post("/goto/chamado", asyncHandler(gotoChamadoController));

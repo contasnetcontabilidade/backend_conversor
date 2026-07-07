@@ -111,15 +111,29 @@ export async function exchangeCodeForTokens(
   return tokens;
 }
 
-// Gera um novo access token a partir do refresh token guardado.
+// Cache do access token em memoria (resiliente a store indisponivel).
+let memAccessToken: { token: string; expiresAt: number } | null = null;
+
+async function readStoredRefreshToken(): Promise<string | null> {
+  try {
+    const stored = await getRefreshToken();
+    if (stored) return stored;
+  } catch (error) {
+    console.warn("[goto] store de refresh indisponivel:", getErrorMessage(error));
+  }
+  // Fallback: refresh token semeado via env (super-admin ja autorizou fora do fluxo).
+  return process.env.GOTO_REFRESH_TOKEN || null;
+}
+
+// Gera um novo access token a partir do refresh token (store ou env).
 async function refreshAccessToken(): Promise<string> {
-  const refreshToken = await getRefreshToken();
+  const refreshToken = await readStoredRefreshToken();
   if (!refreshToken) {
     throw new AppError({
       statusCode: 401,
       code: "GOTO_NOT_AUTHORIZED",
       message:
-        "GoTo ainda nao autorizado. Um super-admin precisa acessar /api/goto/oauth/start.",
+        "GoTo nao autorizado. Defina GOTO_REFRESH_TOKEN ou acesse /api/goto/oauth/start.",
     });
   }
 
@@ -129,19 +143,27 @@ async function refreshAccessToken(): Promise<string> {
   });
 
   if (tokens.refresh_token && tokens.refresh_token !== refreshToken) {
-    await saveRefreshToken(tokens.refresh_token);
+    await saveRefreshToken(tokens.refresh_token).catch(() => undefined);
   }
-  await saveAccessToken(tokens.access_token, tokens.expires_in);
+  memAccessToken = {
+    token: tokens.access_token,
+    expiresAt: Date.now() + Math.max(30, tokens.expires_in - 60) * 1000,
+  };
+  await saveAccessToken(tokens.access_token, tokens.expires_in).catch(
+    () => undefined,
+  );
   return tokens.access_token;
 }
 
-// Retorna um access token valido (do cache ou renovando).
+// Retorna um access token valido (memoria -> store -> renova).
 export async function getValidAccessToken(): Promise<string> {
+  if (memAccessToken && Date.now() < memAccessToken.expiresAt) {
+    return memAccessToken.token;
+  }
   try {
     const cached = await getAccessToken();
     if (cached) return cached;
   } catch (error) {
-    // Se o cache falhar, ainda tentamos renovar.
     console.warn("[goto] cache de token indisponivel:", getErrorMessage(error));
   }
   return refreshAccessToken();

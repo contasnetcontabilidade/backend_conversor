@@ -151,15 +151,20 @@ export async function setupCallEventsSubscription(
   return { channelId, accountKey };
 }
 
-// Busca o relatorio pos-chamada por conversationSpaceId (contem a gravacao).
+// Busca o relatorio pos-chamada e localiza o item do conversationSpaceId.
+// O endpoint report-summaries filtra por janela de tempo (startTime/endTime),
+// entao consultamos as ultimas horas e casamos pelo conversationSpaceId.
 export async function getCallReport(
   conversationSpaceId: string,
 ): Promise<Record<string, unknown>> {
-  // TODO-VALIDAR: confirmar o path exato do relatorio por conversationSpaceId.
+  const accountKey = await resolveAccountKey();
+  const now = Date.now();
+  const startTime = new Date(now - 6 * 60 * 60 * 1000).toISOString();
+  const endTime = new Date(now + 5 * 60 * 1000).toISOString();
+
+  const params = new URLSearchParams({ accountKey, startTime, endTime });
   const response = await authedFetch(
-    `${API_BASE}/call-events-report/v1/report-summaries/${encodeURIComponent(
-      conversationSpaceId,
-    )}`,
+    `${API_BASE}/call-events-report/v1/report-summaries?${params.toString()}`,
   );
   const payload = await readJson(response);
   if (!response.ok || !isRecord(payload)) {
@@ -170,7 +175,26 @@ export async function getCallReport(
       details: payload,
     });
   }
-  return payload as Record<string, unknown>;
+
+  const items = (payload as Record<string, unknown>).items;
+  if (Array.isArray(items)) {
+    const match = items.find(
+      (item) =>
+        isRecord(item) &&
+        String(
+          item.conversationSpaceId ?? item.conversationId ?? item.id ?? "",
+        ) === conversationSpaceId,
+    );
+    if (isRecord(match)) return match as Record<string, unknown>;
+  }
+
+  // Sem correspondencia ainda (relatorio pode demorar a ficar pronto).
+  throw new AppError({
+    statusCode: 404,
+    code: "REPORT_NOT_READY",
+    message:
+      "Relatorio da chamada ainda nao disponivel. Tente novamente em instantes.",
+  });
 }
 
 // Extrai a URL da gravacao do relatorio (procura em campos "recording").

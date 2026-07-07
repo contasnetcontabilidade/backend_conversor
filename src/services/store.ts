@@ -1,75 +1,8 @@
 import { Redis } from "@upstash/redis";
-import { AppError } from "../lib/errors";
 
-// Storage para a integracao GoTo (Vercel e stateless): guarda o refresh token,
-// o access token (com TTL), o channelId do webhook e a fila de eventos que o
-// app desktop consome por polling. Backend: Upstash Redis (Vercel KV).
-
-let client: Redis | null = null;
-
-function getRedis(): Redis {
-  if (client) return client;
-
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-  if (!url || !token) {
-    throw new AppError({
-      statusCode: 503,
-      code: "STORE_NOT_CONFIGURED",
-      message:
-        "Storage nao configurado. Defina UPSTASH_REDIS_REST_URL e UPSTASH_REDIS_REST_TOKEN.",
-    });
-  }
-
-  client = new Redis({ url, token });
-  return client;
-}
-
-const KEY = {
-  refreshToken: "goto:refresh_token",
-  accessToken: "goto:access_token",
-  channelId: "goto:channel_id",
-  accountKey: "goto:account_key",
-  events: "goto:events",
-};
-
-export async function saveRefreshToken(refreshToken: string): Promise<void> {
-  await getRedis().set(KEY.refreshToken, refreshToken);
-}
-
-export async function getRefreshToken(): Promise<string | null> {
-  return getRedis().get<string>(KEY.refreshToken);
-}
-
-export async function saveAccessToken(
-  accessToken: string,
-  ttlSeconds: number,
-): Promise<void> {
-  // Renova um pouco antes do vencimento real para evitar corrida na expiracao.
-  const safeTtl = Math.max(30, ttlSeconds - 60);
-  await getRedis().set(KEY.accessToken, accessToken, { ex: safeTtl });
-}
-
-export async function getAccessToken(): Promise<string | null> {
-  return getRedis().get<string>(KEY.accessToken);
-}
-
-export async function saveChannelId(channelId: string): Promise<void> {
-  await getRedis().set(KEY.channelId, channelId);
-}
-
-export async function getChannelId(): Promise<string | null> {
-  return getRedis().get<string>(KEY.channelId);
-}
-
-export async function saveAccountKey(accountKey: string): Promise<void> {
-  await getRedis().set(KEY.accountKey, accountKey);
-}
-
-export async function getAccountKey(): Promise<string | null> {
-  return getRedis().get<string>(KEY.accountKey);
-}
+// Storage para a integracao GoTo. Em producao (Vercel, stateless) usa Upstash
+// Redis (Vercel KV). Se as vars do Upstash nao estiverem definidas, cai para um
+// storage EM MEMORIA (util em dev local; NAO persiste entre invocacoes serverless).
 
 export interface CallEndedEvent {
   id: string;
@@ -81,30 +14,121 @@ export interface CallEndedEvent {
   receivedAt: string;
 }
 
-export async function pushEvent(event: CallEndedEvent): Promise<void> {
-  // Mantem a fila enxuta (ultimos 50 eventos).
-  const redis = getRedis();
-  await redis.lpush(KEY.events, JSON.stringify(event));
-  await redis.ltrim(KEY.events, 0, 49);
+const KEY = {
+  refreshToken: "goto:refresh_token",
+  accessToken: "goto:access_token",
+  channelId: "goto:channel_id",
+  accountKey: "goto:account_key",
+  events: "goto:events",
+};
+
+let redis: Redis | null = null;
+function getRedis(): Redis | null {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  if (!redis) redis = new Redis({ url, token });
+  return redis;
 }
 
-// Drena (le e remove) todos os eventos pendentes, mais antigos primeiro.
+// ---- Fallback em memoria ----
+const mem = new Map<string, string>();
+let memEvents: CallEndedEvent[] = [];
+const memExpiry = new Map<string, number>();
+
+function memGet(key: string): string | null {
+  const exp = memExpiry.get(key);
+  if (exp && Date.now() > exp) {
+    mem.delete(key);
+    memExpiry.delete(key);
+    return null;
+  }
+  return mem.get(key) ?? null;
+}
+
+export function isPersistentStore(): boolean {
+  return getRedis() !== null;
+}
+
+async function setValue(key: string, value: string, ttlSeconds?: number) {
+  const r = getRedis();
+  if (r) {
+    if (ttlSeconds) await r.set(key, value, { ex: ttlSeconds });
+    else await r.set(key, value);
+    return;
+  }
+  mem.set(key, value);
+  if (ttlSeconds) memExpiry.set(key, Date.now() + ttlSeconds * 1000);
+  else memExpiry.delete(key);
+}
+
+async function getValue(key: string): Promise<string | null> {
+  const r = getRedis();
+  if (r) return r.get<string>(key);
+  return memGet(key);
+}
+
+export async function saveRefreshToken(t: string) {
+  await setValue(KEY.refreshToken, t);
+}
+export async function getRefreshToken() {
+  return getValue(KEY.refreshToken);
+}
+
+export async function saveAccessToken(t: string, ttlSeconds: number) {
+  await setValue(KEY.accessToken, t, Math.max(30, ttlSeconds - 60));
+}
+export async function getAccessToken() {
+  return getValue(KEY.accessToken);
+}
+
+export async function saveChannelId(id: string) {
+  await setValue(KEY.channelId, id);
+}
+export async function getChannelId() {
+  return getValue(KEY.channelId);
+}
+
+export async function saveAccountKey(k: string) {
+  await setValue(KEY.accountKey, k);
+}
+export async function getAccountKey() {
+  return getValue(KEY.accountKey);
+}
+
+export async function pushEvent(event: CallEndedEvent): Promise<void> {
+  const r = getRedis();
+  if (r) {
+    await r.lpush(KEY.events, JSON.stringify(event));
+    await r.ltrim(KEY.events, 0, 49);
+    return;
+  }
+  memEvents.unshift(event);
+  memEvents = memEvents.slice(0, 50);
+}
+
+// Drena (le e remove) os eventos pendentes, mais antigos primeiro.
 export async function drainEvents(): Promise<CallEndedEvent[]> {
-  const redis = getRedis();
-  const raw = await redis.lrange<string>(KEY.events, 0, -1);
-  if (!raw || raw.length === 0) return [];
-  await redis.del(KEY.events);
+  const r = getRedis();
+  if (r) {
+    const raw = await r.lrange<string>(KEY.events, 0, -1);
+    if (!raw || raw.length === 0) return [];
+    await r.del(KEY.events);
+    const parsed = raw
+      .map((item) => {
+        try {
+          return typeof item === "string"
+            ? (JSON.parse(item) as CallEndedEvent)
+            : (item as CallEndedEvent);
+        } catch {
+          return null;
+        }
+      })
+      .filter((e): e is CallEndedEvent => e !== null);
+    return parsed.reverse();
+  }
 
-  const parsed = raw
-    .map((item) => {
-      try {
-        return typeof item === "string" ? (JSON.parse(item) as CallEndedEvent) : (item as CallEndedEvent);
-      } catch {
-        return null;
-      }
-    })
-    .filter((e): e is CallEndedEvent => e !== null);
-
-  // lpush coloca o mais novo no inicio; devolve em ordem cronologica.
-  return parsed.reverse();
+  const drained = memEvents.slice().reverse();
+  memEvents = [];
+  return drained;
 }
