@@ -19,11 +19,7 @@ import {
   publishCallEnded,
   publishDebug,
 } from "../services/ably";
-import {
-  CallEndedEvent,
-  drainEvents,
-  pushEvent,
-} from "../services/store";
+import { CallEndedEvent, drainEvents } from "../services/store";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
 
 function publicWebhookUrl(): string {
@@ -147,8 +143,20 @@ export async function gotoWebhookController(req: Request, res: Response) {
           receivedAt: new Date().toISOString(),
         };
 
-        // Roteia o evento para o(s) ramal(is) da ligacao via Ably (push).
-        const ramais = extractExtensions(body);
+        // Decide quem recebe o popup:
+        //  - so notifica chamada que envolve numero EXTERNO (cliente);
+        //  - roteia para quem ATENDEU (participante LINE com gravacao);
+        //  - ligacao puramente interna -> nao notifica.
+        // Usa o relatorio completo (evento de ENTRADA nao traz quem atendeu).
+        let ramais: string[] = [];
+        const report = await getReportComRetry(conversationSpaceId);
+        if (report) {
+          ramais = ramaisParaNotificar(report);
+        } else if (eventEnvolveExterno(body)) {
+          // Fallback (relatorio indisponivel): usa o evento (cobre saida).
+          ramais = extractExtensions(body);
+        }
+
         if (isAblyConfigured() && ramais.length > 0) {
           await Promise.all(
             ramais.map((ramal) =>
@@ -160,10 +168,8 @@ export async function gotoWebhookController(req: Request, res: Response) {
               ),
             ),
           );
-        } else {
-          // Fallback (sem Ably ou sem ramal): fila global.
-          await pushEvent(event);
         }
+        // ramais vazio (interna / sem atendimento) -> nao notifica ninguem.
       }
     }
   } catch (err) {
@@ -233,6 +239,66 @@ export async function gotoChamadoController(req: Request, res: Response) {
 }
 
 // ---- helpers ----
+
+// Busca o relatorio completo, com 1 retry curto (pode nao estar pronto no ENDING).
+async function getReportComRetry(
+  conversationSpaceId: string,
+): Promise<Record<string, unknown> | null> {
+  for (let tentativa = 0; tentativa < 2; tentativa++) {
+    try {
+      return await getCallReport(conversationSpaceId);
+    } catch (error) {
+      const notReady =
+        error instanceof AppError && error.code === "REPORT_NOT_READY";
+      if (notReady && tentativa === 0) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+// Verdadeiro se algum participante do EVENTO e numero externo (PHONE_NUMBER).
+function eventEnvolveExterno(body: Record<string, unknown>): boolean {
+  const content = isRecord(body.content) ? body.content : {};
+  const state = isRecord(content.state) ? content.state : {};
+  const participants = state.participants;
+  if (!Array.isArray(participants)) return false;
+  return participants.some(
+    (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
+  );
+}
+
+// Regra de notificacao a partir do relatorio completo:
+//  - so notifica se houver participante EXTERNO (cliente);
+//  - retorna os ramais LINE que ATENDERAM (recordings[] preenchido).
+function ramaisParaNotificar(report: Record<string, unknown>): string[] {
+  const participants = report.participants;
+  if (!Array.isArray(participants)) return [];
+
+  const temExterno = participants.some(
+    (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
+  );
+  if (!temExterno) return []; // ligacao puramente interna -> nao notifica
+
+  const ramais = new Set<string>();
+  for (const p of participants) {
+    if (
+      isRecord(p) &&
+      isRecord(p.type) &&
+      p.type.value === "LINE" &&
+      typeof p.type.extensionNumber === "string" &&
+      p.type.extensionNumber &&
+      Array.isArray(p.recordings) &&
+      p.recordings.length > 0
+    ) {
+      ramais.add(p.type.extensionNumber);
+    }
+  }
+  return Array.from(ramais);
+}
 
 // Extrai os ramais da ligacao. Faz busca profunda por qualquer campo
 // "extensionNumber" no payload, para ser resiliente a variacoes de formato.
