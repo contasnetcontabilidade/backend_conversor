@@ -151,22 +151,26 @@ export async function setupCallEventsSubscription(
   return { channelId, accountKey };
 }
 
-// Busca o relatorio pos-chamada e localiza o item do conversationSpaceId.
-// O endpoint report-summaries filtra por janela de tempo (startTime/endTime),
-// entao consultamos as ultimas horas e casamos pelo conversationSpaceId.
+// Busca o relatorio COMPLETO da chamada por conversationSpaceId.
+// Esse relatorio traz participants[].recordings[].id (o recordingId).
 export async function getCallReport(
   conversationSpaceId: string,
 ): Promise<Record<string, unknown>> {
-  const accountKey = await resolveAccountKey();
-  const now = Date.now();
-  const startTime = new Date(now - 6 * 60 * 60 * 1000).toISOString();
-  const endTime = new Date(now + 5 * 60 * 1000).toISOString();
-
-  const params = new URLSearchParams({ accountKey, startTime, endTime });
   const response = await authedFetch(
-    `${API_BASE}/call-events-report/v1/report-summaries?${params.toString()}`,
+    `${API_BASE}/call-events-report/v1/reports/${encodeURIComponent(
+      conversationSpaceId,
+    )}`,
   );
   const payload = await readJson(response);
+
+  if (response.status === 404) {
+    throw new AppError({
+      statusCode: 404,
+      code: "REPORT_NOT_READY",
+      message:
+        "Relatorio da chamada ainda nao disponivel. Tente novamente em instantes.",
+    });
+  }
   if (!response.ok || !isRecord(payload)) {
     throw new AppError({
       statusCode: 502,
@@ -175,80 +179,65 @@ export async function getCallReport(
       details: payload,
     });
   }
-
-  const items = (payload as Record<string, unknown>).items;
-  if (Array.isArray(items)) {
-    const match = items.find(
-      (item) =>
-        isRecord(item) &&
-        String(
-          item.conversationSpaceId ?? item.conversationId ?? item.id ?? "",
-        ) === conversationSpaceId,
-    );
-    if (isRecord(match)) return match as Record<string, unknown>;
-  }
-
-  // Sem correspondencia ainda (relatorio pode demorar a ficar pronto).
-  throw new AppError({
-    statusCode: 404,
-    code: "REPORT_NOT_READY",
-    message:
-      "Relatorio da chamada ainda nao disponivel. Tente novamente em instantes.",
-  });
+  return payload as Record<string, unknown>;
 }
 
-// Extrai a URL da gravacao do relatorio (procura em campos "recording").
-export function extractRecordingUrl(
+// Extrai o recordingId do relatorio (participants[].recordings[].id).
+export function extractRecordingId(
   report: Record<string, unknown>,
 ): string | null {
-  const found: string[] = [];
-  const visit = (node: unknown): void => {
-    if (!node) return;
-    if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
-    }
-    if (isRecord(node)) {
-      for (const [key, value] of Object.entries(node)) {
-        if (
-          /recording/i.test(key) &&
-          typeof value === "string" &&
-          /^https?:\/\//.test(value)
-        ) {
-          found.push(value);
-        } else if (
-          typeof value === "string" &&
-          /^https?:\/\//.test(value) &&
-          /recording|\.wav|\.mp3/i.test(value)
-        ) {
-          found.push(value);
-        } else {
-          visit(value);
+  const participants = report.participants;
+  if (!Array.isArray(participants)) return null;
+  for (const p of participants) {
+    if (isRecord(p) && Array.isArray(p.recordings)) {
+      for (const rec of p.recordings) {
+        if (isRecord(rec) && typeof rec.id === "string" && rec.id) {
+          return rec.id;
         }
       }
     }
-  };
-  visit(report);
-  return found[0] ?? null;
+  }
+  return null;
 }
 
-// Baixa a gravacao para um arquivo temporario e devolve o caminho local.
-export async function downloadRecording(recordingUrl: string): Promise<string> {
-  const sameHostAsApi = (() => {
-    try {
-      return new URL(recordingUrl).host === new URL(API_BASE).host;
-    } catch {
-      return false;
-    }
-  })();
+// Baixa a gravacao (fluxo em 2 passos, com o token no PATH):
+//  1) GET .../recordings/{id}/content        -> { token, status }
+//  2) GET .../recordings/{id}/content/{token} -> bytes do audio (MP3)
+export async function downloadRecording(recordingId: string): Promise<string> {
+  // 1) token de acesso a gravacao
+  const tokenRes = await authedFetch(
+    `${API_BASE}/recording/v1/recordings/${encodeURIComponent(
+      recordingId,
+    )}/content`,
+  );
+  const tokenPayload = await readJson(tokenRes);
+  if (!tokenRes.ok || !isRecord(tokenPayload)) {
+    throw new AppError({
+      statusCode: 502,
+      code: "GOTO_RECORDING_TOKEN_ERROR",
+      message: `Falha ao obter token da gravacao (HTTP ${tokenRes.status}).`,
+      details: tokenPayload,
+    });
+  }
+  const status = String((tokenPayload as Record<string, unknown>).status || "");
+  const tokenObj = (tokenPayload as Record<string, unknown>).token;
+  const token = isRecord(tokenObj) ? String(tokenObj.token || "") : "";
+  if (!token || status !== "UPLOADED") {
+    throw new AppError({
+      statusCode: 404,
+      code: "RECORDING_NOT_READY",
+      message: `Gravacao ainda nao disponivel (status ${status || "?"}).`,
+    });
+  }
 
-  const init: RequestInit = {};
-  let response: Response;
+  // 2) baixa o audio (token no path)
+  let mediaRes: Response;
   try {
-    // URLs assinadas (S3) nao devem receber Authorization; so a API GoTo recebe.
-    response = sameHostAsApi
-      ? await authedFetch(recordingUrl, init)
-      : await fetch(recordingUrl, init);
+    mediaRes = await authedFetch(
+      `${API_BASE}/recording/v1/recordings/${encodeURIComponent(
+        recordingId,
+      )}/content/${encodeURIComponent(token)}`,
+    );
   } catch (error) {
     throw new AppError({
       statusCode: 502,
@@ -256,27 +245,19 @@ export async function downloadRecording(recordingUrl: string): Promise<string> {
       message: `Falha ao baixar a gravacao: ${getErrorMessage(error)}`,
     });
   }
-
-  if (!response.ok) {
+  if (!mediaRes.ok) {
     throw new AppError({
       statusCode: 502,
       code: "GOTO_RECORDING_DOWNLOAD_ERROR",
-      message: `Falha ao baixar a gravacao (HTTP ${response.status}).`,
+      message: `Falha ao baixar a gravacao (HTTP ${mediaRes.status}).`,
     });
   }
 
-  const contentType = response.headers.get("content-type") || "";
-  const ext = /mpeg|mp3/i.test(contentType)
-    ? ".mp3"
-    : /wav/i.test(contentType) || /\.wav/i.test(recordingUrl)
-      ? ".wav"
-      : ".mp3";
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const filePath = path.join(
-    os.tmpdir(),
-    `goto-recording-${Date.now()}${ext}`,
-  );
+  const contentType = mediaRes.headers.get("content-type") || "";
+  // Formato padrao das gravacoes GoTo e MP3 (o content-type vem octet-stream).
+  const ext = /wav/i.test(contentType) ? ".wav" : ".mp3";
+  const buffer = Buffer.from(await mediaRes.arrayBuffer());
+  const filePath = path.join(os.tmpdir(), `goto-recording-${Date.now()}${ext}`);
   await fs.promises.writeFile(filePath, buffer);
   return filePath;
 }

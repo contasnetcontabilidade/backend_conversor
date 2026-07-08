@@ -9,7 +9,7 @@ import {
 } from "../services/gotoAuth";
 import {
   downloadRecording,
-  extractRecordingUrl,
+  extractRecordingId,
   getCallReport,
   setupCallEventsSubscription,
 } from "../services/gotoApi";
@@ -209,8 +209,8 @@ export async function gotoChamadoController(req: Request, res: Response) {
   const geminiModel = getOptionalString(body, "geminiModel");
 
   const report = await getCallReport(conversationSpaceId);
-  const recordingUrl = extractRecordingUrl(report);
-  if (!recordingUrl) {
+  const recordingId = extractRecordingId(report);
+  if (!recordingId) {
     throw new AppError({
       statusCode: 404,
       code: "RECORDING_NOT_FOUND",
@@ -219,7 +219,7 @@ export async function gotoChamadoController(req: Request, res: Response) {
     });
   }
 
-  const audioPath = await downloadRecording(recordingUrl);
+  const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({ audioPath });
   const resumo = await gerarResumoGemini({
     srtPath: transcricao.srtPath,
