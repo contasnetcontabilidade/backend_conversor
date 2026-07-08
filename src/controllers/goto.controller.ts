@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { Request, Response } from "express";
+import { waitUntil } from "@vercel/functions";
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { gerarResumoGemini } from "../services/gemini";
 import { transcreverAudio } from "../services/transcricao";
@@ -99,84 +100,92 @@ export async function gotoWebhookController(req: Request, res: Response) {
     return;
   }
 
-  // IMPORTANTE: no Vercel (serverless) a funcao congela apos responder, entao
-  // fazemos o processamento (publicar no Ably) ANTES de enviar o 2xx. O publish
-  // e rapido (~100ms), bem dentro do tempo que o GoTo espera pelo ack.
+  const body = req.body;
+  // Debug temporario: espelha o payload cru para inspecao do formato real.
+  publishDebug(body).catch(() => undefined);
+
+  // Responde imediatamente. O roteamento roda em SEGUNDO PLANO (waitUntil):
+  // o relatorio de ENTRADA nao fica pronto no instante do ENDING, entao
+  // esperamos ele sem travar o ack do webhook.
+  res.sendStatus(200);
+
+  if (!isRecord(body)) return;
+  const content = isRecord(body.content) ? body.content : {};
+  const metadata = isRecord(content.metadata) ? content.metadata : {};
+  const state = isRecord(content.state) ? content.state : {};
+
+  const type = String(
+    state.type || body.type || body.eventType || "",
+  ).toUpperCase();
+  const conversationSpaceId = String(
+    metadata.conversationSpaceId ||
+      body.conversationSpaceId ||
+      body.conversationId ||
+      "",
+  );
+  if (type !== "ENDING" || !conversationSpaceId) return;
+
+  const timestamp =
+    typeof state.timestamp === "string"
+      ? state.timestamp
+      : typeof body.timestamp === "string"
+        ? body.timestamp
+        : new Date().toISOString();
+  const { from, to } = extractParties(body);
+  const event: CallEndedEvent = {
+    id: String(state.id || body.id || `${conversationSpaceId}:${timestamp}`),
+    conversationSpaceId,
+    direction:
+      typeof metadata.direction === "string" ? metadata.direction : undefined,
+    from,
+    to,
+    endedAt: timestamp,
+    receivedAt: new Date().toISOString(),
+  };
+
+  const routing = routeCallEnded(conversationSpaceId, event, body);
   try {
-    const body = req.body;
-    // Debug temporario: espelha o payload cru para inspecao do formato real.
-    await publishDebug(body).catch(() => undefined);
-    if (isRecord(body)) {
-      // Formato real do GoTo: dados aninhados em content.{metadata,state}.
-      const content = isRecord(body.content) ? body.content : {};
-      const metadata = isRecord(content.metadata) ? content.metadata : {};
-      const state = isRecord(content.state) ? content.state : {};
+    waitUntil(routing);
+  } catch {
+    // waitUntil indisponivel neste contexto -> roteamento roda best-effort.
+  }
+}
 
-      const type = String(
-        state.type || body.type || body.eventType || "",
-      ).toUpperCase();
-      const conversationSpaceId = String(
-        metadata.conversationSpaceId ||
-          body.conversationSpaceId ||
-          body.conversationId ||
-          "",
-      );
+// Roteia o popup em segundo plano: espera o relatorio ficar pronto e notifica
+// quem ATENDEU (chamada externa). Ligacao interna / sem atendimento -> nada.
+async function routeCallEnded(
+  conversationSpaceId: string,
+  event: CallEndedEvent,
+  body: Record<string, unknown>,
+): Promise<void> {
+  try {
+    let ramais: string[] = [];
+    const report = await getReportComRetry(conversationSpaceId);
+    if (report) {
+      ramais = ramaisParaNotificar(report);
+    } else if (eventEnvolveExterno(body)) {
+      // Fallback (relatorio nunca ficou pronto): usa o evento (cobre saida).
+      ramais = extractExtensions(body);
+    }
 
-      if (type === "ENDING" && conversationSpaceId) {
-        const { from, to } = extractParties(body);
-        const timestamp =
-          typeof state.timestamp === "string"
-            ? state.timestamp
-            : typeof body.timestamp === "string"
-              ? body.timestamp
-              : new Date().toISOString();
-        const event: CallEndedEvent = {
-          id: String(state.id || body.id || `${conversationSpaceId}:${timestamp}`),
-          conversationSpaceId,
-          direction:
-            typeof metadata.direction === "string"
-              ? metadata.direction
-              : undefined,
-          from,
-          to,
-          endedAt: timestamp,
-          receivedAt: new Date().toISOString(),
-        };
-
-        // Decide quem recebe o popup:
-        //  - so notifica chamada que envolve numero EXTERNO (cliente);
-        //  - roteia para quem ATENDEU (participante LINE com gravacao);
-        //  - ligacao puramente interna -> nao notifica.
-        // Usa o relatorio completo (evento de ENTRADA nao traz quem atendeu).
-        let ramais: string[] = [];
-        const report = await getReportComRetry(conversationSpaceId);
-        if (report) {
-          ramais = ramaisParaNotificar(report);
-        } else if (eventEnvolveExterno(body)) {
-          // Fallback (relatorio indisponivel): usa o evento (cobre saida).
-          ramais = extractExtensions(body);
-        }
-
-        if (isAblyConfigured() && ramais.length > 0) {
-          await Promise.all(
-            ramais.map((ramal) =>
-              publishCallEnded(ramal, event).catch((e) =>
-                console.error(
-                  `[goto] falha ao publicar ramal ${ramal}:`,
-                  getErrorMessage(e),
-                ),
-              ),
+    if (isAblyConfigured() && ramais.length > 0) {
+      await Promise.all(
+        ramais.map((ramal) =>
+          publishCallEnded(ramal, event).catch((e) =>
+            console.error(
+              `[goto] falha ao publicar ramal ${ramal}:`,
+              getErrorMessage(e),
             ),
-          );
-        }
-        // ramais vazio (interna / sem atendimento) -> nao notifica ninguem.
-      }
+          ),
+        ),
+      );
     }
   } catch (err) {
-    console.error("[goto] erro ao processar webhook:", getErrorMessage(err));
+    console.error(
+      "[goto] erro no roteamento da chamada:",
+      getErrorMessage(err),
+    );
   }
-
-  res.sendStatus(200);
 }
 
 // GET /goto/ably-token?ramal=XXX — token temporario para o app assinar seu ramal.
@@ -240,18 +249,19 @@ export async function gotoChamadoController(req: Request, res: Response) {
 
 // ---- helpers ----
 
-// Busca o relatorio completo, com 1 retry curto (pode nao estar pronto no ENDING).
+// Busca o relatorio completo, esperando ele ficar pronto (roda em segundo
+// plano, entao pode ser paciente: ~30 tentativas x 3s = ate ~90s).
 async function getReportComRetry(
   conversationSpaceId: string,
 ): Promise<Record<string, unknown> | null> {
-  for (let tentativa = 0; tentativa < 2; tentativa++) {
+  for (let tentativa = 0; tentativa < 30; tentativa++) {
     try {
       return await getCallReport(conversationSpaceId);
     } catch (error) {
       const notReady =
         error instanceof AppError && error.code === "REPORT_NOT_READY";
-      if (notReady && tentativa === 0) {
-        await new Promise((r) => setTimeout(r, 1500));
+      if (notReady && tentativa < 29) {
+        await new Promise((r) => setTimeout(r, 3000));
         continue;
       }
       return null;
