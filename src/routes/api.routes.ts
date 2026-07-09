@@ -22,7 +22,11 @@ import {
 import {
   suiteClientesController,
   suiteCriarController,
+  suiteOrigensController,
   suitePreviewController,
+  suiteSetoresController,
+  suiteTiposController,
+  suiteUsuariosController,
 } from "../controllers/suite360.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { asyncHandler } from "../utils/http";
@@ -57,6 +61,10 @@ apiRouter.post("/goto/chamado", asyncHandler(gotoChamadoController));
 apiRouter.post("/goto/chamado/preview", asyncHandler(suitePreviewController));
 apiRouter.post("/goto/chamado/criar", asyncHandler(suiteCriarController));
 apiRouter.get("/suite360/clientes", asyncHandler(suiteClientesController));
+apiRouter.get("/suite360/tipos", asyncHandler(suiteTiposController));
+apiRouter.get("/suite360/setores", asyncHandler(suiteSetoresController));
+apiRouter.get("/suite360/origens", asyncHandler(suiteOrigensController));
+apiRouter.get("/suite360/usuarios", asyncHandler(suiteUsuariosController));
 
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);

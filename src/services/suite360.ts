@@ -376,6 +376,142 @@ export async function buscarClientes(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Listas para os dropdowns do modal (proxy — chave fica no backend)
+// ---------------------------------------------------------------------------
+
+export interface ItemLista {
+  id: string;
+  nome: string;
+  extra?: string;
+}
+
+function norm(s: string | undefined): string {
+  return (s || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+export async function buscarTipos(q?: string): Promise<ItemLista[]> {
+  const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
+  const data = await suiteGet(`/tipos-chamado?ativo=1${query}`);
+  return asList(data).map((t) => ({
+    id: pickId(t) || "",
+    nome: pickStr(t, ["nome", "name", "descricao"]) || "",
+    extra: isRecord(t.categoria)
+      ? pickStr(t.categoria, ["nome", "descricao"])
+      : undefined,
+  }));
+}
+
+export async function buscarSetores(): Promise<ItemLista[]> {
+  const data = await suiteGet("/setores");
+  return asList(data).map((s) => ({
+    id: pickId(s) || "",
+    nome: pickStr(s, ["descricao", "nome", "name"]) || "",
+  }));
+}
+
+export async function buscarOrigens(): Promise<ItemLista[]> {
+  const data = await suiteGet("/origens-chamado");
+  return asList(data).map((o) => ({
+    id: pickId(o) || "",
+    nome: pickStr(o, ["descricao", "nome", "name"]) || "",
+  }));
+}
+
+export async function buscarUsuarios(q?: string): Promise<ItemLista[]> {
+  const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
+  const data = await suiteGet(`/usuarios?ativo=1${query}`);
+  return asList(data).map((u) => ({
+    id: pickId(u) || "",
+    nome: pickStr(u, ["nome", "name"]) || "",
+    extra: pickStr(u, ["email", "funcao"]),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Resolucao automatica para o preview (a partir da chamada + sugestao da IA)
+// ---------------------------------------------------------------------------
+
+// Executor = usuario do Suite cujo nome bate com o atendente do GoTo.
+export async function resolverExecutorPorNome(
+  nome: string | undefined,
+): Promise<RefResolvida> {
+  const alvo = norm(nome);
+  if (!alvo) return { fonte: "ausente" };
+  try {
+    const data = await suiteGet(
+      `/usuarios?ativo=1&q=${encodeURIComponent(nome || "")}`,
+    );
+    const lista = asList(data);
+    const nomeDe = (u: Record<string, unknown>) =>
+      norm(pickStr(u, ["nome", "name"]));
+    let u =
+      lista.find((x) => nomeDe(x) === alvo) ||
+      lista.find((x) => nomeDe(x).includes(alvo) || alvo.includes(nomeDe(x)));
+    if (!u) return { fonte: "ausente" };
+    return {
+      id: pickId(u),
+      nome: pickStr(u, ["nome", "name"]),
+      fonte: "lookup",
+    };
+  } catch {
+    return { fonte: "ausente" };
+  }
+}
+
+// Setor = setor cadastrado cujo nome bate com o sugerido pela IA.
+export async function resolverSetorPorNome(
+  nomeIA: string | undefined,
+): Promise<RefResolvida> {
+  const alvo = norm(nomeIA);
+  if (!alvo) return { fonte: "ausente" };
+  try {
+    const setores = await buscarSetores();
+    let s =
+      setores.find((x) => norm(x.nome) === alvo) ||
+      setores.find(
+        (x) => norm(x.nome).includes(alvo) || alvo.includes(norm(x.nome)),
+      );
+    if (!s) return { fonte: "ausente" };
+    return { id: s.id, nome: s.nome, fonte: "lookup" };
+  } catch {
+    return { fonte: "ausente" };
+  }
+}
+
+// Assunto/tipo = melhor tipo de chamado para o texto sugerido pela IA
+// (maior sobreposicao de palavras).
+export async function resolverAssuntoPorTexto(
+  texto: string | undefined,
+): Promise<RefResolvida> {
+  const t = norm(texto);
+  if (!t) return { fonte: "ausente" };
+  try {
+    const lista = await buscarTipos(texto);
+    if (!lista.length) return { fonte: "ausente" };
+    const palavras = t.split(/\s+/).filter((w) => w.length > 2);
+    let melhor = lista[0];
+    let melhorScore = -1;
+    for (const item of lista) {
+      const n = norm(item.nome);
+      const score = palavras.reduce((acc, w) => acc + (n.includes(w) ? 1 : 0), 0);
+      if (score > melhorScore) {
+        melhorScore = score;
+        melhor = item;
+      }
+    }
+    // Sem nenhuma palavra em comum -> nao arrisca; deixa manual.
+    if (melhorScore <= 0) return { fonte: "ausente" };
+    return { id: melhor.id, nome: melhor.nome, fonte: "lookup" };
+  } catch {
+    return { fonte: "ausente" };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Resolucao de tipo / origem / setor / executor (env -> lookup)
 // ---------------------------------------------------------------------------
 

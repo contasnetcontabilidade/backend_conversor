@@ -12,14 +12,18 @@ import {
 import { marcarChamadoAberto } from "../services/store";
 import {
   buscarClientes,
+  buscarOrigens,
+  buscarSetores,
+  buscarTipos,
+  buscarUsuarios,
   criarChamado,
   isDryRun,
   montarDescricao,
+  resolverAssuntoPorTexto,
   resolverClientePorTelefone,
-  resolverExecutor,
+  resolverExecutorPorNome,
   resolverOrigem,
-  resolverSetor,
-  resolverTipoApontamento,
+  resolverSetorPorNome,
   validarChamadoBody,
   type ChamadoBody,
 } from "../services/suite360";
@@ -188,9 +192,13 @@ export async function suitePreviewController(req: Request, res: Response) {
 
   const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({ audioPath });
+
+  // Busca os setores cadastrados para a IA classificar a demanda.
+  const setoresLista = await buscarSetores().catch(() => []);
   const { resumo } = await gerarResumoGemini({
     srtPath: transcricao.srtPath,
     model: geminiModel,
+    setoresDisponiveis: setoresLista.map((s) => s.nome),
   });
 
   // Resolve cliente pelo telefone (agenda WhatsApp) — so faz sentido em externo.
@@ -200,12 +208,28 @@ export async function suitePreviewController(req: Request, res: Response) {
       ? await resolverClientePorTelefone(numeroExterno)
       : ({ status: "nao_encontrado" } as const);
 
-  // Resolve tipo/origem/setor/executor (env -> lookup), em paralelo.
+  // Resolve as referencias do chamado. Prioridade: variavel de ambiente fixa;
+  // senao usa a sugestao da IA / o atendente do GoTo.
+  //  - Assunto (tipo): env OU melhor tipo para o assunto sugerido pela IA.
+  //  - Origem: "Ligacao" (via resolverOrigem).
+  //  - Setor: env OU setor classificado pela IA.
+  //  - Executor: env OU usuario do Suite com o nome do atendente do GoTo.
+  const tipoEnv = (process.env.SUITE360_TIPO_APONTAMENTO_ID || "").trim();
+  const setorEnv = (process.env.SUITE360_SETOR_ID || "").trim();
+  const execEnv = (process.env.SUITE360_EXECUTOR_ID || "").trim();
+  const atendenteNome =
+    analise?.answerers?.[0]?.nome || analise?.caller?.nome || "";
   const [tipo, origem, setor, executor] = await Promise.all([
-    resolverTipoApontamento(),
+    tipoEnv
+      ? Promise.resolve({ id: tipoEnv, fonte: "env" as const })
+      : resolverAssuntoPorTexto(resumo.assunto_sugerido),
     resolverOrigem(),
-    resolverSetor(),
-    resolverExecutor(),
+    setorEnv
+      ? Promise.resolve({ id: setorEnv, fonte: "env" as const })
+      : resolverSetorPorNome(resumo.setor_sugerido),
+    execEnv
+      ? Promise.resolve({ id: execEnv, fonte: "env" as const })
+      : resolverExecutorPorNome(atendenteNome),
   ]);
 
   const clienteEncontrado =
@@ -389,4 +413,33 @@ export async function suiteClientesController(req: Request, res: Response) {
       details: { cause: getErrorMessage(error) },
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Proxies das listas dos dropdowns do modal (chave fica no backend).
+// GET /suite360/tipos?q=  /setores  /origens  /usuarios?q=
+// ---------------------------------------------------------------------------
+
+function queryQ(req: Request): string {
+  return typeof req.query.q === "string" ? req.query.q.trim() : "";
+}
+
+export async function suiteTiposController(req: Request, res: Response) {
+  const itens = await buscarTipos(queryQ(req));
+  res.status(200).json({ ok: true, data: { itens } });
+}
+
+export async function suiteSetoresController(_req: Request, res: Response) {
+  const itens = await buscarSetores();
+  res.status(200).json({ ok: true, data: { itens } });
+}
+
+export async function suiteOrigensController(_req: Request, res: Response) {
+  const itens = await buscarOrigens();
+  res.status(200).json({ ok: true, data: { itens } });
+}
+
+export async function suiteUsuariosController(req: Request, res: Response) {
+  const itens = await buscarUsuarios(queryQ(req));
+  res.status(200).json({ ok: true, data: { itens } });
 }

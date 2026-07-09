@@ -20,12 +20,16 @@ export type ResumoJson = {
   pontos_principais: string[];
   providencias_sugeridas: string[];
   cliente_mencionado: { nome: string; cnpj: string };
+  // Classificacao para o chamado (o usuario confirma/edita na revisao):
+  setor_sugerido: string; // um dos setores da lista fornecida, ou "" se incerto
+  assunto_sugerido: string; // frase curta do assunto/tipo do chamado
 };
 
 export type ResumoInput = {
   audioPath?: string;
   srtPath?: string;
   model?: string;
+  setoresDisponiveis?: string[]; // nomes dos setores cadastrados p/ classificacao
 };
 
 function getGeminiClient() {
@@ -109,6 +113,8 @@ function parseResumoJson(rawText: string): ResumoJson {
     nome: String(clienteRaw.nome ?? "").trim(),
     cnpj: String(clienteRaw.cnpj ?? "").trim(),
   };
+  const setorSugerido = String(parsed.setor_sugerido ?? "").trim();
+  const assuntoSugerido = String(parsed.assunto_sugerido ?? "").trim();
 
   if (!titulo || !resumo) {
     throw new AppError({
@@ -125,6 +131,8 @@ function parseResumoJson(rawText: string): ResumoJson {
     pontos_principais: pontos,
     providencias_sugeridas: providencias,
     cliente_mencionado: clienteMencionado,
+    setor_sugerido: setorSugerido,
+    assunto_sugerido: assuntoSugerido,
   };
 }
 
@@ -209,6 +217,14 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
   // 2) Lê transcrição e envia instruções para o Gemini responder em JSON.
   const transcricao = await readFile(srtPath, "utf-8");
 
+  const setores = Array.isArray(input.setoresDisponiveis)
+    ? input.setoresDisponiveis.filter(Boolean)
+    : [];
+  const blocoSetor = setores.length
+    ? `- setor_sugerido: string. Classifique a demanda em UM destes setores (use EXATAMENTE o nome):
+  ${setores.join(" | ")}. Se nenhum encaixar com clareza, use "".`
+    : `- setor_sugerido: string (setor responsavel pela demanda, ou "" se incerto).`;
+
   const prompt = `Voce registra chamados de atendimento telefonico de um escritorio de contabilidade,
 a partir da transcricao de uma ligacao. Escreva em portugues do Brasil, tom profissional,
 claro e objetivo. Retorne APENAS JSON valido, sem markdown e sem texto fora do JSON.
@@ -219,6 +235,9 @@ Campos obrigatorios:
 - providencias_sugeridas: string[] (acoes/pendencias a executar apos a ligacao; array vazio se nao houver)
 - cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
   cliente SE forem ditos na ligacao; use string vazia "" quando nao mencionado.
+${blocoSetor}
+- assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
+  "Folha de pagamento", "Abertura de empresa"; "" se incerto).
 Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
 
   const modelUsado = input.model?.trim() || DEFAULT_GEMINI_MODEL;
@@ -240,6 +259,8 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
             "pontos_principais",
             "providencias_sugeridas",
             "cliente_mencionado",
+            "setor_sugerido",
+            "assunto_sugerido",
           ],
           properties: {
             titulo: { type: "string" },
@@ -261,6 +282,8 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
                 cnpj: { type: "string" },
               },
             },
+            setor_sugerido: { type: "string" },
+            assunto_sugerido: { type: "string" },
           },
         },
       },
