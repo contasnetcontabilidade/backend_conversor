@@ -48,6 +48,21 @@ export async function adminUsoController(req: Request, res: Response) {
     { inputTokens: 0, outputTokens: 0, calls: 0, custoUsd: 0 },
   );
 
+  const custoBrl = totais.custoUsd * cotacao;
+
+  // Metricas por ligacao: cada ligacao gera 1 transcricao + 1 resumo, entao o
+  // numero de ligacoes = chamadas da operacao "resumo" (uma por ligacao).
+  const ligacoes = linhas
+    .filter((l) => l.op === "resumo")
+    .reduce((acc, l) => acc + l.calls, 0);
+  const custoTranscricaoUsd = linhas
+    .filter((l) => l.op === "transcricao")
+    .reduce((acc, l) => acc + l.custoUsd, 0);
+  const custoResumoUsd = linhas
+    .filter((l) => l.op === "resumo")
+    .reduce((acc, l) => acc + l.custoUsd, 0);
+  const custoLigacoesUsd = custoTranscricaoUsd + custoResumoUsd;
+
   res.status(200).json({
     ok: true,
     configurado: relatorio.configurado,
@@ -55,7 +70,16 @@ export async function adminUsoController(req: Request, res: Response) {
     totais: {
       ...totais,
       tokens: totais.inputTokens + totais.outputTokens,
-      custoBrl: totais.custoUsd * cotacao,
+      custoBrl,
+    },
+    porLigacao: {
+      ligacoes,
+      custoTotalUsd: custoLigacoesUsd,
+      custoTotalBrl: custoLigacoesUsd * cotacao,
+      custoMedioUsd: ligacoes ? custoLigacoesUsd / ligacoes : 0,
+      custoMedioBrl: ligacoes ? (custoLigacoesUsd * cotacao) / ligacoes : 0,
+      custoTranscricaoBrl: custoTranscricaoUsd * cotacao,
+      custoResumoBrl: custoResumoUsd * cotacao,
     },
     linhas,
     porDia,
@@ -183,7 +207,16 @@ body.win-max .titlebar .ic-restore{display:inline}
     <div class="card accent"><div class="k">Custo total (R$)</div><div class="v" id="c-brl">—</div><div class="s" id="c-brl-s"></div></div>
     <div class="card"><div class="k">Tokens (total)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
     <div class="card"><div class="k">Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
-    <div class="card gold"><div class="k">Custo médio / chamada</div><div class="v" id="c-avg">—</div><div class="s">R$</div></div>
+    <div class="card gold"><div class="k">Custo médio / chamada IA</div><div class="v" id="c-avg">—</div><div class="s">transcrição ou resumo</div></div>
+  </div>
+
+  <div class="panel" style="margin-bottom:22px">
+    <h3>Por ligação (transcrição + resumo)</h3>
+    <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
+      <div class="card brand"><div class="k">Ligações resumidas</div><div class="v" id="l-count">—</div><div class="s">com resumo da IA</div></div>
+      <div class="card accent"><div class="k">Custo total das ligações</div><div class="v" id="l-total">—</div><div class="s" id="l-total-s"></div></div>
+      <div class="card gold"><div class="k">Custo médio por ligação</div><div class="v" id="l-avg">—</div><div class="s" id="l-avg-s">R$</div></div>
+    </div>
   </div>
 
   <div class="grid2">
@@ -241,6 +274,13 @@ function render(d){
   document.getElementById("c-calls").textContent=fmtInt.format(d.totais.calls);
   var avg=d.totais.calls?d.totais.custoBrl/d.totais.calls:0;
   document.getElementById("c-avg").textContent=fmtBRL.format(avg);
+
+  var pl=d.porLigacao||{ligacoes:0,custoTotalBrl:0,custoMedioBrl:0,custoMedioUsd:0};
+  document.getElementById("l-count").textContent=fmtInt.format(pl.ligacoes||0);
+  document.getElementById("l-total").textContent=fmtBRL.format(pl.custoTotalBrl||0);
+  document.getElementById("l-total-s").textContent=fmtUSD(pl.custoTotalUsd||0);
+  document.getElementById("l-avg").textContent=fmtBRL.format(pl.custoMedioBrl||0);
+  document.getElementById("l-avg-s").textContent=fmtUSD(pl.custoMedioUsd||0)+" / ligação";
 
   var tb=document.getElementById("tbody");
   if(!d.linhas.length){tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum uso registrado ainda.</td></tr>';}
