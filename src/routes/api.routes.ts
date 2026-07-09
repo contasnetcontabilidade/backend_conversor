@@ -19,6 +19,11 @@ import {
   adminPageController,
   adminUsoController,
 } from "../controllers/admin.controller";
+import {
+  suiteClientesController,
+  suiteCriarController,
+  suitePreviewController,
+} from "../controllers/suite360.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { asyncHandler } from "../utils/http";
 
@@ -47,6 +52,11 @@ apiRouter.post("/goto/webhook/:token", asyncHandler(gotoWebhookController));
 apiRouter.get("/goto/eventos", asyncHandler(gotoEventosController));
 apiRouter.get("/goto/ably-token", asyncHandler(gotoAblyTokenController));
 apiRouter.post("/goto/chamado", asyncHandler(gotoChamadoController));
+
+// --- Integracao Suite360/SuiteWeb (criacao de chamados com revisao) ---
+apiRouter.post("/goto/chamado/preview", asyncHandler(suitePreviewController));
+apiRouter.post("/goto/chamado/criar", asyncHandler(suiteCriarController));
+apiRouter.get("/suite360/clientes", asyncHandler(suiteClientesController));
 
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);

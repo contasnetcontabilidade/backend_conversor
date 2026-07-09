@@ -17,8 +17,9 @@ let geminiClient: GoogleGenAI | null = null;
 export type ResumoJson = {
   titulo: string;
   resumo: string;
-  assuntos_abordados: string[];
-  pendencias_acoes_necessarias: string[];
+  pontos_principais: string[];
+  providencias_sugeridas: string[];
+  cliente_mencionado: { nome: string; cnpj: string };
 };
 
 export type ResumoInput = {
@@ -93,14 +94,21 @@ function parseResumoJson(rawText: string): ResumoJson {
 
   const titulo = String(parsed.titulo ?? "").trim();
   const resumo = String(parsed.resumo ?? "").trim();
-  const assuntos = Array.isArray(parsed.assuntos_abordados)
-    ? parsed.assuntos_abordados.map((item) => String(item).trim()).filter(Boolean)
+  const pontos = Array.isArray(parsed.pontos_principais)
+    ? parsed.pontos_principais.map((item) => String(item).trim()).filter(Boolean)
     : [];
-  const pendencias = Array.isArray(parsed.pendencias_acoes_necessarias)
-    ? parsed.pendencias_acoes_necessarias
+  const providencias = Array.isArray(parsed.providencias_sugeridas)
+    ? parsed.providencias_sugeridas
         .map((item) => String(item).trim())
         .filter(Boolean)
     : [];
+  const clienteRaw = isRecord(parsed.cliente_mencionado)
+    ? parsed.cliente_mencionado
+    : {};
+  const clienteMencionado = {
+    nome: String(clienteRaw.nome ?? "").trim(),
+    cnpj: String(clienteRaw.cnpj ?? "").trim(),
+  };
 
   if (!titulo || !resumo) {
     throw new AppError({
@@ -114,8 +122,9 @@ function parseResumoJson(rawText: string): ResumoJson {
   return {
     titulo,
     resumo,
-    assuntos_abordados: assuntos,
-    pendencias_acoes_necessarias: pendencias,
+    pontos_principais: pontos,
+    providencias_sugeridas: providencias,
+    cliente_mencionado: clienteMencionado,
   };
 }
 
@@ -200,15 +209,17 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
   // 2) Lê transcrição e envia instruções para o Gemini responder em JSON.
   const transcricao = await readFile(srtPath, "utf-8");
 
-  const prompt = `Voce e um especialista em analise textual e sintese estruturada de transcricoes de audio.
-Retorne APENAS JSON valido, sem markdown e sem texto fora do JSON.
+  const prompt = `Voce registra chamados de atendimento telefonico de um escritorio de contabilidade,
+a partir da transcricao de uma ligacao. Escreva em portugues do Brasil, tom profissional,
+claro e objetivo. Retorne APENAS JSON valido, sem markdown e sem texto fora do JSON.
 Campos obrigatorios:
-- titulo: string (titulo do resumo)
-- resumo: string (resumo executivo)
-- assuntos_abordados: string[] (topicos dos assuntos)
-- pendencias_acoes_necessarias: string[] (acoes pendentes)
-Se nao houver pendencias, retorne array vazio em pendencias_acoes_necessarias.
-Nao invente informacoes.`;
+- titulo: string (assunto curto do chamado, ate ~80 caracteres)
+- resumo: string (resumo executivo do atendimento, 2 a 5 frases: o que o cliente pediu/relatou e o desfecho)
+- pontos_principais: string[] (os principais topicos/fatos tratados na ligacao, curtos e objetivos)
+- providencias_sugeridas: string[] (acoes/pendencias a executar apos a ligacao; array vazio se nao houver)
+- cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
+  cliente SE forem ditos na ligacao; use string vazia "" quando nao mencionado.
+Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
 
   const modelUsado = input.model?.trim() || DEFAULT_GEMINI_MODEL;
 
@@ -226,19 +237,29 @@ Nao invente informacoes.`;
           required: [
             "titulo",
             "resumo",
-            "assuntos_abordados",
-            "pendencias_acoes_necessarias",
+            "pontos_principais",
+            "providencias_sugeridas",
+            "cliente_mencionado",
           ],
           properties: {
             titulo: { type: "string" },
             resumo: { type: "string" },
-            assuntos_abordados: {
+            pontos_principais: {
               type: "array",
               items: { type: "string" },
             },
-            pendencias_acoes_necessarias: {
+            providencias_sugeridas: {
               type: "array",
               items: { type: "string" },
+            },
+            cliente_mencionado: {
+              type: "object",
+              additionalProperties: false,
+              required: ["nome", "cnpj"],
+              properties: {
+                nome: { type: "string" },
+                cnpj: { type: "string" },
+              },
             },
           },
         },

@@ -156,11 +156,11 @@ export async function gotoWebhookController(req: Request, res: Response) {
   }
 }
 
-interface ParticipanteLinha {
+export interface ParticipanteLinha {
   ramal: string;
   nome: string;
 }
-interface AnaliseChamada {
+export interface AnaliseChamada {
   tipo: "externo" | "interno";
   numeroExterno?: string; // externo
   caller?: ParticipanteLinha; // interno: quem ligou
@@ -173,7 +173,7 @@ function dedupRamal(arr: ParticipanteLinha[]): ParticipanteLinha[] {
 }
 
 // Analisa o relatorio: externo (com numero do cliente) ou interno (caller + answerers).
-function analisarChamada(
+export function analisarChamada(
   report: Record<string, unknown>,
 ): AnaliseChamada | null {
   const participants = report.participants;
@@ -389,7 +389,7 @@ export async function gotoChamadoController(req: Request, res: Response) {
 
 // Busca o relatorio completo, esperando ele ficar pronto (roda em segundo
 // plano, entao pode ser paciente: ~30 tentativas x 3s = ate ~90s).
-async function getReportComRetry(
+export async function getReportComRetry(
   conversationSpaceId: string,
 ): Promise<Record<string, unknown> | null> {
   for (let tentativa = 0; tentativa < 30; tentativa++) {
