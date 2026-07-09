@@ -7,6 +7,7 @@ import { nodewhisper } from "nodejs-whisper";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
 import { recordUsage } from "./usage";
+import { thinkingConfigFor } from "./geminiThinking";
 
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
@@ -348,6 +349,10 @@ async function transcreverComGemini(
               ],
             },
           ],
+          // Transcricao e tarefa mecanica: desliga o thinking para baratear.
+          config: {
+            thinkingConfig: thinkingConfigFor(model),
+          },
         });
 
         transcript = String(response.text ?? "").trim();

@@ -5,9 +5,12 @@ import { GoogleGenAI } from "@google/genai";
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
 import { recordUsage } from "./usage";
+import { thinkingConfigFor } from "./geminiThinking";
 
 const DEFAULT_AUDIO_FILE = process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3-flash-preview";
+// gemini-2.5-flash: mais barato que o 3-flash e permite desligar o thinking
+// (thinkingBudget 0). Sobrescrivel por GEMINI_MODEL no ambiente.
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 
 let geminiClient: GoogleGenAI | null = null;
 
@@ -214,6 +217,8 @@ Nao invente informacoes.`;
       model: modelUsado,
       contents: `${prompt}\n\nTRANSCRICAO:\n${transcricao}`,
       config: {
+        // Desliga/minimiza o thinking para baratear (resumo e JSON estruturado).
+        thinkingConfig: thinkingConfigFor(modelUsado),
         responseMimeType: "application/json",
         responseJsonSchema: {
           type: "object",
