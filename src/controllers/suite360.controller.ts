@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { Request, Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
-import { gerarResumoGemini } from "../services/gemini";
+import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
 import { transcreverAudio } from "../services/transcricao";
 import { downloadRecording, extractRecordingId } from "../services/gotoApi";
 import {
@@ -195,11 +195,32 @@ export async function suitePreviewController(req: Request, res: Response) {
 
   // Busca os setores cadastrados para a IA classificar a demanda.
   const setoresLista = await buscarSetores().catch(() => []);
-  const { resumo } = await gerarResumoGemini({
-    srtPath: transcricao.srtPath,
-    model: geminiModel,
-    setoresDisponiveis: setoresLista.map((s) => s.nome),
-  });
+
+  // A IA e best-effort: se falhar (JSON incompleto, etc.), NAO cancela o fluxo.
+  // Segue para a revisao com os campos da IA vazios (o usuario preenche a mao).
+  let resumo: ResumoJson;
+  try {
+    ({ resumo } = await gerarResumoGemini({
+      srtPath: transcricao.srtPath,
+      model: geminiModel,
+      setoresDisponiveis: setoresLista.map((s) => s.nome),
+    }));
+  } catch (error) {
+    console.warn(
+      `[suite360:preview] req=${requestId} resumo da IA falhou: ${getErrorMessage(
+        error,
+      )} — seguindo com campos vazios.`,
+    );
+    resumo = {
+      titulo: "",
+      resumo: "",
+      pontos_principais: [],
+      providencias_sugeridas: [],
+      cliente_mencionado: { nome: "", cnpj: "" },
+      setor_sugerido: "",
+      assunto_sugerido: "",
+    };
+  }
 
   // Resolve cliente pelo telefone (agenda WhatsApp) — so faz sentido em externo.
   const numeroExterno = analise?.numeroExterno || "";
