@@ -20,16 +20,14 @@ export type ResumoJson = {
   pontos_principais: string[];
   providencias_sugeridas: string[];
   cliente_mencionado: { nome: string; cnpj: string };
-  // Classificacao para o chamado (o usuario confirma/edita na revisao):
-  setor_sugerido: string; // um dos setores da lista fornecida, ou "" se incerto
-  assunto_sugerido: string; // frase curta do assunto/tipo do chamado
+  // Assunto/tipo do chamado sugerido (o setor vem do nome do usuario do GoTo).
+  assunto_sugerido: string;
 };
 
 export type ResumoInput = {
   audioPath?: string;
   srtPath?: string;
   model?: string;
-  setoresDisponiveis?: string[]; // nomes dos setores cadastrados p/ classificacao
 };
 
 function getGeminiClient() {
@@ -96,7 +94,7 @@ function parseResumoJson(rawText: string): ResumoJson {
     });
   }
 
-  const titulo = String(parsed.titulo ?? "").trim();
+  const tituloBruto = String(parsed.titulo ?? "").trim();
   const resumo = String(parsed.resumo ?? "").trim();
   const pontos = Array.isArray(parsed.pontos_principais)
     ? parsed.pontos_principais.map((item) => String(item).trim()).filter(Boolean)
@@ -113,17 +111,19 @@ function parseResumoJson(rawText: string): ResumoJson {
     nome: String(clienteRaw.nome ?? "").trim(),
     cnpj: String(clienteRaw.cnpj ?? "").trim(),
   };
-  const setorSugerido = String(parsed.setor_sugerido ?? "").trim();
   const assuntoSugerido = String(parsed.assunto_sugerido ?? "").trim();
 
-  if (!titulo || !resumo) {
+  // So falha se o resumo estiver vazio (aí o retry cobre). Se faltar so o
+  // titulo, deriva do inicio do resumo — nao descarta um resumo bom.
+  if (!resumo) {
     throw new AppError({
       statusCode: 502,
       code: "GEMINI_MISSING_FIELDS",
-      message: "Gemini retornou JSON sem campos obrigatorios.",
+      message: "Gemini retornou JSON sem o campo resumo.",
       details: { raw: rawText.slice(0, 500) },
     });
   }
+  const titulo = tituloBruto || resumo.slice(0, 60);
 
   return {
     titulo,
@@ -131,7 +131,6 @@ function parseResumoJson(rawText: string): ResumoJson {
     pontos_principais: pontos,
     providencias_sugeridas: providencias,
     cliente_mencionado: clienteMencionado,
-    setor_sugerido: setorSugerido,
     assunto_sugerido: assuntoSugerido,
   };
 }
@@ -214,16 +213,31 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
     });
   }
 
-  // 2) Lê transcrição e envia instruções para o Gemini responder em JSON.
+  // 2) Lê transcrição.
   const transcricao = await readFile(srtPath, "utf-8");
 
-  const setores = Array.isArray(input.setoresDisponiveis)
-    ? input.setoresDisponiveis.filter(Boolean)
-    : [];
-  const blocoSetor = setores.length
-    ? `- setor_sugerido: string. Classifique a demanda em UM destes setores (use EXATAMENTE o nome):
-  ${setores.join(" | ")}. Se nenhum encaixar com clareza, use "".`
-    : `- setor_sugerido: string (setor responsavel pela demanda, ou "" se incerto).`;
+  // Guarda: transcricao vazia/inaudivel (comum em ligacao interna curta) ->
+  // nao chama o modelo; devolve um resumo minimo (evita "vazio" confuso).
+  const soTexto = transcricao
+    .replace(
+      /\d{1,2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[.,]\d{3}/g,
+      " ",
+    )
+    .replace(/[^\p{L}]/gu, "")
+    .trim();
+  if (soTexto.length < 10) {
+    return {
+      srtPath,
+      resumo: {
+        titulo: "Ligacao sem conteudo transcrito",
+        resumo: "Transcricao vazia ou inaudivel.",
+        pontos_principais: [],
+        providencias_sugeridas: [],
+        cliente_mencionado: { nome: "", cnpj: "" },
+        assunto_sugerido: "",
+      },
+    };
+  }
 
   const prompt = `Voce registra chamados de atendimento telefonico de um escritorio de contabilidade,
 a partir da transcricao de uma ligacao. Escreva em portugues do Brasil, tom profissional,
@@ -235,83 +249,99 @@ Campos obrigatorios:
 - providencias_sugeridas: string[] (acoes/pendencias a executar apos a ligacao; array vazio se nao houver)
 - cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
   cliente SE forem ditos na ligacao; use string vazia "" quando nao mencionado.
-${blocoSetor}
 - assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
   "Folha de pagamento", "Abertura de empresa"; "" se incerto).
 Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
 
   const modelUsado = input.model?.trim() || DEFAULT_GEMINI_MODEL;
 
-  try {
-    const response = await getGeminiClient().models.generateContent({
-      model: modelUsado,
-      contents: `${prompt}\n\nTRANSCRICAO:\n${transcricao}`,
-      config: {
-        // Desliga/minimiza o thinking para baratear (resumo e JSON estruturado).
-        thinkingConfig: thinkingConfigFor(modelUsado),
-        responseMimeType: "application/json",
-        responseJsonSchema: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "titulo",
-            "resumo",
-            "pontos_principais",
-            "providencias_sugeridas",
-            "cliente_mencionado",
-            "setor_sugerido",
-            "assunto_sugerido",
-          ],
-          properties: {
-            titulo: { type: "string" },
-            resumo: { type: "string" },
-            pontos_principais: {
-              type: "array",
-              items: { type: "string" },
-            },
-            providencias_sugeridas: {
-              type: "array",
-              items: { type: "string" },
-            },
-            cliente_mencionado: {
-              type: "object",
-              additionalProperties: false,
-              required: ["nome", "cnpj"],
-              properties: {
-                nome: { type: "string" },
-                cnpj: { type: "string" },
-              },
-            },
-            setor_sugerido: { type: "string" },
-            assunto_sugerido: { type: "string" },
-          },
-        },
+  const responseJsonSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "titulo",
+      "resumo",
+      "pontos_principais",
+      "providencias_sugeridas",
+      "cliente_mencionado",
+      "assunto_sugerido",
+    ],
+    properties: {
+      titulo: { type: "string" },
+      resumo: { type: "string" },
+      pontos_principais: { type: "array", items: { type: "string" } },
+      providencias_sugeridas: { type: "array", items: { type: "string" } },
+      cliente_mencionado: {
+        type: "object",
+        additionalProperties: false,
+        required: ["nome", "cnpj"],
+        properties: { nome: { type: "string" }, cnpj: { type: "string" } },
       },
-    });
+      assunto_sugerido: { type: "string" },
+    },
+  };
 
-    const rawText = response.text ?? "";
-    if (!rawText.trim()) {
-      throw new AppError({
-        statusCode: 502,
-        code: "GEMINI_EMPTY_RESPONSE",
-        message: "Gemini nao retornou conteudo no resumo.",
+  // Retry: 1a tentativa com thinking desligado (barato); se vier vazio/JSON
+  // invalido/sem resumo, re-tenta com o thinking padrao do modelo (mais confiavel).
+  const MAX_TENTATIVAS = 3;
+  let ultimoErro: unknown;
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    try {
+      const response = await getGeminiClient().models.generateContent({
+        model: modelUsado,
+        contents: `${prompt}\n\nTRANSCRICAO:\n${transcricao}`,
+        config: {
+          thinkingConfig:
+            tentativa === 1 ? thinkingConfigFor(modelUsado) : undefined,
+          responseMimeType: "application/json",
+          responseJsonSchema,
+        },
       });
+
+      const rawText = response.text ?? "";
+      if (!rawText.trim()) {
+        throw new AppError({
+          statusCode: 502,
+          code: "GEMINI_EMPTY_RESPONSE",
+          message: "Gemini nao retornou conteudo no resumo.",
+        });
+      }
+
+      const resumo = parseResumoJson(rawText);
+
+      await recordUsage({
+        model: modelUsado,
+        op: "resumo",
+        inputTokens: response.usageMetadata?.promptTokenCount,
+        outputTokens: response.usageMetadata?.candidatesTokenCount,
+      });
+
+      return { srtPath, resumo };
+    } catch (error) {
+      ultimoErro = error;
+      const vazioOuInvalido =
+        error instanceof AppError &&
+        [
+          "GEMINI_EMPTY_RESPONSE",
+          "GEMINI_INVALID_JSON",
+          "GEMINI_INVALID_PAYLOAD",
+          "GEMINI_MISSING_FIELDS",
+        ].includes(error.code);
+      // 429/rate limit: re-tenta com backoff (ajuda em limite por minuto;
+      // limite diario nao recupera e cai no tratamento de erro).
+      const msg = getErrorMessage(error).toLowerCase();
+      const quota = /quota|resource_exhausted|429|rate limit|too many/.test(msg);
+      if (tentativa < MAX_TENTATIVAS && (vazioOuInvalido || quota)) {
+        if (quota) await new Promise((r) => setTimeout(r, 4000 * tentativa));
+        console.warn(
+          `[gemini] falha no resumo (${
+            quota ? "quota/429" : "vazio/invalido"
+          }) tentativa ${tentativa}/${MAX_TENTATIVAS}; re-tentando.`,
+        );
+        continue;
+      }
+      throw normalizeGeminiError(error);
     }
-
-    // Registra o uso de tokens (para o painel de custos).
-    await recordUsage({
-      model: modelUsado,
-      op: "resumo",
-      inputTokens: response.usageMetadata?.promptTokenCount,
-      outputTokens: response.usageMetadata?.candidatesTokenCount,
-    });
-
-    // 3) Valida e normaliza o JSON recebido.
-    return {
-      srtPath,
-      resumo: parseResumoJson(rawText),
-    };
-  } catch (error) {
-    throw normalizeGeminiError(error);
   }
+  throw normalizeGeminiError(ultimoErro);
 }

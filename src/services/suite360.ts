@@ -435,15 +435,67 @@ export async function buscarUsuarios(q?: string): Promise<ItemLista[]> {
 // Resolucao automatica para o preview (a partir da chamada + sugestao da IA)
 // ---------------------------------------------------------------------------
 
-// Executor = usuario do Suite cujo nome bate com o atendente do GoTo.
+// Nome do GoTo vem como "NOME - SETOR". Helpers para separar as duas partes.
+function deptDoNomeGoTo(nome: string | undefined): string {
+  const s = String(nome || "");
+  const i = s.lastIndexOf(" - ");
+  return i >= 0 ? s.slice(i + 3).trim() : "";
+}
+function nomeSemDept(nome: string | undefined): string {
+  const s = String(nome || "");
+  const i = s.lastIndexOf(" - ");
+  return (i >= 0 ? s.slice(0, i) : s).trim();
+}
+
+// Aliases dept(GoTo) -> nome de setor no Suite. desenvolvimento == tecnologia
+// (mesmo time). Overrides/extensao por env SUITE360_SETOR_ALIASES ("chave=Setor;...").
+function aliasesSetor(): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const par of (process.env.SUITE360_SETOR_ALIASES || "").split(/[;\n]/)) {
+    const [k, v] = par.split("=");
+    if (k && v) map[norm(k)] = v.trim();
+  }
+  const dev = norm("desenvolvimento");
+  const tec = norm("tecnologia");
+  if (map[dev] && !map[tec]) map[tec] = map[dev];
+  if (map[tec] && !map[dev]) map[dev] = map[tec];
+  return map;
+}
+
+// Setor pelo NOME do usuario do GoTo ("NOME - SETOR"): usa o dept apos o " - ".
+export async function resolverSetorPorNomeUsuario(
+  nomeGoTo: string | undefined,
+): Promise<RefResolvida> {
+  let dept = deptDoNomeGoTo(nomeGoTo);
+  if (!dept) return { fonte: "ausente" };
+  const aliases = aliasesSetor();
+  if (aliases[norm(dept)]) dept = aliases[norm(dept)];
+  const alvo = norm(dept);
+  try {
+    const setores = await buscarSetores();
+    const s =
+      setores.find((x) => norm(x.nome) === alvo) ||
+      setores.find(
+        (x) => norm(x.nome).includes(alvo) || alvo.includes(norm(x.nome)),
+      );
+    if (!s) return { fonte: "ausente" };
+    return { id: s.id, nome: s.nome, fonte: "lookup" };
+  } catch {
+    return { fonte: "ausente" };
+  }
+}
+
+// Executor = usuario do Suite cujo nome bate com o do usuario do GoTo
+// (removendo o sufixo " - SETOR", que o Suite nao tem).
 export async function resolverExecutorPorNome(
   nome: string | undefined,
 ): Promise<RefResolvida> {
-  const alvo = norm(nome);
+  const nomeLimpo = nomeSemDept(nome);
+  const alvo = norm(nomeLimpo);
   if (!alvo) return { fonte: "ausente" };
   try {
     const data = await suiteGet(
-      `/usuarios?ativo=1&q=${encodeURIComponent(nome || "")}`,
+      `/usuarios?ativo=1&q=${encodeURIComponent(nomeLimpo)}`,
     );
     const lista = asList(data);
     const nomeDe = (u: Record<string, unknown>) =>

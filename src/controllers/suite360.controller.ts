@@ -23,7 +23,7 @@ import {
   resolverClientePorTelefone,
   resolverExecutorPorNome,
   resolverOrigem,
-  resolverSetorPorNome,
+  resolverSetorPorNomeUsuario,
   validarChamadoBody,
   type ChamadoBody,
 } from "../services/suite360";
@@ -193,19 +193,17 @@ export async function suitePreviewController(req: Request, res: Response) {
   const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({ audioPath });
 
-  // Busca os setores cadastrados para a IA classificar a demanda.
-  const setoresLista = await buscarSetores().catch(() => []);
-
-  // A IA e best-effort: se falhar (JSON incompleto, etc.), NAO cancela o fluxo.
+  // A IA e best-effort: se falhar (raro, com o retry), NAO cancela o fluxo.
   // Segue para a revisao com os campos da IA vazios (o usuario preenche a mao).
   let resumo: ResumoJson;
+  let iaOk = true;
   try {
     ({ resumo } = await gerarResumoGemini({
       srtPath: transcricao.srtPath,
       model: geminiModel,
-      setoresDisponiveis: setoresLista.map((s) => s.nome),
     }));
   } catch (error) {
+    iaOk = false;
     console.warn(
       `[suite360:preview] req=${requestId} resumo da IA falhou: ${getErrorMessage(
         error,
@@ -217,7 +215,6 @@ export async function suitePreviewController(req: Request, res: Response) {
       pontos_principais: [],
       providencias_sugeridas: [],
       cliente_mencionado: { nome: "", cnpj: "" },
-      setor_sugerido: "",
       assunto_sugerido: "",
     };
   }
@@ -229,17 +226,18 @@ export async function suitePreviewController(req: Request, res: Response) {
       ? await resolverClientePorTelefone(numeroExterno)
       : ({ status: "nao_encontrado" } as const);
 
-  // Resolve as referencias do chamado. Prioridade: variavel de ambiente fixa;
-  // senao usa a sugestao da IA / o atendente do GoTo.
-  //  - Assunto (tipo): env OU melhor tipo para o assunto sugerido pela IA.
-  //  - Origem: "Ligacao" (via resolverOrigem).
-  //  - Setor: env OU setor classificado pela IA.
-  //  - Executor: env OU usuario do Suite com o nome do atendente do GoTo.
+  // Usuario do escritorio (fonte de setor + executor):
+  //  - interna  -> quem LIGOU (caller);
+  //  - externa  -> o funcionario que ATENDEU (answerer).
+  // O nome do GoTo vem como "NOME - SETOR", entao o setor sai do proprio nome.
+  const usuarioEscritorio =
+    analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
+  const nomeUsuario = usuarioEscritorio?.nome || "";
+
+  // Prioridade: variavel de ambiente fixa; senao resolve automaticamente.
   const tipoEnv = (process.env.SUITE360_TIPO_APONTAMENTO_ID || "").trim();
   const setorEnv = (process.env.SUITE360_SETOR_ID || "").trim();
   const execEnv = (process.env.SUITE360_EXECUTOR_ID || "").trim();
-  const atendenteNome =
-    analise?.answerers?.[0]?.nome || analise?.caller?.nome || "";
   const [tipo, origem, setor, executor] = await Promise.all([
     tipoEnv
       ? Promise.resolve({ id: tipoEnv, fonte: "env" as const })
@@ -247,10 +245,10 @@ export async function suitePreviewController(req: Request, res: Response) {
     resolverOrigem(),
     setorEnv
       ? Promise.resolve({ id: setorEnv, fonte: "env" as const })
-      : resolverSetorPorNome(resumo.setor_sugerido),
+      : resolverSetorPorNomeUsuario(nomeUsuario),
     execEnv
       ? Promise.resolve({ id: execEnv, fonte: "env" as const })
-      : resolverExecutorPorNome(atendenteNome),
+      : resolverExecutorPorNome(nomeUsuario),
   ]);
 
   const clienteEncontrado =
@@ -287,6 +285,7 @@ export async function suitePreviewController(req: Request, res: Response) {
       requestId,
       conversationSpaceId,
       dryRun: isDryRun(),
+      iaOk,
       chamada: {
         tipo: analise?.tipo || "",
         direction: meta.direction,
