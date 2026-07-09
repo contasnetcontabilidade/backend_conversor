@@ -120,9 +120,41 @@ tbody tr:hover{background:var(--accent-soft)}
 .login-err{color:var(--danger);font-size:13px;margin-top:10px;min-height:18px}
 .hidden{display:none!important}
 .muted{color:var(--muted)}
+.titlebar{display:none}
+body.electron{padding-top:40px}
+body.electron .titlebar{position:fixed;top:0;left:0;right:0;height:40px;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:0 6px 0 14px;background:var(--card);border-bottom:1px solid var(--border);-webkit-app-region:drag}
+.titlebar .tb-left{display:flex;align-items:center;gap:10px;min-width:0}
+.titlebar .tb-logo{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--brand),var(--brand-2) 60%,var(--accent) 130%);display:grid;place-items:center;color:#fff;font-weight:800;font-size:11px}
+.titlebar .tb-title{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap}
+.titlebar .tb-actions{display:flex;gap:2px;-webkit-app-region:no-drag}
+.titlebar .tb-btn{width:40px;height:28px;display:grid;place-items:center;background:transparent;border:none;border-radius:7px;color:var(--muted);cursor:pointer;transition:background .15s,color .15s}
+.titlebar .tb-btn:hover{background:var(--card-2);color:var(--text)}
+.titlebar .tb-close:hover{background:var(--danger);color:#fff}
+.titlebar .ic-restore{display:none}
+body.win-max .titlebar .ic-max{display:none}
+body.win-max .titlebar .ic-restore{display:inline}
 </style>
 </head>
 <body>
+<div class="titlebar" id="titlebar">
+  <div class="tb-left">
+    <div class="tb-logo">CC</div>
+    <span class="tb-title">Painel de Custos · Contas</span>
+  </div>
+  <div class="tb-actions">
+    <button class="tb-btn" id="tb-min" title="Minimizar" aria-label="Minimizar">
+      <svg viewBox="0 0 12 12" width="11" height="11"><rect x="1.5" y="5.5" width="9" height="1" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn" id="tb-max" title="Maximizar" aria-label="Maximizar">
+      <svg class="ic-max" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.1"><rect x="1.7" y="1.7" width="8.6" height="8.6" rx="1"/></svg>
+      <svg class="ic-restore" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.1"><rect x="1.5" y="3" width="6.5" height="6.5" rx="1"/><path d="M4 3V1.7h6.3V8H9"/></svg>
+    </button>
+    <button class="tb-btn tb-close" id="tb-close" title="Fechar" aria-label="Fechar">
+      <svg viewBox="0 0 12 12" width="11" height="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>
+    </button>
+  </div>
+</div>
+
 <div id="login">
   <div class="login-card">
     <div class="logo" style="margin:0 auto 16px">CC</div>
@@ -228,6 +260,19 @@ function entrar(){var v=document.getElementById("senha").value||"";try{sessionSt
 document.getElementById("entrar").onclick=entrar;
 document.getElementById("senha").addEventListener("keydown",function(e){if(e.key==="Enter")entrar()});
 document.getElementById("refresh").onclick=carregar;
+
+// Barra de titulo customizada (so dentro do app Electron).
+(function(){
+  if(!window.winCtl)return;
+  document.body.classList.add("electron");
+  var min=document.getElementById("tb-min"),max=document.getElementById("tb-max"),cls=document.getElementById("tb-close");
+  if(min)min.onclick=function(){window.winCtl.minimizar()};
+  if(max)max.onclick=function(){window.winCtl.maximizar()};
+  if(cls)cls.onclick=function(){window.winCtl.fechar()};
+  function setMax(m){document.body.classList.toggle("win-max",!!m)}
+  if(window.winCtl.estaMaximizada)window.winCtl.estaMaximizada().then(setMax);
+  if(window.winCtl.onEstado)window.winCtl.onEstado(setMax);
+})();
 
 if(senha())carregar();
 </script>
