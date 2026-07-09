@@ -180,21 +180,27 @@ export function analisarChamada(
   if (!Array.isArray(participants)) return null;
   const direction = String(report.direction || "").toUpperCase();
 
+  // answerers (com gravacao): usado no externo, para saber quem ATENDEU o cliente.
   const answerers: ParticipanteLinha[] = [];
+  // todasLinhas: todos os ramais LINE, COM ou SEM gravacao. Usado no interno,
+  // onde a chamada normalmente nao e gravada (nao da pra exigir recordings).
+  const todasLinhas: ParticipanteLinha[] = [];
   for (const p of participants) {
     if (
       isRecord(p) &&
       isRecord(p.type) &&
       p.type.value === "LINE" &&
       typeof p.type.extensionNumber === "string" &&
-      p.type.extensionNumber &&
-      Array.isArray(p.recordings) &&
-      p.recordings.length > 0
+      p.type.extensionNumber
     ) {
-      answerers.push({
+      const linha = {
         ramal: p.type.extensionNumber,
         nome: typeof p.type.name === "string" ? p.type.name : "",
-      });
+      };
+      todasLinhas.push(linha);
+      if (Array.isArray(p.recordings) && p.recordings.length > 0) {
+        answerers.push(linha);
+      }
     }
   }
 
@@ -230,8 +236,9 @@ export function analisarChamada(
       break;
     }
   }
+  // Interno: quem atendeu = os demais ramais LINE (sem exigir gravacao).
   const answerersInternos = dedupRamal(
-    answerers.filter((a) => a.ramal !== caller?.ramal),
+    todasLinhas.filter((a) => a.ramal !== caller?.ramal),
   );
   return { tipo: "interno", caller, answerers: answerersInternos };
 }
@@ -267,7 +274,16 @@ async function routeCallEnded(
     }
 
     const analise = analisarChamada(report);
-    if (!analise) return;
+    if (!analise) {
+      console.log(`[goto:route] conv=${conversationSpaceId} analise=null (sem participantes?)`);
+      return;
+    }
+    console.log(
+      `[goto:route] conv=${conversationSpaceId} tipo=${analise.tipo} ` +
+        `caller=${analise.caller?.ramal || "-"} ` +
+        `answerers=[${analise.answerers.map((a) => a.ramal).join(",")}] ` +
+        `numeroExterno=${analise.numeroExterno || "-"}`,
+    );
 
     if (analise.tipo === "externo") {
       const ev: CallEndedEvent = {
