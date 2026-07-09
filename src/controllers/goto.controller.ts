@@ -20,7 +20,12 @@ import {
   publishCallEnded,
   publishDebug,
 } from "../services/ably";
-import { CallEndedEvent, drainEvents } from "../services/store";
+import {
+  CallEndedEvent,
+  chamadoFoiAberto,
+  drainEvents,
+  marcarChamadoAberto,
+} from "../services/store";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
 
 function publicWebhookUrl(): string {
@@ -151,32 +156,161 @@ export async function gotoWebhookController(req: Request, res: Response) {
   }
 }
 
-// Roteia o popup em segundo plano: espera o relatorio ficar pronto e notifica
-// quem ATENDEU (chamada externa). Ligacao interna / sem atendimento -> nada.
+interface ParticipanteLinha {
+  ramal: string;
+  nome: string;
+}
+interface AnaliseChamada {
+  tipo: "externo" | "interno";
+  numeroExterno?: string; // externo
+  caller?: ParticipanteLinha; // interno: quem ligou
+  answerers: ParticipanteLinha[]; // quem atendeu (LINE com gravacao)
+}
+
+function dedupRamal(arr: ParticipanteLinha[]): ParticipanteLinha[] {
+  const seen = new Set<string>();
+  return arr.filter((a) => (seen.has(a.ramal) ? false : seen.add(a.ramal)));
+}
+
+// Analisa o relatorio: externo (com numero do cliente) ou interno (caller + answerers).
+function analisarChamada(
+  report: Record<string, unknown>,
+): AnaliseChamada | null {
+  const participants = report.participants;
+  if (!Array.isArray(participants)) return null;
+  const direction = String(report.direction || "").toUpperCase();
+
+  const answerers: ParticipanteLinha[] = [];
+  for (const p of participants) {
+    if (
+      isRecord(p) &&
+      isRecord(p.type) &&
+      p.type.value === "LINE" &&
+      typeof p.type.extensionNumber === "string" &&
+      p.type.extensionNumber &&
+      Array.isArray(p.recordings) &&
+      p.recordings.length > 0
+    ) {
+      answerers.push({
+        ramal: p.type.extensionNumber,
+        nome: typeof p.type.name === "string" ? p.type.name : "",
+      });
+    }
+  }
+
+  const externo = participants.find(
+    (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
+  );
+  if (externo && isRecord(externo) && isRecord(externo.type)) {
+    const t = externo.type as Record<string, unknown>;
+    const callerObj = isRecord(t.caller)
+      ? (t.caller as Record<string, unknown>)
+      : {};
+    const numeroExterno =
+      direction === "INBOUND"
+        ? String(callerObj.number || t.number || "")
+        : String(t.number || callerObj.number || "");
+    return { tipo: "externo", numeroExterno, answerers: dedupRamal(answerers) };
+  }
+
+  // Interno: caller = participante LINE onde id === originator (quem iniciou).
+  let caller: ParticipanteLinha | undefined;
+  for (const p of participants) {
+    if (
+      isRecord(p) &&
+      isRecord(p.type) &&
+      p.type.value === "LINE" &&
+      typeof p.type.extensionNumber === "string" &&
+      p.id === p.originator
+    ) {
+      caller = {
+        ramal: p.type.extensionNumber,
+        nome: typeof p.type.name === "string" ? p.type.name : "",
+      };
+      break;
+    }
+  }
+  const answerersInternos = dedupRamal(
+    answerers.filter((a) => a.ramal !== caller?.ramal),
+  );
+  return { tipo: "interno", caller, answerers: answerersInternos };
+}
+
+async function publicarRamal(ramal: string, ev: CallEndedEvent): Promise<void> {
+  await publishCallEnded(ramal, ev).catch((e) =>
+    console.error(`[goto] falha ao publicar ramal ${ramal}:`, getErrorMessage(e)),
+  );
+}
+
+// Roteia o popup em segundo plano (waitUntil): espera o relatorio ficar pronto.
+//  - Externa: notifica quem ATENDEU, com o numero do cliente.
+//  - Interna: escalonamento -> quem LIGOU primeiro; se nao abrir chamado em
+//    ~25s, notifica quem ATENDEU. Ambos veem o ramal+nome do outro participante.
 async function routeCallEnded(
   conversationSpaceId: string,
   event: CallEndedEvent,
   body: Record<string, unknown>,
 ): Promise<void> {
   try {
-    let ramais: string[] = [];
     const report = await getReportComRetry(conversationSpaceId);
-    if (report) {
-      ramais = ramaisParaNotificar(report);
-    } else if (eventEnvolveExterno(body)) {
-      // Fallback (relatorio nunca ficou pronto): usa o evento (cobre saida).
-      ramais = extractExtensions(body);
+    if (!isAblyConfigured()) return;
+
+    if (!report) {
+      // Fallback (relatorio nunca ficou pronto): usa o evento (cobre saida externa).
+      if (eventEnvolveExterno(body)) {
+        const ramais = extractExtensions(body);
+        await Promise.all(
+          ramais.map((r) => publicarRamal(r, { ...event, tipo: "externo" })),
+        );
+      }
+      return;
     }
 
-    if (isAblyConfigured() && ramais.length > 0) {
+    const analise = analisarChamada(report);
+    if (!analise) return;
+
+    if (analise.tipo === "externo") {
+      const ev: CallEndedEvent = {
+        ...event,
+        tipo: "externo",
+        contatoNumero: analise.numeroExterno,
+      };
+      await Promise.all(analise.answerers.map((a) => publicarRamal(a.ramal, ev)));
+      return;
+    }
+
+    // Interno: escalonamento.
+    const { caller, answerers } = analise;
+    if (answerers.length === 0) return; // ninguem atendeu -> nada a fazer
+
+    if (!caller) {
+      // sem caller identificavel -> notifica os answerers direto.
       await Promise.all(
-        ramais.map((ramal) =>
-          publishCallEnded(ramal, event).catch((e) =>
-            console.error(
-              `[goto] falha ao publicar ramal ${ramal}:`,
-              getErrorMessage(e),
-            ),
-          ),
+        answerers.map((a) => publicarRamal(a.ramal, { ...event, tipo: "interno" })),
+      );
+      return;
+    }
+
+    // 1) popup pro caller, mostrando o outro participante (quem ele ligou).
+    const outro = answerers[0];
+    await publicarRamal(caller.ramal, {
+      ...event,
+      tipo: "interno",
+      contatoRamal: outro.ramal,
+      contatoNome: outro.nome,
+    });
+
+    // 2) espera ~25s; se o chamado nao foi aberto, escala pros answerers.
+    await new Promise((r) => setTimeout(r, 25000));
+    if (!(await chamadoFoiAberto(conversationSpaceId))) {
+      await Promise.all(
+        answerers.map((a) =>
+          publicarRamal(a.ramal, {
+            ...event,
+            tipo: "interno",
+            contatoRamal: caller.ramal,
+            contatoNome: caller.nome,
+          }),
         ),
       );
     }
@@ -222,6 +356,10 @@ export async function gotoChamadoController(req: Request, res: Response) {
   }
 
   const geminiModel = getOptionalString(body, "geminiModel");
+
+  // Marca cedo que o chamado foi aberto (antes da transcricao longa), para o
+  // escalonamento interno nao notificar o answerer se o caller ja abriu.
+  await marcarChamadoAberto(conversationSpaceId).catch(() => undefined);
 
   const report = await getCallReport(conversationSpaceId);
   const recordingId = extractRecordingId(report);
@@ -279,35 +417,6 @@ function eventEnvolveExterno(body: Record<string, unknown>): boolean {
   return participants.some(
     (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
   );
-}
-
-// Regra de notificacao a partir do relatorio completo:
-//  - so notifica se houver participante EXTERNO (cliente);
-//  - retorna os ramais LINE que ATENDERAM (recordings[] preenchido).
-function ramaisParaNotificar(report: Record<string, unknown>): string[] {
-  const participants = report.participants;
-  if (!Array.isArray(participants)) return [];
-
-  const temExterno = participants.some(
-    (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
-  );
-  if (!temExterno) return []; // ligacao puramente interna -> nao notifica
-
-  const ramais = new Set<string>();
-  for (const p of participants) {
-    if (
-      isRecord(p) &&
-      isRecord(p.type) &&
-      p.type.value === "LINE" &&
-      typeof p.type.extensionNumber === "string" &&
-      p.type.extensionNumber &&
-      Array.isArray(p.recordings) &&
-      p.recordings.length > 0
-    ) {
-      ramais.add(p.type.extensionNumber);
-    }
-  }
-  return Array.from(ramais);
 }
 
 // Extrai os ramais da ligacao. Faz busca profunda por qualquer campo

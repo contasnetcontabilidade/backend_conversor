@@ -12,6 +12,11 @@ export interface CallEndedEvent {
   to?: string;
   endedAt: string;
   receivedAt: string;
+  // Info de exibicao (montada a partir do relatorio):
+  tipo?: "externo" | "interno";
+  contatoNumero?: string; // externo: numero de quem ligou/foi ligado
+  contatoRamal?: string; // interno: ramal do outro participante
+  contatoNome?: string; // interno: nome do outro participante
 }
 
 const KEY = {
@@ -97,6 +102,17 @@ export async function saveAccountKey(k: string) {
 }
 export async function getAccountKey() {
   return getValue(KEY.accountKey);
+}
+
+// Flag de "chamado aberto" para uma chamada (usado no escalonamento interno):
+// quando o caller abre o chamado, o answerer nao precisa mais ser notificado.
+export async function marcarChamadoAberto(conversationSpaceId: string) {
+  await setValue(`goto:aberto:${conversationSpaceId}`, "1", 900);
+}
+export async function chamadoFoiAberto(
+  conversationSpaceId: string,
+): Promise<boolean> {
+  return (await getValue(`goto:aberto:${conversationSpaceId}`)) === "1";
 }
 
 export async function pushEvent(event: CallEndedEvent): Promise<void> {
