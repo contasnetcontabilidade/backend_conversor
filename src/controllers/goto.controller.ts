@@ -12,6 +12,7 @@ import {
   downloadRecording,
   extractRecordingId,
   getCallReport,
+  listarHistoricoChamadas,
   setupCallEventsSubscription,
 } from "../services/gotoApi";
 import {
@@ -357,6 +358,14 @@ export async function gotoAblyTokenController(req: Request, res: Response) {
 export async function gotoEventosController(_req: Request, res: Response) {
   const eventos = await drainEvents();
   res.status(200).json({ ok: true, eventos });
+}
+
+// GET /goto/historico?ramal=XXX&limit=N — ultimas chamadas do ramal (call-history).
+export async function gotoHistoricoController(req: Request, res: Response) {
+  const ramal = typeof req.query.ramal === "string" ? req.query.ramal.trim() : "";
+  const limit = Number(req.query.limit) || 15;
+  const itens = await listarHistoricoChamadas(ramal, limit);
+  res.status(200).json({ ok: true, data: { itens } });
 }
 
 // POST /goto/chamado — baixa a gravacao da chamada e gera transcricao + resumo.

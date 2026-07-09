@@ -182,6 +182,61 @@ export async function getCallReport(
   return payload as Record<string, unknown>;
 }
 
+export interface HistoricoChamadaItem {
+  legId: string;
+  direction: string; // INBOUND | OUTBOUND
+  startTime: string;
+  durationSeg: number;
+  interno: boolean;
+  contatoNumero: string; // o outro lado (nao o ramal consultado)
+  contatoNome: string;
+}
+
+// Lista as ultimas chamadas do GoTo para um ramal (call-history API).
+// Atencao: os itens NAO trazem conversationSpaceId (so legId), entao servem
+// para EXIBIR o historico; abrir chamado exige o id vindo do evento em tempo real.
+export async function listarHistoricoChamadas(
+  ramal: string,
+  limit = 15,
+): Promise<HistoricoChamadaItem[]> {
+  const acct = process.env.GOTO_ACCOUNT_KEY || "";
+  const pageSize = Math.min(Math.max(limit, 1), 50);
+  const params = new URLSearchParams({ accountKey: acct, pageSize: String(pageSize) });
+  if (ramal) params.set("extension", ramal);
+
+  const response = await authedFetch(
+    `${API_BASE}/call-history/v1/calls?${params.toString()}`,
+  );
+  const payload = await readJson(response);
+  if (!response.ok || !isRecord(payload)) {
+    throw new AppError({
+      statusCode: 502,
+      code: "GOTO_HISTORY_ERROR",
+      message: `Falha ao buscar historico de chamadas (HTTP ${response.status}).`,
+      details: isRecord(payload) ? payload : undefined,
+    });
+  }
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const ehExtensao = (n: unknown) => /^\d{2,5}$/.test(String(n ?? ""));
+
+  return items.filter(isRecord).map((it) => {
+    const caller = isRecord(it.caller) ? it.caller : {};
+    const callee = isRecord(it.callee) ? it.callee : {};
+    const direction = String(it.direction || "").toUpperCase();
+    const outro = direction === "OUTBOUND" ? callee : caller;
+    const durMs = typeof it.duration === "number" ? it.duration : 0;
+    return {
+      legId: String(it.legId || ""),
+      direction,
+      startTime: String(it.startTime || ""),
+      durationSeg: Math.round(durMs / 1000),
+      interno: ehExtensao(caller.number) && ehExtensao(callee.number),
+      contatoNumero: String((outro as Record<string, unknown>).number || ""),
+      contatoNome: String((outro as Record<string, unknown>).name || ""),
+    };
+  });
+}
+
 // Extrai o recordingId do relatorio (participants[].recordings[].id).
 export function extractRecordingId(
   report: Record<string, unknown>,
