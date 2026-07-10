@@ -376,6 +376,82 @@ export async function buscarClientes(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Cliente padrao para ligacoes INTERNAS (o proprio escritorio) + fallback IA
+// ---------------------------------------------------------------------------
+
+// CONTAS SERVIÇOS CONTÁBEIS S/S — GRUPO CONTAS. Resolvido por CNPJ (o mesmo em
+// dev e prod), com o id conhecido do dev apenas como ultimo recurso, porque os
+// IDs do Suite mudam entre dev e prod. Sobrescrivel por SUITE360_CLIENTE_INTERNO_ID.
+const CLIENTE_INTERNO_CNPJ = "04248189000197";
+const CLIENTE_INTERNO_NOME = "CONTAS SERVIÇOS CONTÁBEIS S/S";
+const CLIENTE_INTERNO_ID_FALLBACK = "1717";
+
+export async function resolverClienteInterno(): Promise<ClienteResolvido> {
+  const envId = (process.env.SUITE360_CLIENTE_INTERNO_ID || "").trim();
+  if (envId) {
+    return await buscarClientePorId(envId).catch(() => ({
+      id: envId,
+      razao_social: CLIENTE_INTERNO_NOME,
+    }));
+  }
+  // Preferencial: por CNPJ (identificador real, estavel entre dev e prod).
+  try {
+    const achados = await buscarClientes({ cnpj: CLIENTE_INTERNO_CNPJ });
+    if (achados.length) {
+      return {
+        id: achados[0].id,
+        razao_social: achados[0].razao_social || CLIENTE_INTERNO_NOME,
+        cnpj: achados[0].cnpj || CLIENTE_INTERNO_CNPJ,
+      };
+    }
+  } catch {
+    // ignora e cai no fallback
+  }
+  // Ultimo recurso: id conhecido (dev). Em prod, prefira setar o CNPJ/env.
+  return await buscarClientePorId(CLIENTE_INTERNO_ID_FALLBACK).catch(() => ({
+    id: CLIENTE_INTERNO_ID_FALLBACK,
+    razao_social: CLIENTE_INTERNO_NOME,
+    cnpj: CLIENTE_INTERNO_CNPJ,
+  }));
+}
+
+// Fallback de cliente EXTERNO quando o telefone nao resolveu: usa o nome/CNPJ
+// que a IA captou na conversa. So aceita quando ha UM unico match forte
+// (evita associar a ligacao ao cliente errado).
+export async function resolverClientePorMencao(
+  mencao: { nome?: string; cnpj?: string } | undefined,
+): Promise<ClienteResolvido | null> {
+  if (!mencao) return null;
+  const cnpj = (mencao.cnpj || "").replace(/\D+/g, "");
+  try {
+    if (cnpj.length >= 11) {
+      const porCnpj = await buscarClientes({ cnpj });
+      if (porCnpj.length === 1) {
+        return {
+          id: porCnpj[0].id,
+          razao_social: porCnpj[0].razao_social,
+          cnpj: porCnpj[0].cnpj,
+        };
+      }
+    }
+    const nome = (mencao.nome || "").trim();
+    if (nome.length >= 3) {
+      const porNome = await buscarClientes({ q: nome });
+      if (porNome.length === 1) {
+        return {
+          id: porNome[0].id,
+          razao_social: porNome[0].razao_social,
+          cnpj: porNome[0].cnpj,
+        };
+      }
+    }
+  } catch {
+    // qualquer erro -> nao resolve (usuario escolhe no modal)
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Listas para os dropdowns do modal (proxy — chave fica no backend)
 // ---------------------------------------------------------------------------
 
@@ -585,7 +661,11 @@ export async function resolverAssuntoPorTexto(
 export interface RefResolvida {
   id?: string;
   nome?: string;
-  fonte: "env" | "lookup" | "ausente";
+  // env  = fixado por variavel de ambiente
+  // ia   = escolhido pela IA a partir da lista do Suite
+  // lookup = resolvido por busca/heuristica no backend
+  // ausente = nao identificado (usuario escolhe no modal)
+  fonte: "env" | "ia" | "lookup" | "ausente";
 }
 
 async function lookupPrimeiro(

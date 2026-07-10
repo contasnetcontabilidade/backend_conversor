@@ -26,12 +26,16 @@ import {
   isDryRun,
   montarDescricao,
   resolverAssuntoPorTexto,
+  resolverClienteInterno,
+  resolverClientePorMencao,
   resolverClientePorTelefone,
   resolverExecutorPorNome,
   resolverOrigem,
   resolverSetorPorNomeUsuario,
   validarChamadoBody,
   type ChamadoBody,
+  type RefResolvida,
+  type ResolucaoCliente,
 } from "../services/suite360";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
 
@@ -204,6 +208,10 @@ export async function suitePreviewController(req: Request, res: Response) {
   const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({ audioPath });
 
+  // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito).
+  // Best-effort: se a busca falhar, a IA segue sem lista e caimos no match textual.
+  const tiposDisponiveis = await buscarTipos().catch(() => []);
+
   // A IA e best-effort: se falhar (raro, com o retry), NAO cancela o fluxo.
   // Segue para a revisao com os campos da IA vazios (o usuario preenche a mao).
   let resumo: ResumoJson;
@@ -212,6 +220,10 @@ export async function suitePreviewController(req: Request, res: Response) {
     ({ resumo } = await gerarResumoGemini({
       srtPath: transcricao.srtPath,
       model: geminiModel,
+      assuntosDisponiveis: tiposDisponiveis.map((t) => ({
+        id: t.id,
+        nome: t.nome,
+      })),
     }));
   } catch (error) {
     iaOk = false;
@@ -227,15 +239,33 @@ export async function suitePreviewController(req: Request, res: Response) {
       providencias_sugeridas: [],
       cliente_mencionado: { nome: "", cnpj: "" },
       assunto_sugerido: "",
+      assunto_escolhido: { id: "", nome: "" },
     };
   }
 
-  // Resolve cliente pelo telefone (agenda WhatsApp) — so faz sentido em externo.
+  // ----- Cliente -----
+  //  - INTERNA -> cliente padrao do escritorio (CONTAS Servicos Contabeis);
+  //  - EXTERNA -> pelo telefone (agenda WhatsApp); se nao achar, tenta pelo
+  //    nome/CNPJ que a IA captou na conversa.
   const numeroExterno = analise?.numeroExterno || "";
-  const cliente =
-    analise?.tipo === "externo" && numeroExterno
-      ? await resolverClientePorTelefone(numeroExterno)
-      : ({ status: "nao_encontrado" } as const);
+  let cliente: ResolucaoCliente;
+  if (analise?.tipo === "interno") {
+    cliente = {
+      status: "encontrado",
+      cliente: await resolverClienteInterno(),
+      via: "padrao_interno",
+    };
+  } else if (numeroExterno) {
+    cliente = await resolverClientePorTelefone(numeroExterno);
+    if (cliente.status !== "encontrado") {
+      const porMencao = await resolverClientePorMencao(resumo.cliente_mencionado);
+      if (porMencao) {
+        cliente = { status: "encontrado", cliente: porMencao, via: "ia_mencao" };
+      }
+    }
+  } else {
+    cliente = { status: "nao_encontrado" };
+  }
 
   // Usuario do escritorio (fonte de setor + executor):
   //  - interna  -> quem LIGOU (caller);
@@ -245,14 +275,29 @@ export async function suitePreviewController(req: Request, res: Response) {
     analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
   const nomeUsuario = usuarioEscritorio?.nome || "";
 
-  // Prioridade: variavel de ambiente fixa; senao resolve automaticamente.
+  // ----- Assunto (tipo de apontamento) -----
+  // Prioridade: env fixo > escolha da IA (validada na lista) > match textual.
   const tipoEnv = (process.env.SUITE360_TIPO_APONTAMENTO_ID || "").trim();
   const setorEnv = (process.env.SUITE360_SETOR_ID || "").trim();
   const execEnv = (process.env.SUITE360_EXECUTOR_ID || "").trim();
-  const [tipo, origem, setor, executor] = await Promise.all([
-    tipoEnv
-      ? Promise.resolve({ id: tipoEnv, fonte: "env" as const })
-      : resolverAssuntoPorTexto(resumo.assunto_sugerido),
+
+  const escolhaIA = resumo.assunto_escolhido;
+  const tipoNaLista = escolhaIA?.id
+    ? tiposDisponiveis.find((t) => String(t.id) === String(escolhaIA.id))
+    : undefined;
+
+  let tipo: RefResolvida;
+  if (tipoEnv) {
+    tipo = { id: tipoEnv, fonte: "env" };
+  } else if (tipoNaLista) {
+    tipo = { id: tipoNaLista.id, nome: tipoNaLista.nome, fonte: "ia" };
+  } else {
+    tipo = await resolverAssuntoPorTexto(
+      resumo.assunto_sugerido || resumo.titulo,
+    );
+  }
+
+  const [origem, setor, executor] = await Promise.all([
     resolverOrigem(),
     setorEnv
       ? Promise.resolve({ id: setorEnv, fonte: "env" as const })

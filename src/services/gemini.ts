@@ -20,14 +20,20 @@ export type ResumoJson = {
   pontos_principais: string[];
   providencias_sugeridas: string[];
   cliente_mencionado: { nome: string; cnpj: string };
-  // Assunto/tipo do chamado sugerido (o setor vem do nome do usuario do GoTo).
+  // Assunto/tipo do chamado sugerido em texto livre (fallback).
   assunto_sugerido: string;
+  // Assunto ESCOLHIDO pela IA a partir da lista de tipos do Suite (id + nome).
+  // Vazio quando a lista nao foi fornecida ou nada se encaixou.
+  assunto_escolhido: { id: string; nome: string };
 };
 
 export type ResumoInput = {
   audioPath?: string;
   srtPath?: string;
   model?: string;
+  // Lista de assuntos/tipos do Suite para a IA escolher UM (id + nome).
+  // Quando fornecida, a IA escolhe da lista (mais preciso que o texto livre).
+  assuntosDisponiveis?: Array<{ id: string; nome: string }>;
 };
 
 function getGeminiClient() {
@@ -112,6 +118,13 @@ function parseResumoJson(rawText: string): ResumoJson {
     cnpj: String(clienteRaw.cnpj ?? "").trim(),
   };
   const assuntoSugerido = String(parsed.assunto_sugerido ?? "").trim();
+  const escolhaRaw = isRecord(parsed.assunto_escolhido)
+    ? parsed.assunto_escolhido
+    : {};
+  const assuntoEscolhido = {
+    id: String(escolhaRaw.id ?? "").trim(),
+    nome: String(escolhaRaw.nome ?? "").trim(),
+  };
 
   // So falha se o resumo estiver vazio (aí o retry cobre). Se faltar so o
   // titulo, deriva do inicio do resumo — nao descarta um resumo bom.
@@ -132,6 +145,7 @@ function parseResumoJson(rawText: string): ResumoJson {
     providencias_sugeridas: providencias,
     cliente_mencionado: clienteMencionado,
     assunto_sugerido: assuntoSugerido,
+    assunto_escolhido: assuntoEscolhido,
   };
 }
 
@@ -235,6 +249,7 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
         providencias_sugeridas: [],
         cliente_mencionado: { nome: "", cnpj: "" },
         assunto_sugerido: "",
+        assunto_escolhido: { id: "", nome: "" },
       },
     };
   }
@@ -248,10 +263,23 @@ Campos obrigatorios:
 - pontos_principais: string[] (os principais topicos/fatos tratados na ligacao, curtos e objetivos)
 - providencias_sugeridas: string[] (acoes/pendencias a executar apos a ligacao; array vazio se nao houver)
 - cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
-  cliente SE forem ditos na ligacao; use string vazia "" quando nao mencionado.
+  cliente SE forem ditos na ligacao; capte o nome mesmo que dito de forma informal (ex.: so o
+  primeiro nome da empresa ou da pessoa). Use string vazia "" quando nao mencionado.
 - assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
   "Folha de pagamento", "Abertura de empresa"; "" se incerto).
+- assunto_escolhido: objeto { id: string, nome: string }. Com base no que foi DITO na ligacao,
+  escolha na "LISTA DE ASSUNTOS DISPONIVEIS" abaixo (quando houver) o item que MELHOR representa o
+  motivo do atendimento, e copie o id e o nome EXATAMENTE como aparecem na lista. Escolha o mais
+  especifico que se aplique. Se realmente nada se encaixar (ou se nao houver lista), use id e nome vazios.
 Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
+
+  // Lista de assuntos do Suite para a IA escolher UM (quando fornecida pelo controller).
+  const assuntos = input.assuntosDisponiveis || [];
+  const blocoAssuntos = assuntos.length
+    ? `\n\nLISTA DE ASSUNTOS DISPONIVEIS (escolha EXATAMENTE UM em assunto_escolhido):\n${assuntos
+        .map((a) => `- [${a.id}] ${a.nome}`)
+        .join("\n")}`
+    : "";
 
   const modelUsado = input.model?.trim() || DEFAULT_GEMINI_MODEL;
 
@@ -265,6 +293,7 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
       "providencias_sugeridas",
       "cliente_mencionado",
       "assunto_sugerido",
+      "assunto_escolhido",
     ],
     properties: {
       titulo: { type: "string" },
@@ -278,6 +307,12 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
         properties: { nome: { type: "string" }, cnpj: { type: "string" } },
       },
       assunto_sugerido: { type: "string" },
+      assunto_escolhido: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "nome"],
+        properties: { id: { type: "string" }, nome: { type: "string" } },
+      },
     },
   };
 
@@ -289,7 +324,7 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
     try {
       const response = await getGeminiClient().models.generateContent({
         model: modelUsado,
-        contents: `${prompt}\n\nTRANSCRICAO:\n${transcricao}`,
+        contents: `${prompt}${blocoAssuntos}\n\nTRANSCRICAO:\n${transcricao}`,
         config: {
           thinkingConfig:
             tentativa === 1 ? thinkingConfigFor(modelUsado) : undefined,
