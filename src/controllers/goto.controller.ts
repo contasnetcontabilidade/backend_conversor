@@ -241,6 +241,32 @@ export function analisarChamada(
   return { tipo: "interno", caller, answerers: answerersInternos };
 }
 
+// Nome ("NOME - SETOR") do participante LINE com o ramal informado, buscado
+// diretamente no relatorio. Usado para atribuir o chamado a QUEM CLICOU em
+// "abrir chamado" (o desktop manda o proprio ramal). Retorna:
+//  - a string do nome (pode ser "") se o ramal participou da ligacao;
+//  - null se esse ramal nao aparece no relatorio (clicador nao esteve na chamada).
+export function nomeDoRamal(
+  report: Record<string, unknown>,
+  ramal: string | undefined,
+): string | null {
+  const alvo = String(ramal || "").trim();
+  if (!alvo) return null;
+  const participants = report.participants;
+  if (!Array.isArray(participants)) return null;
+  for (const p of participants) {
+    if (
+      isRecord(p) &&
+      isRecord(p.type) &&
+      p.type.value === "LINE" &&
+      String(p.type.extensionNumber || "") === alvo
+    ) {
+      return typeof p.type.name === "string" ? p.type.name : "";
+    }
+  }
+  return null;
+}
+
 async function publicarRamal(ramal: string, ev: CallEndedEvent): Promise<void> {
   await publishCallEnded(ramal, ev).catch((e) =>
     console.error(`[goto] falha ao publicar ramal ${ramal}:`, getErrorMessage(e)),

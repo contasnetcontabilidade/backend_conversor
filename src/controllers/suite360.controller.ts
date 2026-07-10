@@ -7,6 +7,7 @@ import { downloadRecording, extractRecordingId } from "../services/gotoApi";
 import {
   analisarChamada,
   getReportComRetry,
+  nomeDoRamal,
   type AnaliseChamada,
 } from "./goto.controller";
 import {
@@ -180,6 +181,9 @@ export async function suitePreviewController(req: Request, res: Response) {
   }
   const geminiModel = getOptionalString(body, "geminiModel");
   const endedAt = getOptionalString(body, "endedAt");
+  // Ramal de QUEM CLICOU em "abrir chamado" (mandado pelo desktop). O chamado
+  // (setor/executor/custo) e atribuido a essa pessoa.
+  const ramalClicou = getOptionalString(body, "ramal");
 
   await marcarChamadoAberto(conversationSpaceId).catch(() => undefined);
 
@@ -205,14 +209,23 @@ export async function suitePreviewController(req: Request, res: Response) {
   const analise = analisarChamada(report);
   const meta = extrairMetaChamada(report, analise, endedAt);
 
-  // Usuario do escritorio (fonte de setor, executor E atribuicao de custo da IA):
-  //  - interna  -> quem LIGOU (caller);
-  //  - externa  -> o funcionario que ATENDEU (answerer).
+  // Usuario do escritorio (fonte de setor, executor E atribuicao de custo da IA).
+  // Prioridade: QUEM CLICOU em abrir o chamado (o desktop manda o proprio ramal;
+  // pegamos o nome dele no relatorio). Fallback (clicador nao veio ou nao estava
+  // na ligacao): interna -> quem LIGOU (caller); externa -> quem ATENDEU (answerer).
   // O nome do GoTo vem como "NOME - SETOR", entao o setor sai do proprio nome.
-  const usuarioEscritorio =
-    analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
-  const nomeUsuario = usuarioEscritorio?.nome || "";
-  const ramalUsuario = usuarioEscritorio?.ramal || "";
+  let ramalUsuario = "";
+  let nomeUsuario = "";
+  const nomeClicou = ramalClicou ? nomeDoRamal(report, ramalClicou) : null;
+  if (ramalClicou && nomeClicou !== null) {
+    ramalUsuario = ramalClicou;
+    nomeUsuario = nomeClicou;
+  } else {
+    const usuarioEscritorio =
+      analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
+    nomeUsuario = usuarioEscritorio?.nome || "";
+    ramalUsuario = usuarioEscritorio?.ramal || "";
+  }
 
   const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({
