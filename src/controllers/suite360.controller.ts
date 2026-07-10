@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { Request, Response } from "express";
-import { AppError, getErrorMessage } from "../lib/errors";
+import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
 import { transcreverAudio } from "../services/transcricao";
 import { downloadRecording, extractRecordingId } from "../services/gotoApi";
@@ -208,6 +208,47 @@ export async function suitePreviewController(req: Request, res: Response) {
 
   const analise = analisarChamada(report);
   const meta = extrairMetaChamada(report, analise, endedAt);
+
+  // [DIAGNOSTICO TEMPORARIO] — em ligacao externa, loga os campos que a GoTo
+  // manda do contato (para decidir de onde ler empresa/CNPJ). REMOVER depois.
+  if (analise?.tipo === "externo") {
+    try {
+      const parts = Array.isArray(report.participants)
+        ? report.participants
+        : [];
+      const externos = parts.filter(
+        (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
+      );
+      console.log(
+        `[diag:contato-externo] req=${requestId} phoneParticipants=` +
+          JSON.stringify(externos),
+      );
+      // Varredura por QUALQUER campo que pareca empresa/organizacao/CNPJ/contato.
+      const achados: string[] = [];
+      const visit = (node: unknown, path: string): void => {
+        if (node == null || achados.length > 40) return;
+        if (Array.isArray(node)) {
+          node.forEach((v, i) => visit(v, `${path}[${i}]`));
+          return;
+        }
+        if (isRecord(node)) {
+          for (const [k, v] of Object.entries(node)) {
+            if (/company|organiz|empres|business|cnpj|contact/i.test(k)) {
+              achados.push(`${path}.${k}=${JSON.stringify(v)}`);
+            }
+            visit(v, `${path}.${k}`);
+          }
+        }
+      };
+      visit(report, "report");
+      console.log(
+        `[diag:contato-externo] req=${requestId} camposEmpresa=` +
+          (achados.length ? achados.join(" | ") : "(nenhum)"),
+      );
+    } catch (e) {
+      console.warn(`[diag:contato-externo] req=${requestId} falhou:`, getErrorMessage(e));
+    }
+  }
 
   // Usuario do escritorio (fonte de setor, executor E atribuicao de custo da IA).
   // Prioridade: QUEM CLICOU em abrir o chamado (o desktop manda o proprio ramal;
