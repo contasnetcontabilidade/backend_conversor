@@ -34,6 +34,10 @@ export type ResumoInput = {
   // Lista de assuntos/tipos do Suite para a IA escolher UM (id + nome).
   // Quando fornecida, a IA escolhe da lista (mais preciso que o texto livre).
   assuntosDisponiveis?: Array<{ id: string; nome: string }>;
+  // Identidade da ligacao (ramal/usuario do escritorio) para atribuir o custo
+  // da IA no painel de consumo. Opcional; quando ausente, o custo fica "nao atribuido".
+  ramal?: string;
+  usuario?: string;
 };
 
 function getGeminiClient() {
@@ -349,6 +353,8 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
         op: "resumo",
         inputTokens: response.usageMetadata?.promptTokenCount,
         outputTokens: response.usageMetadata?.candidatesTokenCount,
+        ramal: input.ramal,
+        usuario: input.usuario,
       });
 
       return { srtPath, resumo };

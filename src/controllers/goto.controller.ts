@@ -394,11 +394,25 @@ export async function gotoChamadoController(req: Request, res: Response) {
     });
   }
 
+  // Identidade da ligacao (usuario do escritorio) para atribuir o custo da IA:
+  // interna -> quem ligou; externa -> quem atendeu.
+  const analise = analisarChamada(report);
+  const usuarioEscritorio =
+    analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
+  const ramalUsuario = usuarioEscritorio?.ramal || "";
+  const nomeUsuario = usuarioEscritorio?.nome || "";
+
   const audioPath = await downloadRecording(recordingId);
-  const transcricao = await transcreverAudio({ audioPath });
+  const transcricao = await transcreverAudio({
+    audioPath,
+    ramal: ramalUsuario,
+    usuario: nomeUsuario,
+  });
   const resumo = await gerarResumoGemini({
     srtPath: transcricao.srtPath,
     model: geminiModel,
+    ramal: ramalUsuario,
+    usuario: nomeUsuario,
   });
 
   res.status(200).json({

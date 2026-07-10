@@ -23,6 +23,7 @@ export async function adminUsoController(req: Request, res: Response) {
     getUsdBrl(),
   ]);
 
+  // Agregado por modelo+operacao (todo o periodo), com custo.
   const linhas = relatorio.linhas
     .map((l) => ({
       ...l,
@@ -30,13 +31,52 @@ export async function adminUsoController(req: Request, res: Response) {
     }))
     .sort((a, b) => b.custoUsd - a.custoUsd);
 
-  const porDia = relatorio.porDia.map((d) => {
-    // custo do dia aproximado pela media dos modelos usados nas linhas do dia
-    // (agregacao simples: usa preco por modelo aplicado ao total in/out do dia
-    // nao e possivel sem detalhar por modelo/dia, entao estimamos pelo mix global)
-    return d;
-  });
+  // Detalhe por dia+modelo+op, ja com custo por linha (precificado por modelo).
+  // O frontend agrega/filtra por periodo em cima disto.
+  const porDiaModelo = relatorio.porDiaModelo.map((d) => ({
+    ...d,
+    custoUsd: custoUsd(d.model, d.inputTokens, d.outputTokens),
+  }));
 
+  // Detalhe por dia+ramal+op (colapsa o modelo apos precificar).
+  const ramalMap = new Map<
+    string,
+    {
+      dia: string;
+      ramal: string;
+      usuario: string;
+      op: string;
+      inputTokens: number;
+      outputTokens: number;
+      calls: number;
+      custoUsd: number;
+    }
+  >();
+  for (const it of relatorio.porRamal) {
+    const chave = `${it.dia}::${it.ramal}::${it.op}`;
+    const cur =
+      ramalMap.get(chave) ||
+      {
+        dia: it.dia,
+        ramal: it.ramal,
+        usuario: it.usuario,
+        op: it.op,
+        inputTokens: 0,
+        outputTokens: 0,
+        calls: 0,
+        custoUsd: 0,
+      };
+    cur.inputTokens += it.inputTokens;
+    cur.outputTokens += it.outputTokens;
+    cur.calls += it.calls;
+    cur.custoUsd += custoUsd(it.model, it.inputTokens, it.outputTokens);
+    if (!cur.usuario && it.usuario) cur.usuario = it.usuario;
+    ramalMap.set(chave, cur);
+  }
+  const porRamal = Array.from(ramalMap.values());
+
+  // Totais e "por ligacao" (todo o periodo) — referencia; o frontend recalcula
+  // os valores do periodo selecionado a partir de porDiaModelo/porRamal.
   const totais = linhas.reduce(
     (acc, l) => {
       acc.inputTokens += l.inputTokens;
@@ -47,21 +87,7 @@ export async function adminUsoController(req: Request, res: Response) {
     },
     { inputTokens: 0, outputTokens: 0, calls: 0, custoUsd: 0 },
   );
-
   const custoBrl = totais.custoUsd * cotacao;
-
-  // Metricas por ligacao: cada ligacao gera 1 transcricao + 1 resumo, entao o
-  // numero de ligacoes = chamadas da operacao "resumo" (uma por ligacao).
-  const ligacoes = linhas
-    .filter((l) => l.op === "resumo")
-    .reduce((acc, l) => acc + l.calls, 0);
-  const custoTranscricaoUsd = linhas
-    .filter((l) => l.op === "transcricao")
-    .reduce((acc, l) => acc + l.custoUsd, 0);
-  const custoResumoUsd = linhas
-    .filter((l) => l.op === "resumo")
-    .reduce((acc, l) => acc + l.custoUsd, 0);
-  const custoLigacoesUsd = custoTranscricaoUsd + custoResumoUsd;
 
   res.status(200).json({
     ok: true,
@@ -72,17 +98,9 @@ export async function adminUsoController(req: Request, res: Response) {
       tokens: totais.inputTokens + totais.outputTokens,
       custoBrl,
     },
-    porLigacao: {
-      ligacoes,
-      custoTotalUsd: custoLigacoesUsd,
-      custoTotalBrl: custoLigacoesUsd * cotacao,
-      custoMedioUsd: ligacoes ? custoLigacoesUsd / ligacoes : 0,
-      custoMedioBrl: ligacoes ? (custoLigacoesUsd * cotacao) / ligacoes : 0,
-      custoTranscricaoBrl: custoTranscricaoUsd * cotacao,
-      custoResumoBrl: custoResumoUsd * cotacao,
-    },
     linhas,
-    porDia,
+    porDiaModelo,
+    porRamal,
   });
 }
 
@@ -107,14 +125,23 @@ html[data-theme=light]{--bg:#f5f7fa;--bg-grad:none;--card:#fff;--card-2:#f2f6fb;
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;background:var(--bg);background-image:var(--bg-grad);color:var(--text);min-height:100vh}
 .wrap{max-width:1200px;margin:0 auto;padding:20px 20px 60px}
-.topbar{display:flex;align-items:center;gap:16px;margin-bottom:26px}
+.topbar{display:flex;align-items:center;gap:16px;margin-bottom:22px}
 .brand{display:flex;align-items:center;gap:12px}
 .logo{width:42px;height:42px;border-radius:11px;background:linear-gradient(135deg,var(--brand) 0%,var(--brand-2) 55%,var(--accent) 130%);display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px;box-shadow:0 6px 16px rgba(11,61,102,.35)}
 .name b{display:block;font-size:15px}.name span{font-size:12px;color:var(--muted)}
 .spacer{flex:1}
 .pill{font-size:12px;color:var(--muted);border:1px solid var(--border);padding:6px 12px;border-radius:999px}
 .icon-btn{background:var(--card);border:1px solid var(--border);color:var(--text);width:40px;height:40px;border-radius:11px;cursor:pointer;font-size:16px}
-h1{font-size:22px;margin-bottom:4px}.sub{color:var(--muted);font-size:13px;margin-bottom:22px}
+h1{font-size:22px;margin-bottom:4px}.sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+.period{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:20px}
+.seg{display:inline-flex;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.seg button{background:transparent;border:none;color:var(--muted);padding:8px 12px;cursor:pointer;font-size:12.5px}
+.seg button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.period input[type=date]{background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:7px 9px;font-size:12.5px}
+.period label{font-size:12px;color:var(--muted)}
+.period .cambio{width:84px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:7px 9px;font-size:12.5px}
+.mini-btn{background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:8px 12px;cursor:pointer;font-size:12.5px}
+.mini-btn:hover{border-color:var(--accent)}
 .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:22px}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
 .card{background:linear-gradient(180deg,var(--card-2),var(--card));border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
@@ -124,18 +151,25 @@ h1{font-size:22px;margin-bottom:4px}.sub{color:var(--muted);font-size:13px;margi
 .card .v{font-size:23px;font-weight:700;margin-top:8px}
 .card .s{font-size:12px;color:var(--muted);margin-top:4px}
 .card.accent .v{color:var(--accent)}.card.gold .v{color:var(--gold)}
+.delta{font-weight:600}.delta.up{color:var(--danger)}.delta.down{color:var(--accent)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px}
 @media(max-width:900px){.grid2{grid-template-columns:1fr}}
-.panel{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);margin-bottom:22px}
 .panel h3{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px}
 .chart-box{position:relative;height:260px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border)}
 th{color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
+th.sortable{cursor:pointer;user-select:none}th.sortable:hover{color:var(--text)}
 tbody tr:hover{background:var(--accent-soft)}
 .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;background:var(--accent-soft);color:var(--accent)}
 .badge.resumo{background:rgba(224,169,59,.14);color:var(--gold)}
 .right{text-align:right}
+.note{font-size:12.5px;color:var(--muted);background:var(--accent-soft);border:1px solid var(--border);border-radius:9px;padding:9px 12px;margin-bottom:14px}
+.rank{list-style:none}
+.rank li{display:flex;justify-content:space-between;gap:12px;padding:9px 4px;border-bottom:1px solid var(--border);font-size:13px}
+.rank li:last-child{border-bottom:none}
+.rank .d{color:var(--muted)}
 #login{position:fixed;inset:0;background:rgba(6,12,20,.85);display:flex;align-items:center;justify-content:center;z-index:50}
 .login-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:30px;width:360px;max-width:92vw;box-shadow:0 24px 60px rgba(0,0,0,.5);text-align:center}
 .login-card h2{margin-bottom:8px}.login-card p{color:var(--muted);font-size:13px;margin-bottom:18px}
@@ -194,7 +228,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   <div class="topbar">
     <div class="brand"><div class="logo">CC</div><div class="name"><b>Contas Contabilidade</b><span>Custos de IA</span></div></div>
     <div class="spacer"></div>
-    <span class="pill" id="cotacao">cotação: —</span>
+    <span class="pill" id="atualizado">—</span>
     <button class="icon-btn" id="tema" title="Alternar tema">☀️</button>
     <button class="icon-btn" id="refresh" title="Atualizar">↻</button>
   </div>
@@ -202,16 +236,32 @@ body.win-max .titlebar .ic-restore{display:inline}
   <h1>Custos de Inteligência Artificial</h1>
   <div class="sub" id="status">Consumo de tokens do Gemini (transcrição + resumo) e custo estimado.</div>
 
-  <div class="cards">
-    <div class="card brand"><div class="k">Custo total (US$)</div><div class="v" id="c-usd">—</div><div class="s">preços de referência</div></div>
-    <div class="card accent"><div class="k">Custo total (R$)</div><div class="v" id="c-brl">—</div><div class="s" id="c-brl-s"></div></div>
-    <div class="card"><div class="k">Tokens (total)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
-    <div class="card"><div class="k">Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
-    <div class="card gold"><div class="k">Custo médio / chamada IA</div><div class="v" id="c-avg">—</div><div class="s">transcrição ou resumo</div></div>
+  <div class="period">
+    <div class="seg" id="seg-periodo">
+      <button data-p="7d">7 dias</button>
+      <button data-p="30d" class="on">30 dias</button>
+      <button data-p="mes">Mês atual</button>
+      <button data-p="tudo">Tudo</button>
+      <button data-p="custom">Personalizado</button>
+    </div>
+    <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
+    <div class="spacer"></div>
+    <label>Câmbio R$</label> <input type="number" step="0.01" min="0" class="cambio" id="cambio" title="Câmbio USD→BRL (editável)" />
+    <button class="mini-btn" id="csv-dia" title="Exportar CSV por dia">⬇ CSV dia</button>
+    <button class="mini-btn" id="csv-ramal" title="Exportar CSV por ramal">⬇ CSV ramal</button>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="auto" /> auto 5min</label>
   </div>
 
-  <div class="panel" style="margin-bottom:22px">
-    <h3>Por ligação (transcrição + resumo)</h3>
+  <div class="cards">
+    <div class="card accent"><div class="k">Custo total (R$)</div><div class="v" id="c-brl">—</div><div class="s" id="c-brl-s"></div></div>
+    <div class="card brand"><div class="k">Custo total (US$)</div><div class="v" id="c-usd">—</div><div class="s">preços de referência</div></div>
+    <div class="card gold"><div class="k">Projeção do mês (R$)</div><div class="v" id="c-proj">—</div><div class="s" id="c-proj-s">no ritmo atual</div></div>
+    <div class="card"><div class="k">Tokens (período)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
+    <div class="card"><div class="k">Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>Por ligação (transcrição + resumo) — no período</h3>
     <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
       <div class="card brand"><div class="k">Ligações resumidas</div><div class="v" id="l-count">—</div><div class="s">com resumo da IA</div></div>
       <div class="card accent"><div class="k">Custo total das ligações</div><div class="v" id="l-total">—</div><div class="s" id="l-total-s"></div></div>
@@ -220,12 +270,47 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <div class="grid2">
-    <div class="panel"><h3>Tokens por dia</h3><div class="chart-box"><canvas id="chartDia"></canvas></div></div>
-    <div class="panel"><h3>Custo por modelo (US$)</h3><div class="chart-box"><canvas id="chartModelo"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3>Custo por dia (R$)</h3><div class="chart-box"><canvas id="chartCustoDia"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3>Transcrição vs. resumo (R$)</h3><div class="chart-box"><canvas id="chartOp"></canvas></div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel" style="margin:0"><h3>Custo por modelo (R$)</h3><div class="chart-box"><canvas id="chartModelo"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3>Tendência do custo médio por ligação (R$)</h3><div class="chart-box"><canvas id="chartTend"></canvas></div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel" style="margin:0">
+      <h3>Gasto por ramal / usuário — no período</h3>
+      <div class="note" id="ramal-note">Este detalhamento começa a valer a partir da atualização do sistema; ligações antigas não têm o ramal registrado.</div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Ligações</th><th class="right">Custo R$</th></tr></thead>
+          <tbody id="tbody-ramal"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel" style="margin:0"><h3>Dias mais caros</h3><ul class="rank" id="ranking"><li class="muted">—</li></ul></div>
   </div>
 
   <div class="panel">
-    <h3>Detalhe por modelo e operação</h3>
+    <h3>Custo por dia</h3>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr>
+          <th class="sortable" data-col="dia">Dia</th>
+          <th class="sortable right" data-col="tokens">Tokens</th>
+          <th class="sortable right" data-col="calls">Chamadas</th>
+          <th class="sortable right" data-col="ligacoes">Ligações</th>
+          <th class="sortable right" data-col="custoUsd">Custo R$</th>
+        </tr></thead>
+        <tbody id="tbody-dia"><tr><td colspan="5" class="muted">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Detalhe por modelo e operação (todo o período)</h3>
     <div style="overflow:auto">
       <table>
         <thead><tr><th>Modelo</th><th>Operação</th><th class="right">Tokens entrada</th><th class="right">Tokens saída</th><th class="right">Chamadas</th><th class="right">Custo US$</th><th class="right">Custo R$</th></tr></thead>
@@ -239,17 +324,56 @@ body.win-max .titlebar .ic-restore{display:inline}
 var THEME_KEY="painel-tema";
 function setTheme(t){document.documentElement.setAttribute("data-theme",t);document.getElementById("tema").textContent=t==="dark"?"☀️":"🌙";try{localStorage.setItem(THEME_KEY,t)}catch(e){}}
 setTheme((function(){try{return localStorage.getItem(THEME_KEY)||"dark"}catch(e){return "dark"}})());
-document.getElementById("tema").onclick=function(){setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");if(window.__dados)render(window.__dados)};
+document.getElementById("tema").onclick=function(){setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");if(DADOS)render()};
 
-var fmtBRL=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:4});
+var fmtBRL=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:2});
+var fmtBRL4=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:4});
 var fmtInt=new Intl.NumberFormat("pt-BR");
 function fmtUSD(v){return "US$ "+Number(v||0).toFixed(4)}
 
 function senha(){try{return sessionStorage.getItem("admin-pwd")||""}catch(e){return ""}}
 function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
 
-var charts={};
-function chart(id,cfg){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),cfg)}
+var DADOS=null;          // ultimo payload da API
+var CAMBIO=null;         // override manual do cambio (null = usa o da API)
+var PERIODO={preset:"30d",de:null,ate:null};
+var ORD={col:"dia",dir:-1};
+var timerAuto=null;
+
+function cot(){return CAMBIO!=null?CAMBIO:(DADOS&&DADOS.cotacao)||0}
+
+// ---- datas (UTC, batendo com as chaves YYYY-MM-DD do backend) ----
+function hojeUTC(){return new Date().toISOString().slice(0,10)}
+function addDias(s,n){var d=new Date(s+"T00:00:00Z");d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10)}
+function diffDias(a,b){return Math.round((new Date(b+"T00:00:00Z")-new Date(a+"T00:00:00Z"))/86400000)}
+function primeiroDiaMes(){return hojeUTC().slice(0,8)+"01"}
+function ultimoDiaMes(){var d=new Date();return new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate()}
+function minDia(){var xs=(DADOS&&DADOS.porDiaModelo||[]).map(function(x){return x.dia});return xs.length?xs.sort()[0]:hojeUTC()}
+function intervalo(){
+  var ate=hojeUTC(),de;
+  if(PERIODO.preset==="custom"){de=PERIODO.de||minDia();ate=PERIODO.ate||hojeUTC();}
+  else if(PERIODO.preset==="7d")de=addDias(ate,-6);
+  else if(PERIODO.preset==="30d")de=addDias(ate,-29);
+  else if(PERIODO.preset==="mes")de=primeiroDiaMes();
+  else de=minDia();
+  if(de>ate){var t=de;de=ate;ate=t;}
+  return {de:de,ate:ate};
+}
+function noPeriodo(rows,de,ate){return (rows||[]).filter(function(r){return r.dia>=de&&r.dia<=ate})}
+
+// ---- agregacoes ----
+function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0};
+  rows.forEach(function(r){t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;
+    if(r.op==="resumo"){t.ligacoes+=r.calls;t.resumoUsd+=r.custoUsd}if(r.op==="transcricao")t.transcUsd+=r.custoUsd});
+  return t;}
+function porDiaAgg(rows){var m={};
+  rows.forEach(function(r){var a=m[r.dia]||(m[r.dia]={dia:r.dia,inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0});
+    a.inputTokens+=r.inputTokens;a.outputTokens+=r.outputTokens;a.calls+=r.calls;a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.ligacoes+=r.calls});
+  return Object.keys(m).sort().map(function(k){return m[k]});}
+function ramalAgg(rows){var m={};
+  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0});
+    a.calls+=r.calls;a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
+  return Object.keys(m).map(function(k){return m[k]}).sort(function(a,b){return b.custoUsd-a.custoUsd});}
 
 async function carregar(){
   var r;
@@ -257,43 +381,145 @@ async function carregar(){
   catch(e){ document.getElementById("status").textContent="Falha de rede."; return; }
   if(r.status===401){ mostrarLogin("Senha incorreta."); return; }
   var d=await r.json();
-  window.__dados=d;
+  DADOS=d;
   document.getElementById("login").classList.add("hidden");
   document.getElementById("app").classList.remove("hidden");
+  if(CAMBIO==null){var ci=document.getElementById("cambio");if(ci&&!ci.value)ci.value=Number(d.cotacao||0).toFixed(2);}
   if(!d.configurado){document.getElementById("status").textContent="Storage (Upstash) ainda não configurado — os contadores começam a somar após configurar.";}
-  render(d);
+  else{document.getElementById("status").textContent="Consumo de tokens do Gemini (transcrição + resumo) e custo estimado.";}
+  var agora=new Date();
+  document.getElementById("atualizado").textContent="atualizado "+String(agora.getHours()).padStart(2,"0")+":"+String(agora.getMinutes()).padStart(2,"0");
+  render();
 }
 
-function render(d){
-  document.getElementById("cotacao").textContent="cotação: R$ "+Number(d.cotacao||0).toFixed(2);
-  document.getElementById("c-usd").textContent=fmtUSD(d.totais.custoUsd);
-  document.getElementById("c-brl").textContent=fmtBRL.format(d.totais.custoBrl);
-  document.getElementById("c-brl-s").textContent="câmbio R$ "+Number(d.cotacao||0).toFixed(2);
-  document.getElementById("c-tok").textContent=fmtInt.format(d.totais.tokens);
-  document.getElementById("c-tok-s").textContent=fmtInt.format(d.totais.inputTokens)+" in · "+fmtInt.format(d.totais.outputTokens)+" out";
-  document.getElementById("c-calls").textContent=fmtInt.format(d.totais.calls);
-  var avg=d.totais.calls?d.totais.custoBrl/d.totais.calls:0;
-  document.getElementById("c-avg").textContent=fmtBRL.format(avg);
+function render(){
+  if(!DADOS)return;
+  var iv=intervalo();
+  var rowsP=noPeriodo(DADOS.porDiaModelo,iv.de,iv.ate);
+  var t=totais(rowsP);
+  var c=cot();
 
-  var pl=d.porLigacao||{ligacoes:0,custoTotalBrl:0,custoMedioBrl:0,custoMedioUsd:0};
-  document.getElementById("l-count").textContent=fmtInt.format(pl.ligacoes||0);
-  document.getElementById("l-total").textContent=fmtBRL.format(pl.custoTotalBrl||0);
-  document.getElementById("l-total-s").textContent=fmtUSD(pl.custoTotalUsd||0);
-  document.getElementById("l-avg").textContent=fmtBRL.format(pl.custoMedioBrl||0);
-  document.getElementById("l-avg-s").textContent=fmtUSD(pl.custoMedioUsd||0)+" / ligação";
+  // KPIs
+  document.getElementById("c-brl").textContent=fmtBRL.format(t.custoUsd*c);
+  document.getElementById("c-usd").textContent=fmtUSD(t.custoUsd);
+  document.getElementById("c-tok").textContent=fmtInt.format(t.inputTokens+t.outputTokens);
+  document.getElementById("c-tok-s").textContent=fmtInt.format(t.inputTokens)+" in · "+fmtInt.format(t.outputTokens)+" out";
+  document.getElementById("c-calls").textContent=fmtInt.format(t.calls);
 
+  // Comparativo vs periodo anterior de mesmo tamanho (#3)
+  var nDias=diffDias(iv.de,iv.ate)+1;
+  var antAte=addDias(iv.de,-1),antDe=addDias(antAte,-(nDias-1));
+  var custoAnt=totais(noPeriodo(DADOS.porDiaModelo,antDe,antAte)).custoUsd*c;
+  var custoAtual=t.custoUsd*c;
+  var brlS="câmbio R$ "+Number(c).toFixed(2);
+  if(custoAnt>0){var delta=(custoAtual-custoAnt)/custoAnt*100;var up=delta>=0;
+    brlS+=' · <span class="delta '+(up?"up":"down")+'">'+(up?"▲":"▼")+" "+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
+  document.getElementById("c-brl-s").innerHTML=brlS;
+
+  // Projecao do mes (#4)
+  var mesDe=primeiroDiaMes(),mesAte=hojeUTC();
+  var custoMes=totais(noPeriodo(DADOS.porDiaModelo,mesDe,mesAte)).custoUsd*c;
+  var decorridos=diffDias(mesDe,mesAte)+1;
+  var proj=decorridos>0?custoMes/decorridos*ultimoDiaMes():0;
+  document.getElementById("c-proj").textContent=fmtBRL.format(proj);
+  document.getElementById("c-proj-s").textContent="mês até agora: "+fmtBRL.format(custoMes);
+
+  // Por ligacao (periodo)
+  var custoLig=(t.transcUsd+t.resumoUsd)*c;
+  document.getElementById("l-count").textContent=fmtInt.format(t.ligacoes);
+  document.getElementById("l-total").textContent=fmtBRL.format(custoLig);
+  document.getElementById("l-total-s").textContent=fmtUSD(t.transcUsd+t.resumoUsd);
+  document.getElementById("l-avg").textContent=fmtBRL4.format(t.ligacoes?custoLig/t.ligacoes:0);
+  document.getElementById("l-avg-s").textContent=(t.ligacoes?fmtUSD((t.transcUsd+t.resumoUsd)/t.ligacoes):fmtUSD(0))+" / ligação";
+
+  var accent=css("--accent"),brand=css("--brand-2"),gold=css("--gold"),muted=css("--muted"),grid="rgba(120,140,180,.14)";
+  var dias=porDiaAgg(rowsP);
+
+  // #2 Custo por dia (R$)
+  chart("chartCustoDia",{type:"bar",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{data:dias.map(function(x){return +(x.custoUsd*c).toFixed(4)}),backgroundColor:accent,borderRadius:6}]},options:baseOpt(muted,grid,true)});
+
+  // #6 Transcricao vs resumo (rosca, R$)
+  chart("chartOp",{type:"doughnut",data:{labels:["Transcrição","Resumo"],datasets:[{data:[+(t.transcUsd*c).toFixed(4),+(t.resumoUsd*c).toFixed(4)],backgroundColor:[brand,gold],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
+
+  // Custo por modelo (R$) no periodo
+  var porModelo={};rowsP.forEach(function(r){porModelo[r.model]=(porModelo[r.model]||0)+r.custoUsd});
+  var ml=Object.keys(porModelo).sort(function(a,b){return porModelo[b]-porModelo[a]});
+  chart("chartModelo",{type:"bar",data:{labels:ml,datasets:[{data:ml.map(function(m){return +(porModelo[m]*c).toFixed(4)}),backgroundColor:brand,borderRadius:6}]},options:baseOpt(muted,grid,false)});
+
+  // #9 Tendencia custo medio por ligacao
+  chart("chartTend",{type:"line",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{label:"R$ / ligação",data:dias.map(function(x){return x.ligacoes?+((x.custoUsd*c)/x.ligacoes).toFixed(4):0}),borderColor:gold,backgroundColor:"rgba(224,169,59,.15)",fill:true,tension:.3}]},options:baseOpt(muted,grid,false)});
+
+  // #5 Por ramal/usuario
+  var ramais=ramalAgg(noPeriodo(DADOS.porRamal,iv.de,iv.ate));
+  var somaRamais=ramais.reduce(function(a,x){return a+x.custoUsd},0);
+  var naoAtrib=t.custoUsd-somaRamais;
+  var tbr=document.getElementById("tbody-ramal");
+  if(!ramais.length&&naoAtrib<=0.0000001){tbr.innerHTML='<tr><td colspan="4" class="muted">Sem consumo atribuído a ramal no período.</td></tr>';}
+  else{
+    var html=ramais.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
+    if(naoAtrib>0.0000001)html+="<tr><td class='muted'>—</td><td class='muted'>não atribuído</td><td class='right muted'>—</td><td class='right muted'>"+fmtBRL.format(naoAtrib*c)+"</td></tr>";
+    tbr.innerHTML=html;
+  }
+
+  // #8 Ranking dias mais caros
+  var top=dias.slice().sort(function(a,b){return b.custoUsd-a.custoUsd}).slice(0,7);
+  var rk=document.getElementById("ranking");
+  rk.innerHTML=top.length?top.map(function(x){return "<li><span class='d'>"+x.dia+"</span><span>"+fmtBRL.format(x.custoUsd*c)+"</span></li>"}).join(""):'<li class="muted">Sem dados no período.</li>';
+
+  // #7 Tabela custo por dia (ordenavel)
+  renderTabelaDia(dias,c);
+
+  // Detalhe por modelo+op (todo o periodo)
   var tb=document.getElementById("tbody");
-  if(!d.linhas.length){tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum uso registrado ainda.</td></tr>';}
-  else{tb.innerHTML=d.linhas.map(function(l){return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+fmtInt.format(l.inputTokens)+"</td><td class='right'>"+fmtInt.format(l.outputTokens)+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*d.cotacao)+"</td></tr>";}).join("");}
-
-  var accent=css("--accent"),brand=css("--brand-2"),muted=css("--muted"),grid="rgba(120,140,180,.14)";
-  var dia=d.porDia||[];
-  chart("chartDia",{type:"line",data:{labels:dia.map(function(x){return x.dia.slice(5)}),datasets:[{label:"entrada",data:dia.map(function(x){return x.inputTokens}),borderColor:brand,backgroundColor:"rgba(18,87,143,.15)",fill:true,tension:.3},{label:"saída",data:dia.map(function(x){return x.outputTokens}),borderColor:accent,backgroundColor:"rgba(31,169,113,.15)",fill:true,tension:.3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}},scales:{x:{ticks:{color:muted},grid:{color:grid}},y:{ticks:{color:muted},grid:{color:grid}}}}});
-
-  var porModelo={};d.linhas.forEach(function(l){porModelo[l.model]=(porModelo[l.model]||0)+l.custoUsd});
-  var ml=Object.keys(porModelo);
-  chart("chartModelo",{type:"bar",data:{labels:ml,datasets:[{data:ml.map(function(m){return porModelo[m]}),backgroundColor:accent,borderRadius:6}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}});
+  var linhas=DADOS.linhas||[];
+  if(!linhas.length){tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum uso registrado ainda.</td></tr>';}
+  else{tb.innerHTML=linhas.map(function(l){return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+fmtInt.format(l.inputTokens)+"</td><td class='right'>"+fmtInt.format(l.outputTokens)+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*c)+"</td></tr>"}).join("");}
 }
+
+function baseOpt(muted,grid,money){return {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}}
+
+function renderTabelaDia(dias,c){
+  var arr=dias.slice();
+  arr.sort(function(a,b){
+    var col=ORD.col,va,vb;
+    if(col==="tokens"){va=a.inputTokens+a.outputTokens;vb=b.inputTokens+b.outputTokens;}
+    else if(col==="dia"){va=a.dia;vb=b.dia;}
+    else{va=a[col];vb=b[col];}
+    if(va<vb)return -1*ORD.dir;if(va>vb)return 1*ORD.dir;return 0;
+  });
+  var tb=document.getElementById("tbody-dia");
+  if(!arr.length){tb.innerHTML='<tr><td colspan="5" class="muted">Sem dados no período.</td></tr>';return;}
+  tb.innerHTML=arr.map(function(x){return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
+}
+
+var charts={};
+function chart(id,cfg){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),cfg)}
+
+// ---- CSV (#11) ----
+function baixar(nome,texto){var b=new Blob([texto],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download=nome;a.click();setTimeout(function(){URL.revokeObjectURL(u)},1500);}
+function csvDia(){if(!DADOS)return;var iv=intervalo(),c=cot();var dias=porDiaAgg(noPeriodo(DADOS.porDiaModelo,iv.de,iv.ate));
+  var linhas=[["dia","tokens_entrada","tokens_saida","chamadas","ligacoes","custo_usd","custo_brl"]];
+  dias.forEach(function(x){linhas.push([x.dia,x.inputTokens,x.outputTokens,x.calls,x.ligacoes,x.custoUsd.toFixed(6),(x.custoUsd*c).toFixed(4)])});
+  baixar("custos_por_dia_"+iv.de+"_a_"+iv.ate+".csv",linhas.map(function(l){return l.join(";")}).join("\\n"));}
+function csvRamal(){if(!DADOS)return;var iv=intervalo(),c=cot();var rs=ramalAgg(noPeriodo(DADOS.porRamal,iv.de,iv.ate));
+  var linhas=[["ramal","usuario","ligacoes","chamadas","custo_usd","custo_brl"]];
+  rs.forEach(function(x){linhas.push([x.ramal,x.usuario,x.ligacoes,x.calls,x.custoUsd.toFixed(6),(x.custoUsd*c).toFixed(4)])});
+  baixar("custos_por_ramal_"+iv.de+"_a_"+iv.ate+".csv",linhas.map(function(l){return l.join(";")}).join("\\n"));}
+
+// ---- controles ----
+function selPeriodo(p){PERIODO.preset=p;
+  var segs=document.querySelectorAll("#seg-periodo button");for(var i=0;i<segs.length;i++)segs[i].classList.toggle("on",segs[i].getAttribute("data-p")===p);
+  document.getElementById("custom-range").classList.toggle("hidden",p!=="custom");
+  render();}
+(function(){var segs=document.querySelectorAll("#seg-periodo button");for(var i=0;i<segs.length;i++)segs[i].onclick=function(){selPeriodo(this.getAttribute("data-p"))};})();
+document.getElementById("dt-de").onchange=function(){PERIODO.de=this.value||null;render()};
+document.getElementById("dt-ate").onchange=function(){PERIODO.ate=this.value||null;render()};
+document.getElementById("cambio").oninput=function(){var v=parseFloat(this.value);CAMBIO=isFinite(v)&&v>0?v:null;render()};
+document.getElementById("csv-dia").onclick=csvDia;
+document.getElementById("csv-ramal").onclick=csvRamal;
+document.getElementById("auto").onchange=function(){if(this.checked){timerAuto=setInterval(carregar,300000)}else{clearInterval(timerAuto);timerAuto=null}};
+(function(){var ths=document.querySelectorAll("#tbody-dia");
+  var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}if(DADOS)render();};})();
 
 function mostrarLogin(err){document.getElementById("app").classList.add("hidden");document.getElementById("login").classList.remove("hidden");document.getElementById("login-err").textContent=err||"";}
 function entrar(){var v=document.getElementById("senha").value||"";try{sessionStorage.setItem("admin-pwd",v)}catch(e){}carregar();}

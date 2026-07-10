@@ -45,7 +45,12 @@ export type TranscricaoInput = {
   modelName?: string;
   autoDownloadModelName?: string;
   withCuda?: boolean;
+  // Identidade da ligacao (ramal/usuario) para atribuir o custo da IA no painel.
+  ramal?: string;
+  usuario?: string;
 };
+
+type IdentidadeUso = { ramal?: string; usuario?: string };
 
 export type TranscricaoResultado = {
   audioPath: string;
@@ -287,6 +292,7 @@ function normalizeGeminiTranscriptionError(error: unknown): AppError {
 
 async function transcreverComGemini(
   audioPath: string,
+  identidade: IdentidadeUso = {},
 ): Promise<TranscricaoResultado> {
   const client = getGeminiClient();
   const models = resolveGeminiTranscriptionModels();
@@ -371,6 +377,8 @@ async function transcreverComGemini(
           op: "transcricao",
           inputTokens: response.usageMetadata?.promptTokenCount,
           outputTokens: response.usageMetadata?.candidatesTokenCount,
+          ramal: identidade.ramal,
+          usuario: identidade.usuario,
         });
 
         break;
@@ -605,7 +613,10 @@ export async function transcreverAudio(
 
   const provider = resolveTranscriptionProvider();
   if (provider === "gemini") {
-    return transcreverComGemini(audioPath);
+    return transcreverComGemini(audioPath, {
+      ramal: input.ramal,
+      usuario: input.usuario,
+    });
   }
 
   const modelName = resolveModelName(input.modelName);

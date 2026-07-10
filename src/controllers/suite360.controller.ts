@@ -205,8 +205,21 @@ export async function suitePreviewController(req: Request, res: Response) {
   const analise = analisarChamada(report);
   const meta = extrairMetaChamada(report, analise, endedAt);
 
+  // Usuario do escritorio (fonte de setor, executor E atribuicao de custo da IA):
+  //  - interna  -> quem LIGOU (caller);
+  //  - externa  -> o funcionario que ATENDEU (answerer).
+  // O nome do GoTo vem como "NOME - SETOR", entao o setor sai do proprio nome.
+  const usuarioEscritorio =
+    analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
+  const nomeUsuario = usuarioEscritorio?.nome || "";
+  const ramalUsuario = usuarioEscritorio?.ramal || "";
+
   const audioPath = await downloadRecording(recordingId);
-  const transcricao = await transcreverAudio({ audioPath });
+  const transcricao = await transcreverAudio({
+    audioPath,
+    ramal: ramalUsuario,
+    usuario: nomeUsuario,
+  });
 
   // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito).
   // Best-effort: se a busca falhar, a IA segue sem lista e caimos no match textual.
@@ -224,6 +237,8 @@ export async function suitePreviewController(req: Request, res: Response) {
         id: t.id,
         nome: t.nome,
       })),
+      ramal: ramalUsuario,
+      usuario: nomeUsuario,
     }));
   } catch (error) {
     iaOk = false;
@@ -266,14 +281,6 @@ export async function suitePreviewController(req: Request, res: Response) {
   } else {
     cliente = { status: "nao_encontrado" };
   }
-
-  // Usuario do escritorio (fonte de setor + executor):
-  //  - interna  -> quem LIGOU (caller);
-  //  - externa  -> o funcionario que ATENDEU (answerer).
-  // O nome do GoTo vem como "NOME - SETOR", entao o setor sai do proprio nome.
-  const usuarioEscritorio =
-    analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
-  const nomeUsuario = usuarioEscritorio?.nome || "";
 
   // ----- Assunto (tipo de apontamento) -----
   // Prioridade: env fixo > escolha da IA (validada na lista) > match textual.
