@@ -349,7 +349,14 @@ async function transcreverComGemini(
               role: "user",
               parts: [
                 {
-                  text: "Transcreva o audio integralmente e retorne somente o texto puro da transcricao em portugues do Brasil, sem markdown e sem comentarios extras.",
+                  text:
+                    "Transcreva o audio integralmente em portugues do Brasil e retorne SOMENTE o texto puro da transcricao, sem markdown e sem comentarios.\n" +
+                    "Cuidado ESPECIAL com NOMES PROPRIOS (de pessoas, empresas, cidades) e com numeros/documentos: transcreva-os o mais fiel possivel ao que foi falado, mantendo a grafia mais proxima do que se ouve. " +
+                    "NAO troque um nome por uma palavra comum parecida e NAO invente nomes. " +
+                    "Quando a pessoa soletrar (letra por letra) um nome, e-mail, CNPJ ou telefone, reproduza a sequencia exata. " +
+                    "Preserve nomes de empresas, marcas e siglas como foram ditos. " +
+                    "Use o contexto da conversa para grafar corretamente nomes que se repetem. " +
+                    "Se um nome for realmente inaudivel, escreva a forma fonetica mais proxima em vez de omitir.",
                 },
                 createPartFromUri(fileUri, fileMimeType),
               ],
