@@ -42,14 +42,6 @@ export async function publishCallEnded(
   await channel.publish("call-ended", event);
 }
 
-// Publica o payload cru do webhook num canal de debug (para inspecionar o
-// formato real do evento do GoTo durante os testes). Removivel depois.
-export async function publishDebug(payload: unknown): Promise<void> {
-  if (!isAblyConfigured()) return;
-  const channel = getRest().channels.get("debug:webhook");
-  await channel.publish("raw", payload as Record<string, unknown>);
-}
-
 // Gera um TokenRequest com capacidade limitada a assinar o canal do ramal.
 // O desktop usa isso (via authUrl) para conectar sem ver a root key.
 export async function createRamalTokenRequest(

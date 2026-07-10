@@ -19,7 +19,6 @@ import {
   createRamalTokenRequest,
   isAblyConfigured,
   publishCallEnded,
-  publishDebug,
 } from "../services/ably";
 import {
   CallEndedEvent,
@@ -107,8 +106,6 @@ export async function gotoWebhookController(req: Request, res: Response) {
   }
 
   const body = req.body;
-  // Debug temporario: espelha o payload cru para inspecao do formato real.
-  publishDebug(body).catch(() => undefined);
 
   // Responde imediatamente. O roteamento roda em SEGUNDO PLANO (waitUntil):
   // o relatorio de ENTRADA nao fica pronto no instante do ENDING, entao
