@@ -59,7 +59,17 @@ O desktop também tem uma aba "Transcrever & Resumir" para arquivos avulsos (`.w
 
 ### Fluxo de administração — custos de IA
 
-`GET /admin` serve um painel (HTML autossuficiente com gráficos) que consulta `GET /admin/uso` para mostrar quanto foi gasto em tokens do Gemini, convertido para BRL.
+`GET /admin` serve um painel (HTML com gráficos Chart.js) que consulta `GET /admin/uso` para mostrar quanto foi gasto em tokens do Gemini, convertido para BRL. O painel oferece:
+
+- **Filtro por período** (7/30 dias, mês atual, tudo, ou intervalo personalizado) — todas as views recalculam.
+- **Custo por dia (R$)**, **transcrição vs. resumo** (rosca), **custo por modelo** e **tendência do custo médio por ligação**.
+- **Comparativo** com o período anterior (▲▼ %), **projeção do mês** (no ritmo atual), **ranking dos dias mais caros** e **tabela de custo por dia** ordenável.
+- **Gasto por ramal / usuário** (ver nota abaixo), **exportação CSV** (por dia e por ramal), **auto-atualização** (5 min) e **câmbio USD→BRL editável** (recalcula os R$ na hora).
+
+> **Atribuição por ramal/usuário é _forward-only_.** O consumo passou a ser gravado com o ramal/usuário
+> do escritório (interna → quem ligou; externa → quem atendeu) em `recordUsage`, em hashes paralelos
+> `uso:du:<dia>` (`modelo::op::ramal::métrica`) + `uso:ramais` (ramal → nome). O histórico **anterior** a
+> essa mudança não tem ramal e aparece como "não atribuído" no painel.
 
 ---
 
