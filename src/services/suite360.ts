@@ -453,16 +453,21 @@ function nomeSemDept(nome: string | undefined): string {
 // SUITE360_SETOR_ALIASES ("chave=Setor;...") e opcional e sobrescreve/estende.
 function aliasesSetor(): Record<string, string> {
   const map: Record<string, string> = {
+    // Tecnologia/infra -> Suporte (regra do usuario).
     [norm("desenvolvimento")]: "Suporte",
     [norm("tecnologia")]: "Suporte",
     [norm("ti")]: "Suporte",
     [norm("t.i")]: "Suporte",
     [norm("infra")]: "Suporte",
     [norm("infraestrutura")]: "Suporte",
+    [norm("hardware")]: "Suporte",
     [norm("tecnologia da informacao")]: "Suporte",
     [norm("tecnologia e inovacao")]: "Suporte",
     [norm("tecnologia da inovacao")]: "Suporte",
     [norm("suporte tecnico")]: "Suporte",
+    // Abreviacoes/variacoes de nomes de setor do GoTo.
+    [norm("ed. financeira")]: "Educação Financeira",
+    [norm("ed financeira")]: "Educação Financeira",
   };
   for (const par of (process.env.SUITE360_SETOR_ALIASES || "").split(/[;\n]/)) {
     const [k, v] = par.split("=");

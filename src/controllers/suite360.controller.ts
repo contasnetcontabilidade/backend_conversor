@@ -9,7 +9,13 @@ import {
   getReportComRetry,
   type AnaliseChamada,
 } from "./goto.controller";
-import { marcarChamadoAberto } from "../services/store";
+import {
+  getChamadoCriado,
+  liberarCriacao,
+  marcarChamadoAberto,
+  reservarCriacao,
+  salvarChamadoCriado,
+} from "../services/store";
 import {
   buscarClientes,
   buscarOrigens,
@@ -369,9 +375,9 @@ export async function suiteCriarController(req: Request, res: Response) {
     await marcarChamadoAberto(conversationSpaceId).catch(() => undefined);
   }
 
-  const resultado = await criarChamado(chamadoBody as ChamadoBody);
-
-  if (resultado.dryRun) {
+  // --- DEV (dry-run): so devolve o JSON que SERIA enviado, sem criar nada. ---
+  if (dryRun) {
+    const resultado = await criarChamado(chamadoBody as ChamadoBody);
     console.log(
       `[suite360:criar] req=${requestId} conv=${conversationSpaceId || "-"} ` +
         `cliente=${chamadoBody.cliente_id || "-"} DRY-RUN (nao enviado)` +
@@ -392,7 +398,58 @@ export async function suiteCriarController(req: Request, res: Response) {
     return;
   }
 
+  // --- PRODUCAO: idempotencia (nao cria chamado duplicado para a mesma ligacao) ---
+  if (conversationSpaceId) {
+    const jaCriado = await getChamadoCriado(conversationSpaceId).catch(
+      () => null,
+    );
+    if (jaCriado) {
+      console.log(
+        `[suite360:criar] req=${requestId} conv=${conversationSpaceId} JA EXISTIA protocolo=${jaCriado.protocolo}`,
+      );
+      res.status(200).json({
+        ok: true,
+        data: {
+          requestId,
+          dryRun: false,
+          jaExistia: true,
+          id: jaCriado.id,
+          protocolo: jaCriado.protocolo,
+          mensagem: `Chamado ja existente para esta ligacao: ${jaCriado.protocolo}`,
+        },
+      });
+      return;
+    }
+    // Lock atomico: evita que caller+atendente (interna) criem 2 ao mesmo tempo.
+    const reservou = await reservarCriacao(conversationSpaceId).catch(() => true);
+    if (!reservou) {
+      throw new AppError({
+        statusCode: 409,
+        code: "CHAMADO_EM_CRIACAO",
+        message:
+          "Este chamado ja esta sendo criado. Aguarde alguns segundos e verifique.",
+      });
+    }
+  }
+
+  let resultado: Awaited<ReturnType<typeof criarChamado>>;
+  try {
+    resultado = await criarChamado(chamadoBody as ChamadoBody);
+  } catch (error) {
+    if (conversationSpaceId) {
+      await liberarCriacao(conversationSpaceId).catch(() => undefined);
+    }
+    throw error;
+  }
+
   const protocolo = resultado.protocolo || "";
+  if (conversationSpaceId) {
+    await salvarChamadoCriado(conversationSpaceId, {
+      id: resultado.id || "",
+      protocolo,
+    }).catch(() => undefined);
+    await liberarCriacao(conversationSpaceId).catch(() => undefined);
+  }
   console.log(
     `[suite360:criar] req=${requestId} conv=${conversationSpaceId || "-"} ` +
       `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,

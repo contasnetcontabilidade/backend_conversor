@@ -115,6 +115,57 @@ export async function chamadoFoiAberto(
   return (await getValue(`goto:aberto:${conversationSpaceId}`)) === "1";
 }
 
+// ---- Idempotencia da CRIACAO do chamado (produção) ----
+// Registro do chamado ja criado (protocolo) para nao criar duplicado.
+export async function getChamadoCriado(
+  conversationSpaceId: string,
+): Promise<{ id: string; protocolo: string } | null> {
+  const raw = (await getValue(`goto:chamado:${conversationSpaceId}`)) as unknown;
+  if (!raw) return null;
+  if (typeof raw === "object") return raw as { id: string; protocolo: string };
+  try {
+    return JSON.parse(raw as string);
+  } catch {
+    return null;
+  }
+}
+export async function salvarChamadoCriado(
+  conversationSpaceId: string,
+  dados: { id: string; protocolo: string },
+) {
+  await setValue(
+    `goto:chamado:${conversationSpaceId}`,
+    JSON.stringify(dados),
+    30 * 24 * 3600, // 30 dias
+  );
+}
+// Lock atomico (SET NX) para impedir criacao concorrente da mesma chamada.
+// Retorna true se conseguiu reservar (deve criar); false se ja ha uma em andamento.
+export async function reservarCriacao(
+  conversationSpaceId: string,
+): Promise<boolean> {
+  const key = `goto:criando:${conversationSpaceId}`;
+  const r = getRedis();
+  if (r) {
+    const res = await r.set(key, "1", { nx: true, ex: 120 });
+    return res === "OK";
+  }
+  if (memGet(key)) return false;
+  mem.set(key, "1");
+  memExpiry.set(key, Date.now() + 120_000);
+  return true;
+}
+export async function liberarCriacao(conversationSpaceId: string) {
+  const key = `goto:criando:${conversationSpaceId}`;
+  const r = getRedis();
+  if (r) {
+    await r.del(key);
+    return;
+  }
+  mem.delete(key);
+  memExpiry.delete(key);
+}
+
 export async function pushEvent(event: CallEndedEvent): Promise<void> {
   const r = getRedis();
   if (r) {
