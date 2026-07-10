@@ -468,6 +468,7 @@ function aliasesSetor(): Record<string, string> {
     // Abreviacoes/variacoes de nomes de setor do GoTo.
     [norm("ed. financeira")]: "Educação Financeira",
     [norm("ed financeira")]: "Educação Financeira",
+    [norm("legalizacao")]: "Regularização Fiscal",
   };
   for (const par of (process.env.SUITE360_SETOR_ALIASES || "").split(/[;\n]/)) {
     const [k, v] = par.split("=");
