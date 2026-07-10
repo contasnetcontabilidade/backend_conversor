@@ -30,9 +30,13 @@ import {
   suiteUsuariosController,
 } from "../controllers/suite360.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
+import { appAuth } from "../middlewares/appAuth";
 import { asyncHandler } from "../utils/http";
 
 export const apiRouter = Router();
+
+// Autenticacao por token do app (dormante ate API_AUTH_TOKEN ser definido).
+apiRouter.use(appAuth);
 
 apiRouter.get("/health", healthController);
 apiRouter.post("/transcricao", asyncHandler(transcricaoController));
