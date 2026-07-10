@@ -95,9 +95,10 @@ function extrairMetaChamada(
 ): MetaChamada {
   const direction = String(report.direction || "").toUpperCase();
 
-  // Data/hora: tenta varios campos do relatorio, senao o endedAt do evento.
+  // Data/hora: o relatorio do GoTo usa "callCreated"/"callEnded" (ISO).
   const inicioRaw =
     primeiraString(report, [
+      "callCreated",
       "startTime",
       "start",
       "startedAt",
@@ -107,16 +108,20 @@ function extrairMetaChamada(
     ]) || fallbackEndedAt;
   const dataHora = formatarDataHora(inicioRaw);
 
-  // Duracao: campo direto (segundos) ou diferenca start/end.
+  // Duracao: campo direto (segundos) ou diferenca callCreated/callEnded.
   let duracaoSeg = primeiroNumero(report, [
     "duration",
     "durationSeconds",
     "duracao",
   ]);
   if (!Number.isFinite(duracaoSeg)) {
-    const ini = Date.parse(String(report.startTime || report.start || ""));
+    const ini = Date.parse(
+      String(report.callCreated || report.startTime || report.start || ""),
+    );
     const fim = Date.parse(
-      String(report.endTime || report.end || fallbackEndedAt || ""),
+      String(
+        report.callEnded || report.endTime || report.end || fallbackEndedAt || "",
+      ),
     );
     if (Number.isFinite(ini) && Number.isFinite(fim) && fim > ini) {
       duracaoSeg = (fim - ini) / 1000;
