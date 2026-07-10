@@ -42,6 +42,19 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+// [DIAGNOSTICO] Busca o cartao de um contato da agenda GoTo pelo id (a empresa/
+// CNPJ ficam aqui, nao na ligacao). Nao lanca: devolve status + corpo para
+// inspecao. Sera removido/convertido apos definirmos o padrao de cadastro.
+export async function getContatoGotoDiag(
+  contactId: string,
+): Promise<{ status: number; body: unknown }> {
+  const resp = await authedFetch(
+    `${API_BASE}/contacts/v1/contacts/${encodeURIComponent(contactId)}`,
+  );
+  const body = await readJson(resp);
+  return { status: resp.status, body };
+}
+
 // Resolve o accountKey (super-admin) — do env ou via Admin API /me.
 export async function resolveAccountKey(): Promise<string> {
   const fromEnv = process.env.GOTO_ACCOUNT_KEY;
