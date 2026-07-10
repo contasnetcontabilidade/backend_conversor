@@ -3,11 +3,7 @@ import { Request, Response } from "express";
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
 import { transcreverAudio } from "../services/transcricao";
-import {
-  downloadRecording,
-  extractRecordingId,
-  getContatoGotoDiag,
-} from "../services/gotoApi";
+import { downloadRecording, extractRecordingId } from "../services/gotoApi";
 import {
   analisarChamada,
   getReportComRetry,
@@ -227,31 +223,28 @@ export async function suitePreviewController(req: Request, res: Response) {
         `[diag:contato-externo] req=${requestId} phoneParticipants=` +
           JSON.stringify(externos),
       );
-      // O relatorio so traz o ID do contato (empresa/CNPJ ficam na agenda).
-      // Pega esse id e consulta o cartao completo na Contacts API.
-      let contactId = "";
-      for (const p of externos) {
-        const contato =
-          isRecord(p) && isRecord(p.type) && isRecord(p.type.contact)
-            ? p.type.contact
-            : null;
-        const id =
-          contato && typeof contato.id === "string" ? contato.id : "";
-        if (id) {
-          contactId = id;
-          break;
+      // Varredura por QUALQUER campo que pareca empresa/organizacao/CNPJ/contato.
+      const achados: string[] = [];
+      const visit = (node: unknown, path: string): void => {
+        if (node == null || achados.length > 40) return;
+        if (Array.isArray(node)) {
+          node.forEach((v, i) => visit(v, `${path}[${i}]`));
+          return;
         }
-      }
+        if (isRecord(node)) {
+          for (const [k, v] of Object.entries(node)) {
+            if (/company|organiz|empres|business|cnpj|contact/i.test(k)) {
+              achados.push(`${path}.${k}=${JSON.stringify(v)}`);
+            }
+            visit(v, `${path}.${k}`);
+          }
+        }
+      };
+      visit(report, "report");
       console.log(
-        `[diag:contato-externo] req=${requestId} contactId=${contactId || "-"}`,
+        `[diag:contato-externo] req=${requestId} camposEmpresa=` +
+          (achados.length ? achados.join(" | ") : "(nenhum)"),
       );
-      if (contactId) {
-        const card = await getContatoGotoDiag(contactId);
-        console.log(
-          `[diag:contato-externo] req=${requestId} contatoCard status=${card.status} body=` +
-            JSON.stringify(card.body),
-        );
-      }
     } catch (e) {
       console.warn(`[diag:contato-externo] req=${requestId} falhou:`, getErrorMessage(e));
     }
