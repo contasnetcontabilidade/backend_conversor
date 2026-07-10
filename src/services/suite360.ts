@@ -447,18 +447,27 @@ function nomeSemDept(nome: string | undefined): string {
   return (i >= 0 ? s.slice(0, i) : s).trim();
 }
 
-// Aliases dept(GoTo) -> nome de setor no Suite. desenvolvimento == tecnologia
-// (mesmo time). Overrides/extensao por env SUITE360_SETOR_ALIASES ("chave=Setor;...").
+// Aliases dept(GoTo) -> nome de setor no Suite.
+// Fallback embutido no codigo (nao precisa de env): tudo que e tecnologia
+// (desenvolvimento, TI, infra, etc.) vai para "Suporte". O env
+// SUITE360_SETOR_ALIASES ("chave=Setor;...") e opcional e sobrescreve/estende.
 function aliasesSetor(): Record<string, string> {
-  const map: Record<string, string> = {};
+  const map: Record<string, string> = {
+    [norm("desenvolvimento")]: "Suporte",
+    [norm("tecnologia")]: "Suporte",
+    [norm("ti")]: "Suporte",
+    [norm("t.i")]: "Suporte",
+    [norm("infra")]: "Suporte",
+    [norm("infraestrutura")]: "Suporte",
+    [norm("tecnologia da informacao")]: "Suporte",
+    [norm("tecnologia e inovacao")]: "Suporte",
+    [norm("tecnologia da inovacao")]: "Suporte",
+    [norm("suporte tecnico")]: "Suporte",
+  };
   for (const par of (process.env.SUITE360_SETOR_ALIASES || "").split(/[;\n]/)) {
     const [k, v] = par.split("=");
     if (k && v) map[norm(k)] = v.trim();
   }
-  const dev = norm("desenvolvimento");
-  const tec = norm("tecnologia");
-  if (map[dev] && !map[tec]) map[tec] = map[dev];
-  if (map[tec] && !map[dev]) map[dev] = map[tec];
   return map;
 }
 
