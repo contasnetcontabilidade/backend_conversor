@@ -6,6 +6,8 @@ import { listarEmailsMarcados, obterEmail } from "../services/gmailApi";
 import {
   getChamadoCriado,
   getEmailByToken,
+  getGmailAccess,
+  getGmailRefresh,
   liberarCriacao,
   reservarCriacao,
   salvarChamadoCriado,
@@ -120,10 +122,22 @@ export async function gmailDiagController(_req: Request, res: Response) {
 // GET /gmail/emails?profileToken= — lista os e-mails marcados
 // ---------------------------------------------------------------------------
 
-async function emailDoToken(profileToken: string): Promise<string> {
-  const email = profileToken
+// Resolve a conta Google do usuario: 1) pelo profileToken (opaco); 2) fallback
+// pelo e-mail enviado pelo app, se essa conta tiver tokens salvos (esta conectada).
+async function resolverContaGmail(
+  profileToken?: string,
+  emailParam?: string,
+): Promise<string> {
+  let email = profileToken
     ? await getEmailByToken(profileToken).catch(() => null)
     : null;
+  if (!email && emailParam) {
+    const e = String(emailParam).trim().toLowerCase();
+    const conectada =
+      (await getGmailRefresh(e).catch(() => null)) ||
+      (await getGmailAccess(e).catch(() => null));
+    if (e && conectada) email = e;
+  }
   if (!email) {
     throw new AppError({
       statusCode: 401,
@@ -139,7 +153,9 @@ export async function gmailEmailsController(req: Request, res: Response) {
     typeof req.query.profileToken === "string"
       ? req.query.profileToken.trim()
       : "";
-  const email = await emailDoToken(profileToken);
+  const emailParam =
+    typeof req.query.email === "string" ? req.query.email.trim() : "";
+  const email = await resolverContaGmail(profileToken, emailParam);
   const emails = await listarEmailsMarcados(email);
   res.status(200).json({ ok: true, data: { conta: email, emails } });
 }
@@ -168,7 +184,8 @@ export async function gmailPreviewController(req: Request, res: Response) {
       message: "Informe o messageId do e-mail.",
     });
   }
-  const email = await emailDoToken(profileToken || "");
+  const emailParam = getOptionalString(body, "email");
+  const email = await resolverContaGmail(profileToken || "", emailParam);
   const msg = await obterEmail(email, messageId);
 
   const tiposDisponiveis = await buscarTipos().catch(() => []);
