@@ -320,9 +320,11 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
     },
   };
 
-  // Retry: 1a tentativa com thinking desligado (barato); se vier vazio/JSON
-  // invalido/sem resumo, re-tenta com o thinking padrao do modelo (mais confiavel).
-  const MAX_TENTATIVAS = 3;
+  // Retry robusto: queremos SEMPRE gerar o resumo quando a transcricao tem
+  // conteudo, mesmo que demore um pouco mais. 1a tentativa com thinking desligado
+  // (barato); as seguintes com o thinking padrao (mais confiavel). Re-tenta em
+  // falhas transitorias: vazio/JSON invalido, quota/429 e erros de upstream (5xx).
+  const MAX_TENTATIVAS = 5;
   let ultimoErro: unknown;
   for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
     try {
@@ -368,17 +370,31 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
           "GEMINI_INVALID_PAYLOAD",
           "GEMINI_MISSING_FIELDS",
         ].includes(error.code);
-      // 429/rate limit: re-tenta com backoff (ajuda em limite por minuto;
-      // limite diario nao recupera e cai no tratamento de erro).
       const msg = getErrorMessage(error).toLowerCase();
-      const quota = /quota|resource_exhausted|429|rate limit|too many/.test(msg);
-      if (tentativa < MAX_TENTATIVAS && (vazioOuInvalido || quota)) {
-        if (quota) await new Promise((r) => setTimeout(r, 4000 * tentativa));
+      const status =
+        isRecord(error) && typeof error.status === "number" ? error.status : 0;
+      // quota/rate-limit por minuto: espera mais (o limite diario nao recupera).
+      const quota =
+        status === 429 ||
+        /quota|resource_exhausted|429|rate limit|too many/.test(msg);
+      // erro transitorio de upstream (5xx / indisponibilidade / timeout de rede).
+      const upstream =
+        status >= 500 ||
+        /unavailable|internal error|overloaded|timeout|deadline|502|503|504|econnreset|network|fetch failed/.test(
+          msg,
+        );
+      if (tentativa < MAX_TENTATIVAS && (vazioOuInvalido || quota || upstream)) {
+        const espera = quota
+          ? Math.min(3000 * tentativa, 8000)
+          : upstream
+            ? Math.min(1500 * tentativa, 6000)
+            : 500;
         console.warn(
           `[gemini] falha no resumo (${
-            quota ? "quota/429" : "vazio/invalido"
-          }) tentativa ${tentativa}/${MAX_TENTATIVAS}; re-tentando.`,
+            quota ? "quota/429" : upstream ? "upstream" : "vazio/invalido"
+          }) tentativa ${tentativa}/${MAX_TENTATIVAS}; re-tentando em ${espera}ms.`,
         );
+        await new Promise((r) => setTimeout(r, espera));
         continue;
       }
       throw normalizeGeminiError(error);
