@@ -103,6 +103,19 @@ export async function gmailOAuthDoneController(req: Request, res: Response) {
     );
 }
 
+// [DIAGNOSTICO TEMPORARIO] testa o round-trip do storage (token->email).
+export async function gmailDiagController(_req: Request, res: Response) {
+  const k = "diagtok-" + randomUUID();
+  await setPerfilToken(k, "diag@teste.com");
+  const lido = await getEmailByToken(k);
+  res.status(200).json({
+    ok: true,
+    escreveu: "diag@teste.com",
+    leu: lido,
+    match: lido === "diag@teste.com",
+  });
+}
+
 // ---------------------------------------------------------------------------
 // GET /gmail/emails?profileToken= — lista os e-mails marcados
 // ---------------------------------------------------------------------------
