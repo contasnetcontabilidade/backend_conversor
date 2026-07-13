@@ -105,17 +105,35 @@ export async function gmailOAuthDoneController(req: Request, res: Response) {
     );
 }
 
-// [DIAGNOSTICO TEMPORARIO] testa o round-trip do storage (token->email).
-export async function gmailDiagController(_req: Request, res: Response) {
+// [DIAGNOSTICO TEMPORARIO] inspeciona o estado do storage do Gmail.
+//   ?email=...   -> mostra se a conta tem refresh/access token salvos
+//   ?token=...   -> mostra se um profileToken resolve para um e-mail
+//   (sem params) -> testa o round-trip basico do storage
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function gmailDiagController(req: Request, res: Response) {
+  const email = String(req.query.email || "").trim().toLowerCase();
+  const token = String(req.query.token || "").trim();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out: any = { ok: true };
+
   const k = "diagtok-" + randomUUID();
   await setPerfilToken(k, "diag@teste.com");
-  const lido = await getEmailByToken(k);
-  res.status(200).json({
-    ok: true,
-    escreveu: "diag@teste.com",
-    leu: lido,
-    match: lido === "diag@teste.com",
-  });
+  out.roundTripOk = (await getEmailByToken(k)) === "diag@teste.com";
+
+  if (token) {
+    out.token = {
+      prefixo: token.slice(0, 8) + "…",
+      resolveEmail: await getEmailByToken(token).catch(() => null),
+    };
+  }
+  if (email) {
+    out.conta = {
+      email,
+      temRefresh: Boolean(await getGmailRefresh(email).catch(() => null)),
+      temAccess: Boolean(await getGmailAccess(email).catch(() => null)),
+    };
+  }
+  res.status(200).json(out);
 }
 
 // ---------------------------------------------------------------------------
