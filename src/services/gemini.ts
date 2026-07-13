@@ -38,6 +38,11 @@ export type ResumoInput = {
   // da IA no painel de consumo. Opcional; quando ausente, o custo fica "nao atribuido".
   ramal?: string;
   usuario?: string;
+  // Texto direto a resumir (ex.: corpo de um e-mail). Quando presente, NAO le
+  // arquivo .srt do disco — usa este texto como conteudo.
+  text?: string;
+  // Origem do conteudo, ajusta o prompt. Padrao: "ligacao".
+  origem?: "ligacao" | "email";
 };
 
 function getGeminiClient() {
@@ -220,19 +225,22 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
   srtPath: string;
   resumo: ResumoJson;
 }> {
-  // 1) Descobre o arquivo .srt de origem.
-  const srtPath = resolveSrtPath(input);
-
-  if (!fs.existsSync(srtPath)) {
-    throw new AppError({
-      statusCode: 404,
-      code: "SRT_NOT_FOUND",
-      message: `Arquivo .srt nao encontrado: ${srtPath}`,
-    });
+  // 1) Origem do conteudo: texto direto (e-mail) OU arquivo .srt (transcricao).
+  let srtPath = "";
+  let transcricao: string;
+  if (input.text != null) {
+    transcricao = String(input.text);
+  } else {
+    srtPath = resolveSrtPath(input);
+    if (!fs.existsSync(srtPath)) {
+      throw new AppError({
+        statusCode: 404,
+        code: "SRT_NOT_FOUND",
+        message: `Arquivo .srt nao encontrado: ${srtPath}`,
+      });
+    }
+    transcricao = await readFile(srtPath, "utf-8");
   }
-
-  // 2) Lê transcrição.
-  const transcricao = await readFile(srtPath, "utf-8");
 
   // Guarda: transcricao vazia/inaudivel (comum em ligacao interna curta) ->
   // nao chama o modelo; devolve um resumo minimo (evita "vazio" confuso).
@@ -243,12 +251,19 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
     )
     .replace(/[^\p{L}]/gu, "")
     .trim();
+  const origem = input.origem || "ligacao";
   if (soTexto.length < 10) {
     return {
       srtPath,
       resumo: {
-        titulo: "Ligacao sem conteudo transcrito",
-        resumo: "Transcricao vazia ou inaudivel.",
+        titulo:
+          origem === "email"
+            ? "E-mail sem conteudo"
+            : "Ligacao sem conteudo transcrito",
+        resumo:
+          origem === "email"
+            ? "Conteudo do e-mail vazio."
+            : "Transcricao vazia ou inaudivel.",
         pontos_principais: [],
         providencias_sugeridas: [],
         cliente_mencionado: { nome: "", cnpj: "" },
@@ -258,24 +273,29 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
     };
   }
 
-  const prompt = `Voce registra chamados de atendimento telefonico de um escritorio de contabilidade,
-a partir da transcricao de uma ligacao. Escreva em portugues do Brasil, tom profissional,
-claro e objetivo. Retorne APENAS JSON valido, sem markdown e sem texto fora do JSON.
+  const contexto =
+    origem === "email"
+      ? "Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de um E-MAIL recebido de um cliente."
+      : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
+  const fontePalavra = origem === "email" ? "no e-mail" : "na ligacao";
+  const prompt = `${contexto}
+Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
+sem markdown e sem texto fora do JSON.
 Campos obrigatorios:
 - titulo: string (assunto curto do chamado, ate ~80 caracteres)
-- resumo: string (resumo executivo do atendimento, 2 a 5 frases: o que o cliente pediu/relatou e o desfecho)
-- pontos_principais: string[] (os principais topicos/fatos tratados na ligacao, curtos e objetivos)
-- providencias_sugeridas: string[] (acoes/pendencias a executar apos a ligacao; array vazio se nao houver)
+- resumo: string (resumo executivo do atendimento, 2 a 5 frases: o que o cliente pediu/relatou e o desfecho/pendencia)
+- pontos_principais: string[] (os principais topicos/fatos tratados, curtos e objetivos)
+- providencias_sugeridas: string[] (acoes/pendencias a executar; array vazio se nao houver)
 - cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
-  cliente SE forem ditos na ligacao; capte o nome mesmo que dito de forma informal (ex.: so o
-  primeiro nome da empresa ou da pessoa). Use string vazia "" quando nao mencionado.
+  cliente SE aparecerem ${fontePalavra} (inclusive na assinatura); capte o nome mesmo que informal.
+  Use string vazia "" quando nao houver.
 - assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
   "Folha de pagamento", "Abertura de empresa"; "" se incerto).
-- assunto_escolhido: objeto { id: string, nome: string }. Com base no que foi DITO na ligacao,
-  escolha na "LISTA DE ASSUNTOS DISPONIVEIS" abaixo (quando houver) o item que MELHOR representa o
-  motivo do atendimento, e copie o id e o nome EXATAMENTE como aparecem na lista. Escolha o mais
-  especifico que se aplique. Se realmente nada se encaixar (ou se nao houver lista), use id e nome vazios.
-Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
+- assunto_escolhido: objeto { id: string, nome: string }. Com base no conteudo, escolha na
+  "LISTA DE ASSUNTOS DISPONIVEIS" abaixo (quando houver) o item que MELHOR representa o motivo do
+  atendimento, e copie o id e o nome EXATAMENTE como aparecem na lista. Escolha o mais especifico que
+  se aplique. Se realmente nada se encaixar (ou se nao houver lista), use id e nome vazios.
+Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
 
   // Lista de assuntos do Suite para a IA escolher UM (quando fornecida pelo controller).
   const assuntos = input.assuntosDisponiveis || [];
@@ -330,7 +350,9 @@ Nao invente informacoes. Se algo nao aparece na transcricao, deixe vazio.`;
     try {
       const response = await getGeminiClient().models.generateContent({
         model: modelUsado,
-        contents: `${prompt}${blocoAssuntos}\n\nTRANSCRICAO:\n${transcricao}`,
+        contents: `${prompt}${blocoAssuntos}\n\n${
+          origem === "email" ? "E-MAIL" : "TRANSCRICAO"
+        }:\n${transcricao}`,
         config: {
           thinkingConfig:
             tentativa === 1 ? thinkingConfigFor(modelUsado) : undefined,

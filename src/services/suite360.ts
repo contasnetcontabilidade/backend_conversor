@@ -664,8 +664,9 @@ export interface RefResolvida {
   // env  = fixado por variavel de ambiente
   // ia   = escolhido pela IA a partir da lista do Suite
   // lookup = resolvido por busca/heuristica no backend
+  // perfil = veio do perfil do usuario (Configurar Perfil)
   // ausente = nao identificado (usuario escolhe no modal)
-  fonte: "env" | "ia" | "lookup" | "ausente";
+  fonte: "env" | "ia" | "lookup" | "perfil" | "ausente";
 }
 
 async function lookupPrimeiro(
@@ -806,6 +807,48 @@ ${d.transcricao || "-"}
 
 Gravacao:
 ${d.gravacao || "-"}`;
+}
+
+export interface DadosDescricaoEmail {
+  razaoSocial?: string;
+  cnpj?: string;
+  remetente?: string; // "Nome <email>"
+  assunto?: string;
+  dataHora?: string;
+  atendente?: string; // usuario do escritorio que abriu
+  idEmail?: string; // Gmail message id
+  resumo?: string;
+  pontosPrincipais?: string[];
+  providencias?: string[];
+  corpo?: string; // corpo do e-mail
+}
+
+export function montarDescricaoEmail(d: DadosDescricaoEmail): string {
+  const cliente =
+    [d.razaoSocial, d.cnpj].filter(Boolean).join(" - ") || "(nao identificado)";
+  return `Atendimento por e-mail registrado automaticamente.
+
+Cliente:
+${cliente}
+
+Dados do e-mail:
+- Remetente: ${d.remetente || "-"}
+- Assunto: ${d.assunto || "-"}
+- Data/hora: ${d.dataHora || "-"}
+- Responsavel: ${d.atendente || "-"}
+- ID do e-mail: ${d.idEmail || "-"}
+
+Resumo:
+${d.resumo || "-"}
+
+Pontos principais:
+${linhas(d.pontosPrincipais)}
+
+Providencias sugeridas:
+${linhas(d.providencias)}
+
+Conteudo do e-mail:
+${d.corpo || "-"}`;
 }
 
 // ---------------------------------------------------------------------------

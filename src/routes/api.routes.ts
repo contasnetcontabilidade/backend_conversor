@@ -29,6 +29,14 @@ import {
   suiteTiposController,
   suiteUsuariosController,
 } from "../controllers/suite360.controller";
+import {
+  gmailCriarController,
+  gmailEmailsController,
+  gmailOAuthCallbackController,
+  gmailOAuthDoneController,
+  gmailOAuthStartController,
+  gmailPreviewController,
+} from "../controllers/gmail.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { appAuth } from "../middlewares/appAuth";
 import { asyncHandler } from "../utils/http";
@@ -71,6 +79,14 @@ apiRouter.get("/suite360/tipos", asyncHandler(suiteTiposController));
 apiRouter.get("/suite360/setores", asyncHandler(suiteSetoresController));
 apiRouter.get("/suite360/origens", asyncHandler(suiteOrigensController));
 apiRouter.get("/suite360/usuarios", asyncHandler(suiteUsuariosController));
+
+// --- Integracao Gmail (chamados a partir de e-mails) ---
+apiRouter.get("/gmail/oauth/start", asyncHandler(gmailOAuthStartController));
+apiRouter.get("/gmail/oauth/callback", asyncHandler(gmailOAuthCallbackController));
+apiRouter.get("/gmail/oauth/done", asyncHandler(gmailOAuthDoneController));
+apiRouter.get("/gmail/emails", asyncHandler(gmailEmailsController));
+apiRouter.post("/gmail/chamado/preview", asyncHandler(gmailPreviewController));
+apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
 
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);

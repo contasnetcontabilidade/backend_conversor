@@ -90,6 +90,33 @@ export async function getAccessToken() {
   return getValue(KEY.accessToken);
 }
 
+// ---- Tokens do Gmail: POR USUARIO (chaveados pelo e-mail) ----
+export async function saveGmailRefresh(email: string, t: string) {
+  await setValue(`gmail:refresh:${email}`, t);
+}
+export async function getGmailRefresh(email: string) {
+  return getValue(`gmail:refresh:${email}`);
+}
+export async function saveGmailAccess(
+  email: string,
+  t: string,
+  ttlSeconds: number,
+) {
+  await setValue(`gmail:access:${email}`, t, Math.max(30, ttlSeconds - 60));
+}
+export async function getGmailAccess(email: string) {
+  return getValue(`gmail:access:${email}`);
+}
+
+// Token opaco de perfil -> e-mail do usuario. O app guarda o token (nao o e-mail)
+// e o envia nas chamadas; o backend resolve o e-mail a partir dele.
+export async function setPerfilToken(token: string, email: string) {
+  await setValue(`gmail:profile:${token}`, email);
+}
+export async function getEmailByToken(token: string) {
+  return getValue(`gmail:profile:${token}`);
+}
+
 export async function saveChannelId(id: string) {
   await setValue(KEY.channelId, id);
 }
@@ -117,10 +144,13 @@ export async function chamadoFoiAberto(
 
 // ---- Idempotencia da CRIACAO do chamado (produção) ----
 // Registro do chamado ja criado (protocolo) para nao criar duplicado.
+// O `ns` (namespace) permite reusar a mesma idempotencia para outras fontes:
+// "goto" (padrao) para ligacoes; "gmail" para e-mails (chave = messageId).
 export async function getChamadoCriado(
-  conversationSpaceId: string,
+  id: string,
+  ns = "goto",
 ): Promise<{ id: string; protocolo: string } | null> {
-  const raw = (await getValue(`goto:chamado:${conversationSpaceId}`)) as unknown;
+  const raw = (await getValue(`${ns}:chamado:${id}`)) as unknown;
   if (!raw) return null;
   if (typeof raw === "object") return raw as { id: string; protocolo: string };
   try {
@@ -130,21 +160,23 @@ export async function getChamadoCriado(
   }
 }
 export async function salvarChamadoCriado(
-  conversationSpaceId: string,
+  id: string,
   dados: { id: string; protocolo: string },
+  ns = "goto",
 ) {
   await setValue(
-    `goto:chamado:${conversationSpaceId}`,
+    `${ns}:chamado:${id}`,
     JSON.stringify(dados),
     30 * 24 * 3600, // 30 dias
   );
 }
-// Lock atomico (SET NX) para impedir criacao concorrente da mesma chamada.
+// Lock atomico (SET NX) para impedir criacao concorrente do mesmo item.
 // Retorna true se conseguiu reservar (deve criar); false se ja ha uma em andamento.
 export async function reservarCriacao(
-  conversationSpaceId: string,
+  id: string,
+  ns = "goto",
 ): Promise<boolean> {
-  const key = `goto:criando:${conversationSpaceId}`;
+  const key = `${ns}:criando:${id}`;
   const r = getRedis();
   if (r) {
     const res = await r.set(key, "1", { nx: true, ex: 120 });
@@ -155,8 +187,8 @@ export async function reservarCriacao(
   memExpiry.set(key, Date.now() + 120_000);
   return true;
 }
-export async function liberarCriacao(conversationSpaceId: string) {
-  const key = `goto:criando:${conversationSpaceId}`;
+export async function liberarCriacao(id: string, ns = "goto") {
+  const key = `${ns}:criando:${id}`;
   const r = getRedis();
   if (r) {
     await r.del(key);

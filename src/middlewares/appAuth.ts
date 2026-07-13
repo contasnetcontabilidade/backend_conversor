@@ -14,6 +14,8 @@ function isExempt(path: string): boolean {
     path.startsWith("/goto/webhook/") || // GoTo (token na URL)
     path.startsWith("/goto/oauth/") || // fluxo OAuth no navegador
     path.startsWith("/goto/setup/") ||
+    path.startsWith("/gmail/oauth/") || // fluxo OAuth do Gmail no navegador
+
     path === "/admin" || // pagina do painel (login proprio)
     path === "/admin/uso" // protegida por senha (Authorization Bearer)
   );
