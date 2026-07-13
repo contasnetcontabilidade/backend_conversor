@@ -1,7 +1,11 @@
 import { randomUUID } from "crypto";
 import { Request, Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
-import { buildAuthorizeUrl, exchangeCodeForTokens } from "../services/gmailAuth";
+import {
+  buildAuthorizeUrl,
+  exchangeCodeForTokens,
+  getValidAccessToken,
+} from "../services/gmailAuth";
 import { listarEmailsMarcados, obterEmail } from "../services/gmailApi";
 import {
   getChamadoCriado,
@@ -132,6 +136,18 @@ export async function gmailDiagController(req: Request, res: Response) {
       temRefresh: Boolean(await getGmailRefresh(email).catch(() => null)),
       temAccess: Boolean(await getGmailAccess(email).catch(() => null)),
     };
+    // Chama a API do Gmail e devolve o erro CRU do Google (pra ver o motivo do 403).
+    try {
+      const at = await getValidAccessToken(email);
+      const r = await fetch(
+        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        { headers: { Authorization: `Bearer ${at}` } },
+      );
+      const body = await r.text();
+      out.gmailTest = { status: r.status, body: body.slice(0, 600) };
+    } catch (e) {
+      out.gmailTest = { erro: getErrorMessage(e) };
+    }
   }
   res.status(200).json(out);
 }
