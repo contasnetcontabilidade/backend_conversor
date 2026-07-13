@@ -850,9 +850,7 @@ ${cliente}
 Dados do e-mail:
 - Remetente: ${d.remetente || "-"}
 - Assunto: ${d.assunto || "-"}
-- Data/hora: ${d.dataHora || "-"}
 - Responsavel: ${d.atendente || "-"}
-- ID do e-mail: ${d.idEmail || "-"}
 
 Resumo:
 ${d.resumo || "-"}
