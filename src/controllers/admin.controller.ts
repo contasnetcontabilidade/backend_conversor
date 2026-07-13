@@ -282,7 +282,6 @@ body.win-max .titlebar .ic-restore{display:inline}
   <div class="grid2">
     <div class="panel" style="margin:0">
       <h3>Gasto por ramal / usuário — no período</h3>
-      <div class="note" id="ramal-note">Este detalhamento começa a valer a partir da atualização do sistema; ligações antigas não têm o ramal registrado.</div>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Ligações</th><th class="right">Custo R$</th></tr></thead>
