@@ -21,6 +21,16 @@ export function thinkingConfigFor(model: string): ThinkingConfig | undefined {
     return { thinkingLevel: level as ThinkingConfig["thinkingLevel"] };
   }
 
+  // Gemini 2.5 PRO: NAO permite desligar o thinking (budget 0 e rejeitado pela
+  // API). Usa o budget minimo valido (128) para minimizar o custo sem quebrar a
+  // chamada. Sobrescrivel por GEMINI_THINKING_BUDGET_PRO.
+  if (m.includes("2.5") && m.includes("pro")) {
+    const parsed = Number(process.env.GEMINI_THINKING_BUDGET_PRO ?? "128");
+    const thinkingBudget =
+      Number.isFinite(parsed) && parsed >= 128 ? parsed : 128;
+    return { thinkingBudget, includeThoughts: false };
+  }
+
   // Gemini 2.x / 1.5 (flash): desliga o thinking (budget 0 por padrao).
   if (
     m.includes("2.5") ||

@@ -9,6 +9,8 @@ export interface Preco {
 }
 
 const PRECOS: Record<string, Preco> = {
+  // gemini-2.5-pro (contexto <=200k): CONFIRMAR em ai.google.dev/pricing.
+  "gemini-2.5-pro": { input: 1.25, output: 10.0 },
   "gemini-2.5-flash": { input: 0.3, output: 2.5 },
   "gemini-2.5-flash-lite": { input: 0.1, output: 0.4 },
   "gemini-2.0-flash": { input: 0.1, output: 0.4 },

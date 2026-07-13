@@ -313,7 +313,8 @@ Valores em **USD por 1 milhão de tokens**, exatamente como estão no código (`
 
 | Modelo                             | Entrada (input)         | Saída (output) |
 | ---------------------------------- | ----------------------- | --------------- |
-| `gemini-2.5-flash` *(padrão)* | US$ 0,30 | US$ 2,50   |                 |
+| `gemini-2.5-pro` *(padrão da transcrição)* | US$ 1,25 | US$ 10,00 | |
+| `gemini-2.5-flash` *(padrão do resumo)* | US$ 0,30 | US$ 2,50   |                 |
 | `gemini-2.5-flash-lite`          | US$ 0,10 | US$ 0,40   |                 |
 | `gemini-2.0-flash`               | US$ 0,10 | US$ 0,40   |                 |
 | `gemini-1.5-flash`               | US$ 0,075 | US$ 0,30  |                 |
@@ -384,7 +385,7 @@ Hoje, no volume atual, quase tudo cabe na **faixa gratuita**. A tabela abaixo mo
 | `GEMINI_API_KEY` 🔒                        | Chave da API Gemini (transcrição + resumo).                                     | **Obrig.** — sem ela, toda chamada ao Gemini falha com `GEMINI_API_KEY_MISSING`. |
 | `GOOGLE_API_KEY` 🔒                        | Alias de fallback: usado se`GEMINI_API_KEY` estiver vazia.                      | Opc.                                                                                      |
 | `GEMINI_MODEL`                             | Modelo do Gemini para o**resumo**.                                          | Opc. (`gemini-2.5-flash`)                                                               |
-| `GEMINI_TRANSCRIPTION_MODEL`               | Modelo do Gemini para a**transcrição**.                                   | Opc. (`gemini-2.5-flash`)                                                               |
+| `GEMINI_TRANSCRIPTION_MODEL`               | Modelo do Gemini para a**transcrição** (2.5-pro = mais preciso com nomes). | Opc. (`gemini-2.5-pro`)                                                               |
 | `GEMINI_TRANSCRIPTION_FALLBACK_MODELS`     | Modelos de fallback (separados por vírgula) se o principal ficar indisponível.  | Opc. (`gemini-2.5-flash-lite`)                                                          |
 | `GEMINI_TRANSCRIPTION_RETRY_ATTEMPTS`      | Nº de retries em erro transitório na transcrição.                             | Opc. (`4`)                                                                              |
 | `GEMINI_TRANSCRIPTION_RETRY_BASE_DELAY_MS` | Delay base do backoff entre retries.                                              | Opc. (`800`)                                                                            |
