@@ -249,6 +249,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
       })),
       ramal,
       usuario,
+      fonte: "email",
     }));
   } catch (error) {
     iaOk = false;

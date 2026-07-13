@@ -54,12 +54,15 @@ export type TranscricaoInput = {
   // Nomes dos funcionarios que participam DESTA ligacao (do relatorio GoTo).
   // Entram como dica no prompt para grafar corretamente — nunca sao forcados.
   nomesConhecidos?: string[];
+  // Fonte para o painel de custos (transcricao normalmente e "ligacao").
+  fonte?: "ligacao" | "email";
 };
 
 type IdentidadeUso = {
   ramal?: string;
   usuario?: string;
   nomesConhecidos?: string[];
+  fonte?: "ligacao" | "email";
 };
 
 export type TranscricaoResultado = {
@@ -410,6 +413,7 @@ async function transcreverComGemini(
           outputTokens: response.usageMetadata?.candidatesTokenCount,
           ramal: identidade.ramal,
           usuario: identidade.usuario,
+          fonte: identidade.fonte,
         });
 
         break;
@@ -648,6 +652,7 @@ export async function transcreverAudio(
       ramal: input.ramal,
       usuario: input.usuario,
       nomesConhecidos: input.nomesConhecidos,
+      fonte: input.fonte,
     });
   }
 

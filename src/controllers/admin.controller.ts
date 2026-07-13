@@ -75,6 +75,41 @@ export async function adminUsoController(req: Request, res: Response) {
   }
   const porRamal = Array.from(ramalMap.values());
 
+  // Detalhe por dia+fonte+op (colapsa o modelo apos precificar). Para separar
+  // ligacao x e-mail no painel.
+  const fonteMap = new Map<
+    string,
+    {
+      dia: string;
+      fonte: string;
+      op: string;
+      inputTokens: number;
+      outputTokens: number;
+      calls: number;
+      custoUsd: number;
+    }
+  >();
+  for (const it of relatorio.porFonte) {
+    const chave = `${it.dia}::${it.fonte}::${it.op}`;
+    const cur =
+      fonteMap.get(chave) ||
+      {
+        dia: it.dia,
+        fonte: it.fonte,
+        op: it.op,
+        inputTokens: 0,
+        outputTokens: 0,
+        calls: 0,
+        custoUsd: 0,
+      };
+    cur.inputTokens += it.inputTokens;
+    cur.outputTokens += it.outputTokens;
+    cur.calls += it.calls;
+    cur.custoUsd += custoUsd(it.model, it.inputTokens, it.outputTokens);
+    fonteMap.set(chave, cur);
+  }
+  const porFonte = Array.from(fonteMap.values());
+
   // Totais e "por ligacao" (todo o periodo) — referencia; o frontend recalcula
   // os valores do periodo selecionado a partir de porDiaModelo/porRamal.
   const totais = linhas.reduce(
@@ -101,6 +136,7 @@ export async function adminUsoController(req: Request, res: Response) {
     linhas,
     porDiaModelo,
     porRamal,
+    porFonte,
   });
 }
 
@@ -280,6 +316,20 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <div class="grid2">
+    <div class="panel" style="margin:0"><h3>Ligações vs. E-mails (R$)</h3><div class="chart-box"><canvas id="chartFonte"></canvas></div></div>
+    <div class="panel" style="margin:0">
+      <h3>Por fonte — no período</h3>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Fonte</th><th class="right">Itens</th><th class="right">Custo R$</th><th class="right">%</th></tr></thead>
+          <tbody id="tbody-fonte"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+        </table>
+      </div>
+      <div class="note" style="margin-top:10px">Só conta a partir da atualização (o consumo antigo não tinha essa marcação).</div>
+    </div>
+  </div>
+
+  <div class="grid2">
     <div class="panel" style="margin:0">
       <h3>Gasto por ramal / usuário — no período</h3>
       <div style="overflow:auto">
@@ -447,6 +497,21 @@ function render(){
 
   // #9 Tendencia custo medio por ligacao
   chart("chartTend",{type:"line",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{label:"R$ / ligação",data:dias.map(function(x){return x.ligacoes?+((x.custoUsd*c)/x.ligacoes).toFixed(4):0}),borderColor:gold,backgroundColor:"rgba(224,169,59,.15)",fill:true,tension:.3}]},options:baseOpt(muted,grid,false)});
+
+  // Ligacoes vs E-mails (por fonte)
+  var fonteRows=noPeriodo(DADOS.porFonte,iv.de,iv.ate);
+  var fAgg={};
+  fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={custoUsd:0,itens:0});a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
+  var ligUsd=(fAgg["ligacao"]&&fAgg["ligacao"].custoUsd)||0;
+  var emUsd=(fAgg["email"]&&fAgg["email"].custoUsd)||0;
+  chart("chartFonte",{type:"doughnut",data:{labels:["Ligações","E-mails"],datasets:[{data:[+(ligUsd*c).toFixed(4),+(emUsd*c).toFixed(4)],backgroundColor:[accent,gold],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
+  var totF=ligUsd+emUsd;
+  var fLinhas=[{nome:"Ligações",itens:(fAgg["ligacao"]&&fAgg["ligacao"].itens)||0,usd:ligUsd},{nome:"E-mails",itens:(fAgg["email"]&&fAgg["email"].itens)||0,usd:emUsd}];
+  var tbf=document.getElementById("tbody-fonte");
+  if(tbf){
+    if(totF<=0.0000001){tbf.innerHTML='<tr><td colspan="4" class="muted">Sem consumo marcado por fonte no período.</td></tr>';}
+    else{tbf.innerHTML=fLinhas.map(function(x){var pct=totF>0?Math.round(x.usd/totF*100):0;return "<tr><td>"+x.nome+"</td><td class='right'>"+fmtInt.format(x.itens)+"</td><td class='right'>"+fmtBRL.format(x.usd*c)+"</td><td class='right'>"+pct+"%</td></tr>"}).join("");}
+  }
 
   // #5 Por ramal/usuario
   var ramais=ramalAgg(noPeriodo(DADOS.porRamal,iv.de,iv.ate));

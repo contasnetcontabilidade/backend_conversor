@@ -446,12 +446,14 @@ export async function gotoChamadoController(req: Request, res: Response) {
     ramal: ramalUsuario,
     usuario: nomeUsuario,
     nomesConhecidos,
+    fonte: "ligacao",
   });
   const resumo = await gerarResumoGemini({
     srtPath: transcricao.srtPath,
     model: geminiModel,
     ramal: ramalUsuario,
     usuario: nomeUsuario,
+    fonte: "ligacao",
   });
 
   res.status(200).json({

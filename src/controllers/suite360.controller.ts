@@ -248,6 +248,7 @@ export async function suitePreviewController(req: Request, res: Response) {
     ramal: ramalUsuario,
     usuario: nomeUsuario,
     nomesConhecidos,
+    fonte: "ligacao",
   });
 
   // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito).
@@ -268,6 +269,7 @@ export async function suitePreviewController(req: Request, res: Response) {
       })),
       ramal: ramalUsuario,
       usuario: nomeUsuario,
+      fonte: "ligacao",
     }));
   } catch (error) {
     iaOk = false;

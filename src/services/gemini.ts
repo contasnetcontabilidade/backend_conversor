@@ -43,6 +43,8 @@ export type ResumoInput = {
   text?: string;
   // Origem do conteudo, ajusta o prompt. Padrao: "ligacao".
   origem?: "ligacao" | "email";
+  // Fonte para o painel de custos separar ligacao x e-mail.
+  fonte?: "ligacao" | "email";
 };
 
 function getGeminiClient() {
@@ -379,6 +381,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         outputTokens: response.usageMetadata?.candidatesTokenCount,
         ramal: input.ramal,
         usuario: input.usuario,
+        fonte: input.fonte,
       });
 
       return { srtPath, resumo };
