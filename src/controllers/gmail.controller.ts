@@ -6,15 +6,22 @@ import {
   exchangeCodeForTokens,
   getValidAccessToken,
 } from "../services/gmailAuth";
-import { listarEmailsMarcados, obterEmail } from "../services/gmailApi";
+import {
+  garantirMarcador,
+  listarEmailsMarcados,
+  obterEmail,
+  removerMarcadorDoEmail,
+} from "../services/gmailApi";
 import {
   getChamadoCriado,
+  getContaDoEmail,
   getEmailByToken,
   getGmailAccess,
   getGmailRefresh,
   liberarCriacao,
   reservarCriacao,
   salvarChamadoCriado,
+  salvarContaDoEmail,
   setPerfilToken,
 } from "../services/store";
 import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
@@ -86,6 +93,8 @@ export async function gmailOAuthCallbackController(req: Request, res: Response) 
     return;
   }
   const { email } = await exchangeCodeForTokens(code);
+  // Cria o marcador "Chamado" na conta assim que ela conecta (best-effort).
+  await garantirMarcador(email).catch(() => undefined);
   const profileToken = randomUUID();
   await setPerfilToken(profileToken, email);
   // Redireciona para uma pagina que o app captura (token + e-mail na URL).
@@ -220,6 +229,8 @@ export async function gmailPreviewController(req: Request, res: Response) {
   }
   const emailParam = getOptionalString(body, "email");
   const email = await resolverContaGmail(profileToken || "", emailParam);
+  // Guarda a conta deste e-mail para o "criar" poder remover o marcador depois.
+  await salvarContaDoEmail(messageId, email).catch(() => undefined);
   const msg = await obterEmail(email, messageId);
 
   const tiposDisponiveis = await buscarTipos().catch(() => []);
@@ -350,6 +361,16 @@ export async function gmailPreviewController(req: Request, res: Response) {
 // POST /gmail/chamado/criar — cria o chamado (dry-run + idempotencia por messageId)
 // ---------------------------------------------------------------------------
 
+// Remove o marcador do e-mail apos o chamado ser criado (best-effort). A conta
+// foi guardada no preview (gmail:acct:messageId).
+async function removerMarcadorPosCriar(messageId?: string): Promise<void> {
+  if (!messageId) return;
+  const conta = await getContaDoEmail(messageId).catch(() => null);
+  if (conta) {
+    await removerMarcadorDoEmail(conta, messageId).catch(() => undefined);
+  }
+}
+
 export async function gmailCriarController(req: Request, res: Response) {
   const requestId = randomUUID();
   const body = ensureBodyObject(req.body);
@@ -403,6 +424,7 @@ export async function gmailCriarController(req: Request, res: Response) {
   if (messageId) {
     const jaCriado = await getChamadoCriado(messageId, "gmail").catch(() => null);
     if (jaCriado) {
+      await removerMarcadorPosCriar(messageId);
       res.status(200).json({
         ok: true,
         data: {
@@ -444,6 +466,7 @@ export async function gmailCriarController(req: Request, res: Response) {
     ).catch(() => undefined);
     await liberarCriacao(messageId, "gmail").catch(() => undefined);
   }
+  await removerMarcadorPosCriar(messageId);
   console.log(
     `[gmail:criar] req=${requestId} msg=${messageId || "-"} ` +
       `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,

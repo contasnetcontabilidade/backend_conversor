@@ -117,6 +117,15 @@ export async function getEmailByToken(token: string) {
   return getValue(`gmail:profile:${token}`);
 }
 
+// Mapa messageId -> conta (e-mail). Guardado no preview para o criar saber de qual
+// conta remover o marcador depois. TTL de 6h (preview e criar sao quase imediatos).
+export async function salvarContaDoEmail(messageId: string, email: string) {
+  await setValue(`gmail:acct:${messageId}`, email, 6 * 3600);
+}
+export async function getContaDoEmail(messageId: string) {
+  return getValue(`gmail:acct:${messageId}`);
+}
+
 export async function saveChannelId(id: string) {
   await setValue(KEY.channelId, id);
 }

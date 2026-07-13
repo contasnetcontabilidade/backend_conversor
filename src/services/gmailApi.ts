@@ -1,14 +1,16 @@
 import { AppError } from "../lib/errors";
 import { getValidAccessToken } from "./gmailAuth";
 
-// Cliente REST do Gmail (somente leitura). Lista os e-mails com o marcador
-// configurado e busca o corpo em texto de um e-mail. Tudo por usuario (e-mail).
+// Cliente REST do Gmail. Le e-mails com o marcador configurado, extrai o corpo,
+// e gerencia o marcador (criar / remover de um e-mail). Tudo por usuario (e-mail).
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 
+function labelName(): string {
+  return (process.env.GMAIL_LABEL || "Chamado").trim() || "Chamado";
+}
 function labelQuery(): string {
-  const label = (process.env.GMAIL_LABEL || "Chamado").trim() || "Chamado";
-  return `label:"${label}"`; // aspas suportam rotulos com espaco
+  return `label:"${labelName()}"`; // aspas suportam rotulos com espaco
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -16,6 +18,36 @@ async function gmailGet(email: string, path: string): Promise<any> {
   const token = await getValidAccessToken(email);
   const resp = await fetch(`${GMAIL_API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+  const text = await resp.text();
+  let payload: unknown = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = { raw: text };
+  }
+  if (!resp.ok) {
+    throw new AppError({
+      statusCode: resp.status === 401 || resp.status === 403 ? 401 : 502,
+      code: "GMAIL_API_ERROR",
+      message: `Falha na API do Gmail (HTTP ${resp.status}).`,
+      details: payload,
+    });
+  }
+  return payload;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function gmailPost(email: string, path: string, body: unknown): Promise<any> {
+  const token = await getValidAccessToken(email);
+  const resp = await fetch(`${GMAIL_API}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
   });
   const text = await resp.text();
   let payload: unknown = null;
@@ -167,4 +199,69 @@ export async function obterEmail(
     snippet: String(msg?.snippet || ""),
     corpo: extrairCorpo(msg?.payload),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Marcador (label): criar ao conectar e remover ao criar o chamado
+// ---------------------------------------------------------------------------
+
+// Cache do id do marcador por e-mail (evita re-listar toda hora).
+const marcadorIdCache = new Map<string, string>();
+
+// Acha o id do marcador configurado; "" se nao existir na conta.
+export async function resolverMarcadorId(email: string): Promise<string> {
+  const cache = marcadorIdCache.get(email);
+  if (cache) return cache;
+  const alvo = labelName().toLowerCase();
+  const data = await gmailGet(email, "/labels");
+  const labels: Array<{ id?: string; name?: string }> = Array.isArray(
+    data?.labels,
+  )
+    ? data.labels
+    : [];
+  const achado = labels.find(
+    (l) => String(l.name || "").toLowerCase() === alvo,
+  );
+  const id = achado?.id ? String(achado.id) : "";
+  if (id) marcadorIdCache.set(email, id);
+  return id;
+}
+
+// Garante que o marcador existe (cria se faltar). Best-effort: nunca lanca.
+export async function garantirMarcador(email: string): Promise<string> {
+  try {
+    let id = await resolverMarcadorId(email);
+    if (id) return id;
+    try {
+      const criado = await gmailPost(email, "/labels", {
+        name: labelName(),
+        labelListVisibility: "labelShow",
+        messageListVisibility: "show",
+      });
+      id = criado?.id ? String(criado.id) : "";
+    } catch {
+      // 409 (ja existe) ou corrida: procura de novo.
+      id = await resolverMarcadorId(email);
+    }
+    if (id) marcadorIdCache.set(email, id);
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+// Remove o marcador de um e-mail especifico. Best-effort: nunca lanca.
+export async function removerMarcadorDoEmail(
+  email: string,
+  messageId: string,
+): Promise<void> {
+  try {
+    const id = await resolverMarcadorId(email);
+    if (!id) return;
+    await gmailPost(email, `/messages/${encodeURIComponent(messageId)}/modify`, {
+      removeLabelIds: [id],
+    });
+  } catch {
+    // best-effort: se falhar, o chamado ja foi criado do mesmo jeito.
+  }
 }

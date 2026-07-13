@@ -17,7 +17,8 @@ const TOKEN_URI =
 const USERINFO_URI = "https://www.googleapis.com/oauth2/v3/userinfo";
 
 export const GMAIL_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.readonly",
+  // modify = ler e-mails + criar/aplicar/remover marcadores (NAO apaga e-mails).
+  "https://www.googleapis.com/auth/gmail.modify",
   "openid",
   "email",
 ];
