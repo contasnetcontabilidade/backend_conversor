@@ -724,6 +724,22 @@ export async function resolverOrigem(): Promise<RefResolvida> {
   }
 }
 
+// Origem para chamados de E-MAIL: prefere a origem "E-mail"; se nao houver,
+// cai para a origem de ligacao (nunca deixa vazio). Sobrescrivel por env.
+export async function resolverOrigemEmail(): Promise<RefResolvida> {
+  const envVal = envId("SUITE360_ORIGEM_EMAIL_ID");
+  if (envVal) return { id: envVal, fonte: "env" };
+  try {
+    const r = await lookupPrimeiro("/origens-chamado", (o) =>
+      /e-?mail/i.test(pickStr(o, ["descricao", "nome", "name"]) || ""),
+    );
+    if (r.id) return { ...r, fonte: "lookup" };
+  } catch {
+    // ignora e cai no fallback
+  }
+  return resolverOrigem();
+}
+
 export async function resolverSetor(): Promise<RefResolvida> {
   const envVal = envId("SUITE360_SETOR_ID");
   if (envVal) return { id: envVal, fonte: "env" };
@@ -845,10 +861,7 @@ Pontos principais:
 ${linhas(d.pontosPrincipais)}
 
 Providencias sugeridas:
-${linhas(d.providencias)}
-
-Conteudo do e-mail:
-${d.corpo || "-"}`;
+${linhas(d.providencias)}`;
 }
 
 // ---------------------------------------------------------------------------

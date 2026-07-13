@@ -25,7 +25,7 @@ import {
   montarDescricaoEmail,
   resolverAssuntoPorTexto,
   resolverClientePorMencao,
-  resolverOrigem,
+  resolverOrigemEmail,
   validarChamadoBody,
   type ChamadoBody,
   type RefResolvida,
@@ -269,7 +269,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
     tipo = { id: tipoNaLista.id, nome: tipoNaLista.nome, fonte: "ia" };
   else tipo = await resolverAssuntoPorTexto(resumo.assunto_sugerido || resumo.titulo);
 
-  const origem = await resolverOrigem();
+  const origem = await resolverOrigemEmail();
 
   // Setor/executor: vem do PERFIL (enviado pelo app). Fallback: env; senao ausente.
   const setorEnv = (process.env.SUITE360_SETOR_ID || "").trim();
