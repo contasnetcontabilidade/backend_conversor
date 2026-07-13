@@ -227,11 +227,27 @@ export async function suitePreviewController(req: Request, res: Response) {
     ramalUsuario = usuarioEscritorio?.ramal || "";
   }
 
+  // Nomes dos funcionarios que participam DESTA ligacao (caller + answerers do
+  // relatorio), sem o sufixo " - SETOR". Viram dica de grafia na transcricao —
+  // apenas de quem esta na ligacao, nunca uma lista global.
+  const nomesConhecidos = Array.from(
+    new Set(
+      [analise?.caller, ...(analise?.answerers || [])]
+        .map((p) => {
+          const nome = p?.nome || "";
+          const i = nome.lastIndexOf(" - ");
+          return (i >= 0 ? nome.slice(0, i) : nome).trim();
+        })
+        .filter((n) => n.length >= 2),
+    ),
+  );
+
   const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({
     audioPath,
     ramal: ramalUsuario,
     usuario: nomeUsuario,
+    nomesConhecidos,
   });
 
   // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito).

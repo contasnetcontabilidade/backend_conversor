@@ -427,12 +427,25 @@ export async function gotoChamadoController(req: Request, res: Response) {
     analise?.tipo === "interno" ? analise?.caller : analise?.answerers?.[0];
   const ramalUsuario = usuarioEscritorio?.ramal || "";
   const nomeUsuario = usuarioEscritorio?.nome || "";
+  // Nomes dos funcionarios desta ligacao (sem " - SETOR") como dica de grafia.
+  const nomesConhecidos = Array.from(
+    new Set(
+      [analise?.caller, ...(analise?.answerers || [])]
+        .map((p) => {
+          const nome = p?.nome || "";
+          const i = nome.lastIndexOf(" - ");
+          return (i >= 0 ? nome.slice(0, i) : nome).trim();
+        })
+        .filter((n) => n.length >= 2),
+    ),
+  );
 
   const audioPath = await downloadRecording(recordingId);
   const transcricao = await transcreverAudio({
     audioPath,
     ramal: ramalUsuario,
     usuario: nomeUsuario,
+    nomesConhecidos,
   });
   const resumo = await gerarResumoGemini({
     srtPath: transcricao.srtPath,

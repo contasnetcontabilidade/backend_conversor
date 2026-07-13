@@ -51,9 +51,16 @@ export type TranscricaoInput = {
   // Identidade da ligacao (ramal/usuario) para atribuir o custo da IA no painel.
   ramal?: string;
   usuario?: string;
+  // Nomes dos funcionarios que participam DESTA ligacao (do relatorio GoTo).
+  // Entram como dica no prompt para grafar corretamente — nunca sao forcados.
+  nomesConhecidos?: string[];
 };
 
-type IdentidadeUso = { ramal?: string; usuario?: string };
+type IdentidadeUso = {
+  ramal?: string;
+  usuario?: string;
+  nomesConhecidos?: string[];
+};
 
 export type TranscricaoResultado = {
   audioPath: string;
@@ -305,6 +312,27 @@ async function transcreverComGemini(
     10,
   );
 
+  // Dica de nomes: SO os funcionarios desta ligacao (nunca uma lista global),
+  // e apenas como referencia de grafia — o modelo e instruido a NAO incluir
+  // nenhum nome que nao seja realmente falado no audio.
+  const nomes = (identidade.nomesConhecidos || [])
+    .map((n) => String(n || "").trim())
+    .filter((n) => n.length >= 2);
+  const dicaNomes = nomes.length
+    ? "\nFuncionarios do escritorio que PODEM aparecer nesta ligacao (use exatamente esta grafia SE o nome for realmente dito; NAO acrescente nenhum nome que nao seja falado no audio): " +
+      nomes.join(", ") +
+      "."
+    : "";
+  const promptTranscricao =
+    "Transcreva o audio integralmente em portugues do Brasil e retorne SOMENTE o texto puro da transcricao, sem markdown e sem comentarios.\n" +
+    "Cuidado ESPECIAL com NOMES PROPRIOS (de pessoas, empresas, cidades) e com numeros/documentos: transcreva-os o mais fiel possivel ao que foi falado, mantendo a grafia mais proxima do que se ouve. " +
+    "NAO troque um nome por uma palavra comum parecida e NAO invente nomes. " +
+    "Quando a pessoa soletrar (letra por letra) um nome, e-mail, CNPJ ou telefone, reproduza a sequencia exata. " +
+    "Preserve nomes de empresas, marcas e siglas como foram ditos. " +
+    "Use o contexto da conversa para grafar corretamente nomes que se repetem. " +
+    "Se um nome for realmente inaudivel, escreva a forma fonetica mais proxima em vez de omitir." +
+    dicaNomes;
+
   let uploadedName: string | undefined;
 
   try {
@@ -352,14 +380,7 @@ async function transcreverComGemini(
               role: "user",
               parts: [
                 {
-                  text:
-                    "Transcreva o audio integralmente em portugues do Brasil e retorne SOMENTE o texto puro da transcricao, sem markdown e sem comentarios.\n" +
-                    "Cuidado ESPECIAL com NOMES PROPRIOS (de pessoas, empresas, cidades) e com numeros/documentos: transcreva-os o mais fiel possivel ao que foi falado, mantendo a grafia mais proxima do que se ouve. " +
-                    "NAO troque um nome por uma palavra comum parecida e NAO invente nomes. " +
-                    "Quando a pessoa soletrar (letra por letra) um nome, e-mail, CNPJ ou telefone, reproduza a sequencia exata. " +
-                    "Preserve nomes de empresas, marcas e siglas como foram ditos. " +
-                    "Use o contexto da conversa para grafar corretamente nomes que se repetem. " +
-                    "Se um nome for realmente inaudivel, escreva a forma fonetica mais proxima em vez de omitir.",
+                  text: promptTranscricao,
                 },
                 createPartFromUri(fileUri, fileMimeType),
               ],
@@ -626,6 +647,7 @@ export async function transcreverAudio(
     return transcreverComGemini(audioPath, {
       ramal: input.ramal,
       usuario: input.usuario,
+      nomesConhecidos: input.nomesConhecidos,
     });
   }
 
