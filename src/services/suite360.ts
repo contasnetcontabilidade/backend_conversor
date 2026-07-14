@@ -1,4 +1,5 @@
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
+import { isSuiteDev } from "../lib/suiteEnv";
 
 // Cliente da API Publica v1 do Suite360/SuiteWeb.
 // Base: https://suiteweb.contasnet.com.br/api/public/v1
@@ -13,12 +14,30 @@ import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 // GET (read-only) batem na API real.
 
 const DEFAULT_BASE_URL = "https://suiteweb.contasnet.com.br/api/public/v1";
+const DEFAULT_DEV_BASE_URL = "http://10.10.1.183/api/public/v1";
 
+// Quando a requisicao vem em "modo dev" (header x-suite-env: dev), a base, a
+// chave, os IDs e o dry-run leem primeiro as variaveis `*_DEV`.
 function baseUrl(): string {
+  if (isSuiteDev()) {
+    return (process.env.SUITE360_BASE_URL_DEV || DEFAULT_DEV_BASE_URL).replace(
+      /\/+$/,
+      "",
+    );
+  }
   return (process.env.SUITE360_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
 function apiKey(): string {
+  // Em dev NAO cai para a chave de producao: mandar a chave de prod para o host
+  // de dev (http, rede interna) vazaria o segredo. Sem chave dev -> erro claro.
+  if (isSuiteDev()) {
+    return (
+      process.env.SUITE360_API_KEY_DEV ||
+      process.env.SUITEWEB_API_KEY_DEV ||
+      ""
+    ).trim();
+  }
   return (
     process.env.SUITE360_API_KEY ||
     process.env.SUITEWEB_API_KEY ||
@@ -28,11 +47,19 @@ function apiKey(): string {
 
 export function isDryRun(): boolean {
   // Ligado por padrao. Só cria de verdade com SUITE360_DRY_RUN=0/false/no.
-  const v = (process.env.SUITE360_DRY_RUN ?? "1").trim().toLowerCase();
+  // Em dev, SUITE360_DRY_RUN_DEV tem prioridade (cai no global se ausente).
+  const raw = isSuiteDev()
+    ? process.env.SUITE360_DRY_RUN_DEV ?? process.env.SUITE360_DRY_RUN ?? "1"
+    : process.env.SUITE360_DRY_RUN ?? "1";
+  const v = raw.trim().toLowerCase();
   return !(v === "0" || v === "false" || v === "no" || v === "off");
 }
 
 function envId(name: string): string | undefined {
+  if (isSuiteDev()) {
+    const dev = (process.env[`${name}_DEV`] || "").trim();
+    if (dev) return dev;
+  }
   const v = (process.env[name] || "").trim();
   return v || undefined;
 }

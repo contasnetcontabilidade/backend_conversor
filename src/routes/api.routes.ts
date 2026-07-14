@@ -41,11 +41,20 @@ import {
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { appAuth } from "../middlewares/appAuth";
 import { asyncHandler } from "../utils/http";
+import { runWithSuiteEnv } from "../lib/suiteEnv";
 
 export const apiRouter = Router();
 
 // Autenticacao por token do app (dormante ate API_AUTH_TOKEN ser definido).
 apiRouter.use(appAuth);
+
+// Ambiente do Suite por requisicao: header `x-suite-env: dev` roteia as chamadas
+// ao Suite360 para o ambiente de desenvolvimento (SuiteWeb DEV). So afeta o
+// Suite; transcricao, resumo e Gmail seguem iguais.
+apiRouter.use((req, _res, next) => {
+  const dev = String(req.headers["x-suite-env"] || "").toLowerCase() === "dev";
+  runWithSuiteEnv(dev, next);
+});
 
 apiRouter.get("/health", healthController);
 apiRouter.post("/transcricao", asyncHandler(transcricaoController));
