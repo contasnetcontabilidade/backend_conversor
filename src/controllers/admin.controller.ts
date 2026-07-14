@@ -325,7 +325,6 @@ body.win-max .titlebar .ic-restore{display:inline}
           <tbody id="tbody-fonte"><tr><td colspan="4" class="muted">—</td></tr></tbody>
         </table>
       </div>
-      <div class="note" style="margin-top:10px">Só conta a partir da atualização (o consumo antigo não tinha essa marcação).</div>
     </div>
   </div>
 
