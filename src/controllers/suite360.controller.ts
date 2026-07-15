@@ -219,9 +219,14 @@ export async function suitePreviewController(req: Request, res: Response) {
     });
     return;
   }
-  // Outro atendente ja esta processando ESTA ligacao agora? -> em tratamento
-  // (evita a IA rodar 2x). Lock curto, liberado no finally.
-  const podePreview = await reservarPreview(conversationSpaceId).catch(() => true);
+  // OUTRO atendente ja esta processando ESTA ligacao agora? -> em tratamento
+  // (evita a IA rodar 2x). Escopado pelo ramal de quem clicou: o mesmo atendente
+  // pode cancelar e reabrir sem travar. Liberado no finally.
+  const podePreview = await reservarPreview(
+    conversationSpaceId,
+    "goto",
+    ramalClicou || "",
+  ).catch(() => true);
   if (!podePreview) {
     res.status(200).json({
       ok: true,

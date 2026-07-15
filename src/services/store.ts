@@ -204,20 +204,27 @@ export async function liberarCriacao(id: string, ns = "goto") {
   memExpiry.delete(key);
 }
 
-// Lock do PREVIEW (transcricao+IA): impede que dois atendentes rodem a IA para a
-// mesma chamada ao mesmo tempo (custo dobrado). TTL curto, auto-expira.
+// Lock do PREVIEW (transcricao+IA): impede que dois atendentes DIFERENTES rodem a
+// IA para a mesma chamada ao mesmo tempo (custo dobrado). Escopado por `dono` (o
+// ramal de quem clicou): o MESMO atendente pode reabrir/re-tentar sem travar; so
+// bloqueia quando outro atendente ja esta processando. TTL curto, auto-expira.
 export async function reservarPreview(
   id: string,
   ns = "goto",
+  dono = "",
 ): Promise<boolean> {
   const key = `${ns}:preview:${id}`;
+  const val = dono || "1";
   const r = getRedis();
   if (r) {
-    const res = await r.set(key, "1", { nx: true, ex: 300 });
-    return res === "OK";
+    const atual = await r.get(key);
+    if (atual && String(atual) !== val) return false; // outro atendente processando
+    await r.set(key, val, { ex: 300 });
+    return true;
   }
-  if (memGet(key)) return false;
-  mem.set(key, "1");
+  const atualMem = memGet(key);
+  if (atualMem && atualMem !== val) return false;
+  mem.set(key, val);
   memExpiry.set(key, Date.now() + 300_000);
   return true;
 }
