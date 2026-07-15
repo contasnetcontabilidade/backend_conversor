@@ -807,6 +807,7 @@ export interface DadosDescricao {
   telefoneDestino?: string;
   duracao?: string;
   atendente?: string;
+  atendentes?: string[]; // todos os atendentes (transferencia)
   idChamadaGoto?: string;
   resumo?: string;
   pontosPrincipais?: string[];
@@ -833,7 +834,15 @@ Dados da chamada:
 - Telefone origem: ${d.telefoneOrigem || "-"}
 - Telefone destino: ${d.telefoneDestino || "-"}
 - Duracao: ${d.duracao || "-"}
-- Atendente/ramal: ${d.atendente || "-"}
+${
+  d.atendentes && d.atendentes.length > 1
+    ? `- Atendentes (transferencia):\n${d.atendentes
+        .map((a) => `  - ${a}`)
+        .join("\n")}`
+    : `- Atendente/ramal: ${
+        (d.atendentes && d.atendentes[0]) || d.atendente || "-"
+      }`
+}
 - ID da chamada GoTo: ${d.idChamadaGoto || "-"}
 
 Resumo:

@@ -3,7 +3,7 @@ import { Request, Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
 import { transcreverAudio } from "../services/transcricao";
-import { downloadRecording, extractRecordingId } from "../services/gotoApi";
+import { downloadRecording, extractRecordingIds } from "../services/gotoApi";
 import {
   analisarChamada,
   getReportComRetry,
@@ -13,10 +13,13 @@ import {
 import {
   getChamadoCriado,
   liberarCriacao,
+  liberarPreview,
   marcarChamadoAberto,
   reservarCriacao,
+  reservarPreview,
   salvarChamadoCriado,
 } from "../services/store";
+import { isAblyConfigured, publishChamadoCriado } from "../services/ably";
 import {
   buscarClientes,
   buscarOrigens,
@@ -95,7 +98,8 @@ interface MetaChamada {
   duracao: string;
   telefoneOrigem: string;
   telefoneDestino: string;
-  atendente: string;
+  atendente: string; // primeiro atendente (compat)
+  atendentes: string[]; // TODOS os atendentes (com duracao quando houver)
   direction: string;
 }
 
@@ -145,6 +149,12 @@ function extrairMetaChamada(
   const atendente = atendenteObj
     ? [atendenteObj.ramal, atendenteObj.nome].filter(Boolean).join(" - ")
     : "";
+  // Lista de TODOS os atendentes (inclui transferidos), com duracao quando houver.
+  const atendentes = (analise?.answerers || []).map((a) => {
+    const base = [a.ramal, a.nome].filter(Boolean).join(" - ");
+    const dur = a.duracaoSeg ? ` (${formatarDuracaoSeg(a.duracaoSeg)})` : "";
+    return base + dur;
+  });
 
   let telefoneOrigem = "";
   let telefoneDestino = "";
@@ -160,7 +170,15 @@ function extrairMetaChamada(
     telefoneDestino = atendenteObj?.ramal || "";
   }
 
-  return { dataHora, duracao, telefoneOrigem, telefoneDestino, atendente, direction };
+  return {
+    dataHora,
+    duracao,
+    telefoneOrigem,
+    telefoneDestino,
+    atendente,
+    atendentes,
+    direction,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,9 +203,41 @@ export async function suitePreviewController(req: Request, res: Response) {
   // (setor/executor/custo) e atribuido a essa pessoa.
   const ramalClicou = getOptionalString(body, "ramal");
 
-  await marcarChamadoAberto(conversationSpaceId).catch(() => undefined);
+  // Ja existe chamado para esta ligacao? -> em tratamento (nao roda a IA de novo).
+  const jaCriadoPrev = await getChamadoCriado(conversationSpaceId).catch(
+    () => null,
+  );
+  if (jaCriadoPrev) {
+    res.status(200).json({
+      ok: true,
+      data: {
+        conversationSpaceId,
+        emTratamento: true,
+        jaCriado: true,
+        mensagem: "Chamado ja gerado para esta ligacao.",
+      },
+    });
+    return;
+  }
+  // Outro atendente ja esta processando ESTA ligacao agora? -> em tratamento
+  // (evita a IA rodar 2x). Lock curto, liberado no finally.
+  const podePreview = await reservarPreview(conversationSpaceId).catch(() => true);
+  if (!podePreview) {
+    res.status(200).json({
+      ok: true,
+      data: {
+        conversationSpaceId,
+        emTratamento: true,
+        mensagem: "Este chamado ja esta sendo tratado por outro atendente.",
+      },
+    });
+    return;
+  }
 
-  const report = await getReportComRetry(conversationSpaceId);
+  try {
+    await marcarChamadoAberto(conversationSpaceId).catch(() => undefined);
+
+    const report = await getReportComRetry(conversationSpaceId);
   if (!report) {
     throw new AppError({
       statusCode: 409,
@@ -196,8 +246,8 @@ export async function suitePreviewController(req: Request, res: Response) {
     });
   }
 
-  const recordingId = extractRecordingId(report);
-  if (!recordingId) {
+  const recordingIds = extractRecordingIds(report);
+  if (!recordingIds.length) {
     throw new AppError({
       statusCode: 404,
       code: "RECORDING_NOT_FOUND",
@@ -242,14 +292,44 @@ export async function suitePreviewController(req: Request, res: Response) {
     ),
   );
 
-  const audioPath = await downloadRecording(recordingId);
-  const transcricao = await transcreverAudio({
-    audioPath,
-    ramal: ramalUsuario,
-    usuario: nomeUsuario,
-    nomesConhecidos,
-    fonte: "ligacao",
-  });
+  // Transcreve TODOS os trechos de gravacao (transferencia = varios trechos) e
+  // concatena na ordem. Trecho silencioso (AUDIO_SEM_FALA) e pulado; se TODOS
+  // vierem vazios, propaga o erro. RECORDING_NOT_READY sobe para o retry do app.
+  let transcript = "";
+  for (let i = 0; i < recordingIds.length; i += 1) {
+    const audioPath = await downloadRecording(recordingIds[i]);
+    let parte = "";
+    try {
+      const t = await transcreverAudio({
+        audioPath,
+        ramal: ramalUsuario,
+        usuario: nomeUsuario,
+        nomesConhecidos,
+        fonte: "ligacao",
+      });
+      parte = String(t.transcript || "").trim();
+    } catch (error) {
+      const code = error instanceof AppError ? error.code : "";
+      if (code === "AUDIO_SEM_FALA") continue; // trecho mudo: ignora
+      throw error;
+    }
+    if (!parte) continue;
+    if (transcript) transcript += "\n\n";
+    if (recordingIds.length > 1) {
+      transcript += `--- Trecho ${i + 1}/${recordingIds.length} ---\n`;
+    }
+    transcript += parte;
+  }
+  if (!transcript.trim()) {
+    throw new AppError({
+      statusCode: 422,
+      code: "AUDIO_SEM_FALA",
+      message: "Nenhuma fala foi detectada no audio.",
+    });
+  }
+  const gravacaoNota = `Gravacao disponivel no GoTo (${recordingIds.length} trecho${
+    recordingIds.length > 1 ? "s" : ""
+  }: ${recordingIds.join(", ")}).`;
 
   // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito).
   // Best-effort: se a busca falhar, a IA segue sem lista e caimos no match textual.
@@ -261,7 +341,7 @@ export async function suitePreviewController(req: Request, res: Response) {
   let iaOk = true;
   try {
     ({ resumo } = await gerarResumoGemini({
-      srtPath: transcricao.srtPath,
+      text: transcript,
       model: geminiModel,
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
         id: t.id,
@@ -356,12 +436,13 @@ export async function suitePreviewController(req: Request, res: Response) {
     telefoneDestino: meta.telefoneDestino,
     duracao: meta.duracao,
     atendente: meta.atendente,
+    atendentes: meta.atendentes,
     idChamadaGoto: conversationSpaceId,
     resumo: resumo.resumo,
     pontosPrincipais: resumo.pontos_principais,
     providencias: resumo.providencias_sugeridas,
-    transcricao: transcricao.transcript,
-    gravacao: `Gravacao disponivel no GoTo (recording id ${recordingId}).`,
+    transcricao: transcript,
+    gravacao: gravacaoNota,
   });
 
   // Log tecnico: nunca inclui a transcricao completa.
@@ -389,17 +470,25 @@ export async function suitePreviewController(req: Request, res: Response) {
         telefoneOrigem: meta.telefoneOrigem,
         telefoneDestino: meta.telefoneDestino,
         atendente: meta.atendente,
+        atendentes: meta.atendentes,
         idGoto: conversationSpaceId,
-        recordingId,
+        recordingIds,
       },
       ia: resumo,
-      transcricao: transcricao.transcript,
-      gravacao: `Gravacao disponivel no GoTo (recording id ${recordingId}).`,
+      transcricao: transcript,
+      gravacao: gravacaoNota,
       cliente,
       refs: { tipo, origem, setor, executor },
       descricao,
     },
   });
+  } catch (err) {
+    // No SUCESSO o lock e mantido (expira em ~5 min) para que outro atendente
+    // veja "em tratamento" enquanto este revisa. No ERRO liberamos para permitir
+    // o auto-retry (gravacao ainda processando) e nao travar os outros.
+    await liberarPreview(conversationSpaceId).catch(() => undefined);
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +506,32 @@ function campoId(
   if (typeof v === "number" && Number.isFinite(v)) return String(v);
   if (typeof v === "string" && v.trim()) return v.trim();
   return undefined;
+}
+
+// Avisa TODOS os atendentes da ligacao (inclui transferidos) que o chamado foi
+// criado, para o botao "abrir chamado" desabilitar em todas as maquinas.
+// Best-effort: nunca quebra a criacao se o push falhar.
+async function broadcastChamadoCriado(
+  conversationSpaceId: string,
+): Promise<void> {
+  if (!isAblyConfigured()) return;
+  try {
+    const report = await getReportComRetry(conversationSpaceId);
+    if (!report) return;
+    const analise = analisarChamada(report);
+    const ramais = new Set<string>();
+    if (analise?.caller?.ramal) ramais.add(analise.caller.ramal);
+    for (const a of analise?.answerers || []) {
+      if (a.ramal) ramais.add(a.ramal);
+    }
+    await Promise.all(
+      [...ramais].map((r) =>
+        publishChamadoCriado(r, { conversationSpaceId }).catch(() => undefined),
+      ),
+    );
+  } catch {
+    /* best-effort */
+  }
 }
 
 export async function suiteCriarController(req: Request, res: Response) {
@@ -458,13 +573,13 @@ export async function suiteCriarController(req: Request, res: Response) {
     await marcarChamadoAberto(conversationSpaceId).catch(() => undefined);
   }
 
-  // --- DEV (dry-run): so devolve o JSON que SERIA enviado, sem criar nada. ---
-  if (dryRun) {
+  // dry-run com campos faltando: nao e uma criacao valida — so mostra o que falta,
+  // sem travar nem avisar os outros (o usuario ainda vai corrigir e reenviar).
+  if (dryRun && faltando.length) {
     const resultado = await criarChamado(chamadoBody as ChamadoBody);
     console.log(
       `[suite360:criar] req=${requestId} conv=${conversationSpaceId || "-"} ` +
-        `cliente=${chamadoBody.cliente_id || "-"} DRY-RUN (nao enviado)` +
-        (faltando.length ? ` faltando=[${faltando.join(",")}]` : ""),
+        `DRY-RUN incompleto faltando=[${faltando.join(",")}]`,
     );
     res.status(200).json({
       ok: true,
@@ -472,38 +587,41 @@ export async function suiteCriarController(req: Request, res: Response) {
         requestId,
         dryRun: true,
         faltando,
-        mensagem: faltando.length
-          ? "Simulado — ainda faltam IDs para envio real: " + faltando.join(", ")
-          : "Chamado simulado — envio ao Suite desligado (SUITE360_DRY_RUN).",
+        mensagem:
+          "Simulado — ainda faltam IDs para envio real: " + faltando.join(", "),
         body: resultado.body,
       },
     });
     return;
   }
 
-  // --- PRODUCAO: idempotencia (nao cria chamado duplicado para a mesma ligacao) ---
+  // Criacao "valida" (producao OU simulacao completa): idempotencia + aviso a
+  // TODOS os atendentes valem INCLUSIVE no dry-run (ninguem gera dois chamados).
   if (conversationSpaceId) {
     const jaCriado = await getChamadoCriado(conversationSpaceId).catch(
       () => null,
     );
     if (jaCriado) {
+      await broadcastChamadoCriado(conversationSpaceId);
       console.log(
-        `[suite360:criar] req=${requestId} conv=${conversationSpaceId} JA EXISTIA protocolo=${jaCriado.protocolo}`,
+        `[suite360:criar] req=${requestId} conv=${conversationSpaceId} JA EXISTIA protocolo=${jaCriado.protocolo || "-"}`,
       );
       res.status(200).json({
         ok: true,
         data: {
           requestId,
-          dryRun: false,
+          dryRun,
           jaExistia: true,
           id: jaCriado.id,
           protocolo: jaCriado.protocolo,
-          mensagem: `Chamado ja existente para esta ligacao: ${jaCriado.protocolo}`,
+          mensagem: `Chamado ja gerado para esta ligacao${
+            jaCriado.protocolo ? ": " + jaCriado.protocolo : ""
+          }.`,
         },
       });
       return;
     }
-    // Lock atomico: evita que caller+atendente (interna) criem 2 ao mesmo tempo.
+    // Lock atomico: evita que dois atendentes criem 2 ao mesmo tempo.
     const reservou = await reservarCriacao(conversationSpaceId).catch(() => true);
     if (!reservou) {
       throw new AppError({
@@ -527,12 +645,35 @@ export async function suiteCriarController(req: Request, res: Response) {
 
   const protocolo = resultado.protocolo || "";
   if (conversationSpaceId) {
-    await salvarChamadoCriado(conversationSpaceId, {
-      id: resultado.id || "",
-      protocolo,
-    }).catch(() => undefined);
+    await salvarChamadoCriado(
+      conversationSpaceId,
+      { id: resultado.id || "", protocolo },
+      "goto",
+      dryRun ? 600 : 30 * 24 * 3600, // dry-run: 10 min (permite re-testar a mesma ligacao)
+    ).catch(() => undefined);
     await liberarCriacao(conversationSpaceId).catch(() => undefined);
+    await broadcastChamadoCriado(conversationSpaceId);
   }
+
+  if (dryRun) {
+    console.log(
+      `[suite360:criar] req=${requestId} conv=${conversationSpaceId || "-"} ` +
+        `cliente=${chamadoBody.cliente_id || "-"} DRY-RUN (nao enviado)`,
+    );
+    res.status(200).json({
+      ok: true,
+      data: {
+        requestId,
+        dryRun: true,
+        faltando,
+        mensagem:
+          "Chamado simulado — envio ao Suite desligado (SUITE360_DRY_RUN).",
+        body: resultado.body,
+      },
+    });
+    return;
+  }
+
   console.log(
     `[suite360:criar] req=${requestId} conv=${conversationSpaceId || "-"} ` +
       `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,

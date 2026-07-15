@@ -157,17 +157,50 @@ export async function gotoWebhookController(req: Request, res: Response) {
 export interface ParticipanteLinha {
   ramal: string;
   nome: string;
+  temGravacao?: boolean; // atendeu com gravacao (atendente "principal")
+  duracaoSeg?: number; // duracao no trecho dele, se o relatorio trouxer
 }
 export interface AnaliseChamada {
   tipo: "externo" | "interno";
   numeroExterno?: string; // externo
   caller?: ParticipanteLinha; // interno: quem ligou
-  answerers: ParticipanteLinha[]; // quem atendeu (LINE com gravacao)
+  answerers: ParticipanteLinha[]; // TODOS que atenderam (inclui transferidos)
 }
 
 function dedupRamal(arr: ParticipanteLinha[]): ParticipanteLinha[] {
   const seen = new Set<string>();
   return arr.filter((a) => (seen.has(a.ramal) ? false : seen.add(a.ramal)));
+}
+
+// Duracao (segundos) do participante, best-effort: o relatorio do GoTo e lido
+// "cru", entao tentamos varios nomes de campo (duracao direta ou timestamps).
+// Se nada bater, devolve undefined (mostramos so nome/ramal).
+function tsMs(v: unknown): number | null {
+  if (typeof v === "number" && v > 0) return v < 1e12 ? v * 1000 : v; // s -> ms
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    return Number.isNaN(t) ? null : t;
+  }
+  return null;
+}
+function duracaoParticipante(p: Record<string, unknown>): number | undefined {
+  for (const k of ["durationSeconds", "durationSeg", "talkTime", "duration"]) {
+    const v = p[k];
+    if (typeof v === "number" && v > 0) return Math.round(v > 1e5 ? v / 1000 : v);
+    if (typeof v === "string" && /^\d+$/.test(v)) return parseInt(v, 10);
+  }
+  let ini: number | null = null;
+  let fim: number | null = null;
+  for (const k of ["startTime", "connectedTime", "answeredTime", "joinedTime", "start"]) {
+    ini = tsMs(p[k]);
+    if (ini) break;
+  }
+  for (const k of ["endTime", "disconnectedTime", "leftTime", "end"]) {
+    fim = tsMs(p[k]);
+    if (fim) break;
+  }
+  if (ini && fim && fim > ini) return Math.round((fim - ini) / 1000);
+  return undefined;
 }
 
 // Analisa o relatorio: externo (com numero do cliente) ou interno (caller + answerers).
@@ -178,10 +211,9 @@ export function analisarChamada(
   if (!Array.isArray(participants)) return null;
   const direction = String(report.direction || "").toUpperCase();
 
-  // answerers (com gravacao): usado no externo, para saber quem ATENDEU o cliente.
-  const answerers: ParticipanteLinha[] = [];
-  // todasLinhas: todos os ramais LINE, COM ou SEM gravacao. Usado no interno,
-  // onde a chamada normalmente nao e gravada (nao da pra exigir recordings).
+  // todasLinhas: TODOS os ramais LINE (com ou sem gravacao) na ordem do relatorio.
+  // Numa transferencia, o atendente transferido pode nao ter gravacao no trecho
+  // dele — por isso NAO exigimos recordings para captura-lo.
   const todasLinhas: ParticipanteLinha[] = [];
   for (const p of participants) {
     if (
@@ -191,13 +223,16 @@ export function analisarChamada(
       typeof p.type.extensionNumber === "string" &&
       p.type.extensionNumber
     ) {
-      const linha = {
+      const dur = duracaoParticipante(p);
+      todasLinhas.push({
         ramal: p.type.extensionNumber,
         nome: typeof p.type.name === "string" ? p.type.name : "",
-      };
-      todasLinhas.push(linha);
-      if (Array.isArray(p.recordings) && p.recordings.length > 0) {
-        answerers.push(linha);
+        temGravacao: Array.isArray(p.recordings) && p.recordings.length > 0,
+        ...(dur != null ? { duracaoSeg: dur } : {}),
+      });
+      // [TEMP] confirmar os campos de tempo por participante numa transferencia real.
+      if (process.env.GOTO_LOG_PARTICIPANTES === "1") {
+        console.log("[goto][participante]", JSON.stringify(p));
       }
     }
   }
@@ -214,7 +249,8 @@ export function analisarChamada(
       direction === "INBOUND"
         ? String(callerObj.number || t.number || "")
         : String(t.number || callerObj.number || "");
-    return { tipo: "externo", numeroExterno, answerers: dedupRamal(answerers) };
+    // Externo: TODOS os ramais LINE sao atendentes (inclui os transferidos).
+    return { tipo: "externo", numeroExterno, answerers: dedupRamal(todasLinhas) };
   }
 
   // Interno: caller = participante LINE onde id === originator (quem iniciou).

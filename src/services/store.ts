@@ -172,12 +172,9 @@ export async function salvarChamadoCriado(
   id: string,
   dados: { id: string; protocolo: string },
   ns = "goto",
+  ttlSeg = 30 * 24 * 3600, // 30 dias (producao). Dry-run passa um TTL curto.
 ) {
-  await setValue(
-    `${ns}:chamado:${id}`,
-    JSON.stringify(dados),
-    30 * 24 * 3600, // 30 dias
-  );
+  await setValue(`${ns}:chamado:${id}`, JSON.stringify(dados), ttlSeg);
 }
 // Lock atomico (SET NX) para impedir criacao concorrente do mesmo item.
 // Retorna true se conseguiu reservar (deve criar); false se ja ha uma em andamento.
@@ -198,6 +195,34 @@ export async function reservarCriacao(
 }
 export async function liberarCriacao(id: string, ns = "goto") {
   const key = `${ns}:criando:${id}`;
+  const r = getRedis();
+  if (r) {
+    await r.del(key);
+    return;
+  }
+  mem.delete(key);
+  memExpiry.delete(key);
+}
+
+// Lock do PREVIEW (transcricao+IA): impede que dois atendentes rodem a IA para a
+// mesma chamada ao mesmo tempo (custo dobrado). TTL curto, auto-expira.
+export async function reservarPreview(
+  id: string,
+  ns = "goto",
+): Promise<boolean> {
+  const key = `${ns}:preview:${id}`;
+  const r = getRedis();
+  if (r) {
+    const res = await r.set(key, "1", { nx: true, ex: 300 });
+    return res === "OK";
+  }
+  if (memGet(key)) return false;
+  mem.set(key, "1");
+  memExpiry.set(key, Date.now() + 300_000);
+  return true;
+}
+export async function liberarPreview(id: string, ns = "goto") {
+  const key = `${ns}:preview:${id}`;
   const r = getRedis();
   if (r) {
     await r.del(key);

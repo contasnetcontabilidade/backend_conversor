@@ -241,18 +241,28 @@ export async function listarHistoricoChamadas(
 export function extractRecordingId(
   report: Record<string, unknown>,
 ): string | null {
+  return extractRecordingIds(report)[0] ?? null;
+}
+
+// TODOS os ids de gravacao do relatorio, na ordem dos participantes, sem repetir.
+// Numa transferencia a chamada costuma ser gravada em VARIOS trechos (um por
+// atendente); precisamos de todos para transcrever a conversa inteira.
+export function extractRecordingIds(report: Record<string, unknown>): string[] {
   const participants = report.participants;
-  if (!Array.isArray(participants)) return null;
+  if (!Array.isArray(participants)) return [];
+  const ids: string[] = [];
+  const seen = new Set<string>();
   for (const p of participants) {
     if (isRecord(p) && Array.isArray(p.recordings)) {
       for (const rec of p.recordings) {
-        if (isRecord(rec) && typeof rec.id === "string" && rec.id) {
-          return rec.id;
+        if (isRecord(rec) && typeof rec.id === "string" && rec.id && !seen.has(rec.id)) {
+          seen.add(rec.id);
+          ids.push(rec.id);
         }
       }
     }
   }
-  return null;
+  return ids;
 }
 
 // Baixa a gravacao (fluxo em 2 passos, com o token no PATH):

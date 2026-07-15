@@ -42,6 +42,16 @@ export async function publishCallEnded(
   await channel.publish("call-ended", event);
 }
 
+// Avisa (em tempo real) que o chamado de uma chamada foi criado, para que os
+// OUTROS atendentes (transferencia) desabilitem o botao "abrir chamado".
+export async function publishChamadoCriado(
+  ramal: string,
+  payload: { conversationSpaceId: string },
+): Promise<void> {
+  const channel = getRest().channels.get(channelForRamal(ramal));
+  await channel.publish("chamado-criado", payload);
+}
+
 // Gera um TokenRequest com capacidade limitada a assinar o canal do ramal.
 // O desktop usa isso (via authUrl) para conectar sem ver a root key.
 export async function createRamalTokenRequest(
