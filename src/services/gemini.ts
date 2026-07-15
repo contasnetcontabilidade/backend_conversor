@@ -44,7 +44,7 @@ export type ResumoInput = {
   // Origem do conteudo, ajusta o prompt. Padrao: "ligacao".
   origem?: "ligacao" | "email";
   // Fonte para o painel de custos separar ligacao x e-mail.
-  fonte?: "ligacao" | "email";
+  fonte?: "ligacao" | "email" | "resumo";
 };
 
 function getGeminiClient() {

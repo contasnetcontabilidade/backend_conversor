@@ -20,7 +20,7 @@ function getRedis(): Redis | null {
 }
 
 export type Operacao = "transcricao" | "resumo";
-export type Fonte = "ligacao" | "email";
+export type Fonte = "ligacao" | "email" | "resumo";
 type Metric = "in" | "out" | "calls";
 
 const KEY_DIAS = "uso:dias";

@@ -55,14 +55,14 @@ export type TranscricaoInput = {
   // Entram como dica no prompt para grafar corretamente — nunca sao forcados.
   nomesConhecidos?: string[];
   // Fonte para o painel de custos (transcricao normalmente e "ligacao").
-  fonte?: "ligacao" | "email";
+  fonte?: "ligacao" | "email" | "resumo";
 };
 
 type IdentidadeUso = {
   ramal?: string;
   usuario?: string;
   nomesConhecidos?: string[];
-  fonte?: "ligacao" | "email";
+  fonte?: "ligacao" | "email" | "resumo";
 };
 
 export type TranscricaoResultado = {

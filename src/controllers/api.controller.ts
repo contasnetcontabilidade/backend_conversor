@@ -99,6 +99,10 @@ export async function processarUploadController(req: Request, res: Response) {
 
   const executarTranscricao = parseBooleanLike(body.executarTranscricao, true);
   const executarResumo = parseBooleanLike(body.executarResumo, true);
+  // Identidade de quem gravou/enviou (mandada pelo desktop) e fonte "resumo":
+  // separa o custo da pagina "Transcrever & Resumir" e atribui por usuario.
+  const ramal = getOptionalString(body, "ramal");
+  const usuario = getOptionalString(body, "usuario");
 
   if (!executarTranscricao && !executarResumo) {
     throw new AppError({
@@ -125,6 +129,9 @@ export async function processarUploadController(req: Request, res: Response) {
       modelName: getOptionalString(body, "modelName"),
       autoDownloadModelName: getOptionalString(body, "autoDownloadModelName"),
       withCuda: parseBooleanLike(body.withCuda, false),
+      ramal,
+      usuario,
+      fonte: "resumo",
     });
   }
 
@@ -145,6 +152,9 @@ export async function processarUploadController(req: Request, res: Response) {
     resumo = await gerarResumoGemini({
       srtPath,
       model: getOptionalString(body, "geminiModel"),
+      ramal,
+      usuario,
+      fonte: "resumo",
     });
   }
 

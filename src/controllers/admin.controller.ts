@@ -316,7 +316,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <div class="grid2">
-    <div class="panel" style="margin:0"><h3>Ligações vs. E-mails (R$)</h3><div class="chart-box"><canvas id="chartFonte"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3>Custo por fonte (R$)</h3><div class="chart-box"><canvas id="chartFonte"></canvas></div></div>
     <div class="panel" style="margin:0">
       <h3>Por fonte — no período</h3>
       <div style="overflow:auto">
@@ -503,9 +503,10 @@ function render(){
   fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={custoUsd:0,itens:0});a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
   var ligUsd=(fAgg["ligacao"]&&fAgg["ligacao"].custoUsd)||0;
   var emUsd=(fAgg["email"]&&fAgg["email"].custoUsd)||0;
-  chart("chartFonte",{type:"doughnut",data:{labels:["Ligações","E-mails"],datasets:[{data:[+(ligUsd*c).toFixed(4),+(emUsd*c).toFixed(4)],backgroundColor:[accent,gold],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
-  var totF=ligUsd+emUsd;
-  var fLinhas=[{nome:"Ligações",itens:(fAgg["ligacao"]&&fAgg["ligacao"].itens)||0,usd:ligUsd},{nome:"E-mails",itens:(fAgg["email"]&&fAgg["email"].itens)||0,usd:emUsd}];
+  var resUsd=(fAgg["resumo"]&&fAgg["resumo"].custoUsd)||0;
+  chart("chartFonte",{type:"doughnut",data:{labels:["Ligações","E-mails","Resumo (gravação)"],datasets:[{data:[+(ligUsd*c).toFixed(4),+(emUsd*c).toFixed(4),+(resUsd*c).toFixed(4)],backgroundColor:[accent,gold,"#2f9e6b"],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
+  var totF=ligUsd+emUsd+resUsd;
+  var fLinhas=[{nome:"Ligações",itens:(fAgg["ligacao"]&&fAgg["ligacao"].itens)||0,usd:ligUsd},{nome:"E-mails",itens:(fAgg["email"]&&fAgg["email"].itens)||0,usd:emUsd},{nome:"Resumo (gravação)",itens:(fAgg["resumo"]&&fAgg["resumo"].itens)||0,usd:resUsd}];
   var tbf=document.getElementById("tbody-fonte");
   if(tbf){
     if(totF<=0.0000001){tbf.innerHTML='<tr><td colspan="4" class="muted">Sem consumo marcado por fonte no período.</td></tr>';}
