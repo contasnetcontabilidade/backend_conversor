@@ -4,7 +4,6 @@ import { AppError, getErrorMessage } from "../lib/errors";
 import {
   buildAuthorizeUrl,
   exchangeCodeForTokens,
-  getValidAccessToken,
 } from "../services/gmailAuth";
 import {
   garantirMarcador,
@@ -116,49 +115,6 @@ export async function gmailOAuthDoneController(req: Request, res: Response) {
         `A conta <b>${email}</b> foi conectada. Pode fechar esta janela.`,
       ),
     );
-}
-
-// [DIAGNOSTICO TEMPORARIO] inspeciona o estado do storage do Gmail.
-//   ?email=...   -> mostra se a conta tem refresh/access token salvos
-//   ?token=...   -> mostra se um profileToken resolve para um e-mail
-//   (sem params) -> testa o round-trip basico do storage
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function gmailDiagController(req: Request, res: Response) {
-  const email = String(req.query.email || "").trim().toLowerCase();
-  const token = String(req.query.token || "").trim();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const out: any = { ok: true };
-
-  const k = "diagtok-" + randomUUID();
-  await setPerfilToken(k, "diag@teste.com");
-  out.roundTripOk = (await getEmailByToken(k)) === "diag@teste.com";
-
-  if (token) {
-    out.token = {
-      prefixo: token.slice(0, 8) + "…",
-      resolveEmail: await getEmailByToken(token).catch(() => null),
-    };
-  }
-  if (email) {
-    out.conta = {
-      email,
-      temRefresh: Boolean(await getGmailRefresh(email).catch(() => null)),
-      temAccess: Boolean(await getGmailAccess(email).catch(() => null)),
-    };
-    // Chama a API do Gmail e devolve o erro CRU do Google (pra ver o motivo do 403).
-    try {
-      const at = await getValidAccessToken(email);
-      const r = await fetch(
-        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-        { headers: { Authorization: `Bearer ${at}` } },
-      );
-      const body = await r.text();
-      out.gmailTest = { status: r.status, body: body.slice(0, 600) };
-    } catch (e) {
-      out.gmailTest = { erro: getErrorMessage(e) };
-    }
-  }
-  res.status(200).json(out);
 }
 
 // ---------------------------------------------------------------------------

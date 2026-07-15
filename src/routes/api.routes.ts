@@ -31,7 +31,6 @@ import {
 } from "../controllers/suite360.controller";
 import {
   gmailCriarController,
-  gmailDiagController,
   gmailEmailsController,
   gmailOAuthCallbackController,
   gmailOAuthDoneController,
@@ -94,7 +93,6 @@ apiRouter.get("/suite360/usuarios", asyncHandler(suiteUsuariosController));
 apiRouter.get("/gmail/oauth/start", asyncHandler(gmailOAuthStartController));
 apiRouter.get("/gmail/oauth/callback", asyncHandler(gmailOAuthCallbackController));
 apiRouter.get("/gmail/oauth/done", asyncHandler(gmailOAuthDoneController));
-apiRouter.get("/gmail/_diag", asyncHandler(gmailDiagController));
 apiRouter.get("/gmail/emails", asyncHandler(gmailEmailsController));
 apiRouter.post("/gmail/chamado/preview", asyncHandler(gmailPreviewController));
 apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
