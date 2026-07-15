@@ -34,9 +34,17 @@ export async function resumoController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
 
   const result = await gerarResumoGemini({
+    text: getOptionalString(body, "text"), // re-resumir a partir do texto ja transcrito
     audioPath: getOptionalString(body, "audioPath"),
     srtPath: getOptionalString(body, "srtPath"),
     model: getOptionalString(body, "model"),
+    ramal: getOptionalString(body, "ramal"),
+    usuario: getOptionalString(body, "usuario"),
+    fonte: getOptionalString(body, "fonte") as
+      | "ligacao"
+      | "email"
+      | "resumo"
+      | undefined,
   });
 
   res.status(200).json({ ok: true, data: result });
