@@ -328,6 +328,9 @@ async function transcreverComGemini(
     : "";
   const promptTranscricao =
     "Transcreva o audio integralmente em portugues do Brasil e retorne SOMENTE o texto puro da transcricao, sem markdown e sem comentarios.\n" +
+    "IMPORTANTE: se o audio NAO tiver fala inteligivel (silencio, so ruido, so musica, ou nada audivel), retorne uma string VAZIA. " +
+    "NUNCA invente, fabrique ou preencha com uma reuniao, apresentacao ou dialogo que nao foi realmente dito no audio. " +
+    "So transcreva o que de fato foi falado.\n" +
     "Cuidado ESPECIAL com NOMES PROPRIOS (de pessoas, empresas, cidades) e com numeros/documentos: transcreva-os o mais fiel possivel ao que foi falado, mantendo a grafia mais proxima do que se ouve. " +
     "NAO troque um nome por uma palavra comum parecida e NAO invente nomes. " +
     "Quando a pessoa soletrar (letra por letra) um nome, e-mail, CNPJ ou telefone, reproduza a sequencia exata. " +
@@ -397,10 +400,12 @@ async function transcreverComGemini(
 
         transcript = String(response.text ?? "").trim();
         if (!transcript) {
+          // Com o prompt atual, vazio significa "sem fala inteligivel" (silencio/
+          // ruido). Erro amigavel e NAO-retentavel, em vez de fabricar conteudo.
           throw new AppError({
-            statusCode: 502,
-            code: "GEMINI_EMPTY_TRANSCRIPTION",
-            message: "Gemini nao retornou texto da transcricao.",
+            statusCode: 422,
+            code: "AUDIO_SEM_FALA",
+            message: "Nenhuma fala foi detectada no audio.",
             details: { model, attempt },
           });
         }
@@ -435,9 +440,9 @@ async function transcreverComGemini(
 
     if (!transcript) {
       throw new AppError({
-        statusCode: 502,
-        code: "GEMINI_EMPTY_TRANSCRIPTION",
-        message: "Gemini nao retornou texto da transcricao apos retries.",
+        statusCode: 422,
+        code: "AUDIO_SEM_FALA",
+        message: "Nenhuma fala foi detectada no audio.",
         details: { attempts: maxAttempts, models, cause: getErrorMessage(lastError) },
       });
     }
