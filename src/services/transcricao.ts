@@ -12,13 +12,14 @@ import { thinkingConfigFor } from "./geminiThinking";
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
 const DEFAULT_MODEL_NAME = process.env.WHISPER_MODEL ?? "base";
-// Transcricao usa gemini-2.5-pro por padrao (melhor precisao com nomes proprios).
-// Se indisponivel, cai para o 2.5-flash e depois o flash-lite (via retry/rotacao).
+// Transcricao usa gemini-2.5-flash por padrao (o 2.5-pro exige um tier pago que a
+// chave nao tem — retorna 429 "limit: 0"). Se indisponivel, cai para flash-lite e
+// depois 2.0-flash (via retry/rotacao). Sobrescrivel por GEMINI_TRANSCRIPTION_MODEL.
 const DEFAULT_GEMINI_TRANSCRIPTION_MODEL =
-  process.env.GEMINI_TRANSCRIPTION_MODEL ?? "gemini-2.5-pro";
+  process.env.GEMINI_TRANSCRIPTION_MODEL ?? "gemini-2.5-flash";
 const DEFAULT_GEMINI_TRANSCRIPTION_FALLBACK_MODELS =
   process.env.GEMINI_TRANSCRIPTION_FALLBACK_MODELS ??
-  "gemini-2.5-flash,gemini-2.5-flash-lite";
+  "gemini-2.5-flash-lite,gemini-2.0-flash";
 const DEFAULT_GEMINI_TRANSCRIPTION_RETRY_ATTEMPTS = Number(
   process.env.GEMINI_TRANSCRIPTION_RETRY_ATTEMPTS ?? "4",
 );
