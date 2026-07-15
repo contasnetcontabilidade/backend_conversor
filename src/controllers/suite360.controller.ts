@@ -482,12 +482,12 @@ export async function suitePreviewController(req: Request, res: Response) {
       descricao,
     },
   });
-  } catch (err) {
-    // No SUCESSO o lock e mantido (expira em ~5 min) para que outro atendente
-    // veja "em tratamento" enquanto este revisa. No ERRO liberamos para permitir
-    // o auto-retry (gravacao ainda processando) e nao travar os outros.
+  } finally {
+    // Libera o lock ao FIM do preview (sucesso ou erro). O lock so existe
+    // enquanto a IA roda (evita 2 atendentes processando ao mesmo tempo). Se o
+    // usuario cancelar e clicar de novo, NAO fica preso em "em tratamento". A
+    // duplicacao do chamado em si e barrada por getChamadoCriado (nao pelo lock).
     await liberarPreview(conversationSpaceId).catch(() => undefined);
-    throw err;
   }
 }
 
