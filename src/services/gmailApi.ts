@@ -201,6 +201,71 @@ export async function obterEmail(
   };
 }
 
+export interface ThreadCompleta {
+  threadId: string;
+  subject: string; // assunto (mensagem mais recente)
+  from: string; // remetente da mensagem mais recente
+  date: string; // data da mensagem mais recente
+  remetentes: string[]; // remetentes distintos (nome ou e-mail), em ordem
+  count: number; // quantidade de mensagens na conversa
+  messageIds: string[];
+  corpo: string; // corpos concatenados em ordem cronologica, com separadores
+}
+
+// Busca a thread (conversa) inteira: junta o corpo de TODAS as mensagens em ordem
+// cronologica e coleta os remetentes distintos. Usado para abrir UM chamado com a
+// conversa toda, em vez de um por e-mail.
+export async function obterThread(
+  email: string,
+  threadId: string,
+): Promise<ThreadCompleta> {
+  const t = await gmailGet(
+    email,
+    `/threads/${encodeURIComponent(threadId)}?format=full`,
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const msgs: any[] = Array.isArray(t?.messages) ? t.messages : [];
+  // O Gmail devolve as mensagens da thread em ordem cronologica (mais antiga 1o).
+  const mensagens = msgs.map((m) => {
+    const headers = m?.payload?.headers || [];
+    return {
+      id: String(m?.id || ""),
+      from: header(headers, "From"),
+      subject: header(headers, "Subject"),
+      date: header(headers, "Date"),
+      corpo: extrairCorpo(m?.payload),
+    };
+  });
+  const primeira = mensagens[0];
+  const ultima = mensagens[mensagens.length - 1] || primeira;
+  const remetentes: string[] = [];
+  for (const m of mensagens) {
+    const { nome, email: mail } = parseFrom(m.from);
+    const quem = nome || mail;
+    if (quem && !remetentes.includes(quem)) remetentes.push(quem);
+  }
+  const corpo = mensagens
+    .map((m, i) => {
+      const { nome, email: mail } = parseFrom(m.from);
+      const quem = nome || mail || "?";
+      const cab = `--- Mensagem ${i + 1}/${mensagens.length} — de ${quem}${
+        m.date ? " em " + m.date : ""
+      } ---`;
+      return `${cab}\n${(m.corpo || "").trim() || "(sem conteudo)"}`;
+    })
+    .join("\n\n");
+  return {
+    threadId: String(t?.id || threadId),
+    subject: (ultima?.subject || primeira?.subject || "").trim(),
+    from: ultima?.from || primeira?.from || "",
+    date: ultima?.date || primeira?.date || "",
+    remetentes,
+    count: mensagens.length,
+    messageIds: mensagens.map((m) => m.id).filter(Boolean),
+    corpo,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Marcador (label): criar ao conectar e remover ao criar o chamado
 // ---------------------------------------------------------------------------
@@ -259,6 +324,22 @@ export async function removerMarcadorDoEmail(
     const id = await resolverMarcadorId(email);
     if (!id) return;
     await gmailPost(email, `/messages/${encodeURIComponent(messageId)}/modify`, {
+      removeLabelIds: [id],
+    });
+  } catch {
+    // best-effort: se falhar, o chamado ja foi criado do mesmo jeito.
+  }
+}
+
+// Remove o marcador de TODAS as mensagens de uma thread de uma vez. Best-effort.
+export async function removerMarcadorDaThread(
+  email: string,
+  threadId: string,
+): Promise<void> {
+  try {
+    const id = await resolverMarcadorId(email);
+    if (!id) return;
+    await gmailPost(email, `/threads/${encodeURIComponent(threadId)}/modify`, {
       removeLabelIds: [id],
     });
   } catch {

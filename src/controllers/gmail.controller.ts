@@ -9,6 +9,8 @@ import {
   garantirMarcador,
   listarEmailsMarcados,
   obterEmail,
+  obterThread,
+  removerMarcadorDaThread,
   removerMarcadorDoEmail,
 } from "../services/gmailApi";
 import {
@@ -168,6 +170,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
   const profileToken = getOptionalString(body, "profileToken");
   const messageId = getOptionalString(body, "messageId");
+  const threadId = getOptionalString(body, "threadId");
   const geminiModel = getOptionalString(body, "geminiModel");
   const ramal = getOptionalString(body, "ramal");
   const usuario = getOptionalString(body, "usuario");
@@ -176,18 +179,47 @@ export async function gmailPreviewController(req: Request, res: Response) {
   const execIdPerfil = getOptionalString(body, "executorId");
   const execNomePerfil = getOptionalString(body, "executorNome");
 
-  if (!messageId) {
+  if (!messageId && !threadId) {
     throw new AppError({
       statusCode: 400,
       code: "MESSAGE_ID_REQUIRED",
-      message: "Informe o messageId do e-mail.",
+      message: "Informe o threadId ou messageId do e-mail.",
     });
   }
   const emailParam = getOptionalString(body, "email");
   const email = await resolverContaGmail(profileToken || "", emailParam);
-  // Guarda a conta deste e-mail para o "criar" poder remover o marcador depois.
-  await salvarContaDoEmail(messageId, email).catch(() => undefined);
-  const msg = await obterEmail(email, messageId);
+
+  // Chave para idempotencia/marcador/conta: threadId (conversa inteira) quando
+  // houver; senao o messageId (e-mail unico). Guarda a conta para o "criar".
+  const chave = threadId || messageId!;
+  await salvarContaDoEmail(chave, email).catch(() => undefined);
+
+  // Le a conversa inteira (thread, todas as mensagens juntas) ou um e-mail unico.
+  let de: string;
+  let assunto: string;
+  let dataHora: string;
+  let corpoTexto: string;
+  let snippet: string;
+  let qtdMensagens = 1;
+  if (threadId) {
+    const thread = await obterThread(email, threadId);
+    qtdMensagens = thread.count;
+    const remet = thread.remetentes.length
+      ? thread.remetentes.join(", ")
+      : thread.from;
+    de = qtdMensagens > 1 ? `${remet} (${qtdMensagens} mensagens)` : remet;
+    assunto = thread.subject;
+    dataHora = thread.date;
+    corpoTexto = thread.corpo;
+    snippet = corpoTexto.slice(0, 180);
+  } else {
+    const msg = await obterEmail(email, messageId!);
+    de = msg.from;
+    assunto = msg.subject;
+    dataHora = msg.date;
+    corpoTexto = msg.corpo;
+    snippet = msg.snippet;
+  }
 
   const tiposDisponiveis = await buscarTipos().catch(() => []);
 
@@ -196,7 +228,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
   let iaOk = true;
   try {
     ({ resumo } = await gerarResumoGemini({
-      text: `Assunto: ${msg.subject}\nRemetente: ${msg.from}\n\n${msg.corpo}`,
+      text: `Assunto: ${assunto}\nRemetente: ${de}\n\n${corpoTexto}`,
       origem: "email",
       model: geminiModel,
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
@@ -264,20 +296,20 @@ export async function gmailPreviewController(req: Request, res: Response) {
   const descricao = montarDescricaoEmail({
     razaoSocial: clienteEncontrado?.razao_social,
     cnpj: clienteEncontrado?.cnpj,
-    remetente: msg.from,
-    assunto: msg.subject,
-    dataHora: msg.date,
+    remetente: de,
+    assunto: assunto,
+    dataHora: dataHora,
     atendente: usuario || execNomePerfil || "",
-    idEmail: messageId,
+    idEmail: chave,
     resumo: resumo.resumo,
     pontosPrincipais: resumo.pontos_principais,
     providencias: resumo.providencias_sugeridas,
-    corpo: msg.corpo,
+    corpo: corpoTexto,
   });
 
   console.log(
-    `[gmail:preview] req=${requestId} msg=${messageId} conta=${email} ` +
-      `cliente=${clienteEncontrado?.id || cliente.status} tipo=${
+    `[gmail:preview] req=${requestId} chave=${chave} msgs=${qtdMensagens} ` +
+      `conta=${email} cliente=${clienteEncontrado?.id || cliente.status} tipo=${
         tipo.id || tipo.fonte
       } setor=${setor.id || setor.fonte} executor=${executor.id || executor.fonte}`,
   );
@@ -287,26 +319,28 @@ export async function gmailPreviewController(req: Request, res: Response) {
     data: {
       requestId,
       fonte: "email",
-      messageId,
+      messageId: messageId || "",
+      threadId: threadId || "",
+      qtdMensagens,
       dryRun: isDryRun(),
       iaOk,
       email: {
         conta: email,
-        de: msg.from,
-        assunto: msg.subject,
-        data: msg.date,
-        snippet: msg.snippet,
+        de,
+        assunto,
+        data: dataHora,
+        snippet,
       },
       chamada: {
         tipo: "email",
-        dataHora: msg.date,
-        remetente: msg.from,
-        assunto: msg.subject,
+        dataHora,
+        remetente: de,
+        assunto,
         atendente: usuario || execNomePerfil || "",
-        idEmail: messageId,
+        idEmail: chave,
       },
       ia: resumo,
-      transcricao: msg.corpo,
+      transcricao: corpoTexto,
       cliente,
       refs: { tipo, origem, setor, executor },
       descricao,
@@ -320,11 +354,18 @@ export async function gmailPreviewController(req: Request, res: Response) {
 
 // Remove o marcador do e-mail apos o chamado ser criado (best-effort). A conta
 // foi guardada no preview (gmail:acct:messageId).
-async function removerMarcadorPosCriar(messageId?: string): Promise<void> {
-  if (!messageId) return;
-  const conta = await getContaDoEmail(messageId).catch(() => null);
-  if (conta) {
-    await removerMarcadorDoEmail(conta, messageId).catch(() => undefined);
+async function removerMarcadorPosCriar(
+  chave?: string,
+  threadId?: string,
+): Promise<void> {
+  if (!chave) return;
+  const conta = await getContaDoEmail(chave).catch(() => null);
+  if (!conta) return;
+  if (threadId) {
+    // Remove o marcador de todas as mensagens da conversa de uma vez.
+    await removerMarcadorDaThread(conta, threadId).catch(() => undefined);
+  } else {
+    await removerMarcadorDoEmail(conta, chave).catch(() => undefined);
   }
 }
 
@@ -332,6 +373,9 @@ export async function gmailCriarController(req: Request, res: Response) {
   const requestId = randomUUID();
   const body = ensureBodyObject(req.body);
   const messageId = getOptionalString(body, "messageId");
+  const threadId = getOptionalString(body, "threadId");
+  // Chave de idempotencia/marcador: threadId (conversa) quando houver; senao msgId.
+  const chave = threadId || messageId;
 
   const setoresRaw = body.setores_vinculados;
   const setores = Array.isArray(setoresRaw)
@@ -377,11 +421,11 @@ export async function gmailCriarController(req: Request, res: Response) {
     return;
   }
 
-  // --- PRODUCAO: idempotencia por messageId (nao cria duplicado para o mesmo e-mail) ---
-  if (messageId) {
-    const jaCriado = await getChamadoCriado(messageId, "gmail").catch(() => null);
+  // --- PRODUCAO: idempotencia pela conversa (thread) — nao duplica o chamado ---
+  if (chave) {
+    const jaCriado = await getChamadoCriado(chave, "gmail").catch(() => null);
     if (jaCriado) {
-      await removerMarcadorPosCriar(messageId);
+      await removerMarcadorPosCriar(chave, threadId);
       res.status(200).json({
         ok: true,
         data: {
@@ -390,12 +434,12 @@ export async function gmailCriarController(req: Request, res: Response) {
           jaExistia: true,
           id: jaCriado.id,
           protocolo: jaCriado.protocolo,
-          mensagem: `Chamado ja existente para este e-mail: ${jaCriado.protocolo}`,
+          mensagem: `Chamado ja existente para esta conversa: ${jaCriado.protocolo}`,
         },
       });
       return;
     }
-    const reservou = await reservarCriacao(messageId, "gmail").catch(() => true);
+    const reservou = await reservarCriacao(chave, "gmail").catch(() => true);
     if (!reservou) {
       throw new AppError({
         statusCode: 409,
@@ -410,22 +454,22 @@ export async function gmailCriarController(req: Request, res: Response) {
   try {
     resultado = await criarChamado(chamadoBody as ChamadoBody);
   } catch (error) {
-    if (messageId) await liberarCriacao(messageId, "gmail").catch(() => undefined);
+    if (chave) await liberarCriacao(chave, "gmail").catch(() => undefined);
     throw error;
   }
 
   const protocolo = resultado.protocolo || "";
-  if (messageId) {
+  if (chave) {
     await salvarChamadoCriado(
-      messageId,
+      chave,
       { id: resultado.id || "", protocolo },
       "gmail",
     ).catch(() => undefined);
-    await liberarCriacao(messageId, "gmail").catch(() => undefined);
+    await liberarCriacao(chave, "gmail").catch(() => undefined);
   }
-  await removerMarcadorPosCriar(messageId);
+  await removerMarcadorPosCriar(chave, threadId);
   console.log(
-    `[gmail:criar] req=${requestId} msg=${messageId || "-"} ` +
+    `[gmail:criar] req=${requestId} chave=${chave || "-"} ` +
       `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,
   );
   res.status(201).json({
