@@ -19,6 +19,8 @@ import {
 import {
   adminPageController,
   adminUsoController,
+  adminFeedbackController,
+  feedbackController,
 } from "../controllers/admin.controller";
 import {
   suiteClientesController,
@@ -100,3 +102,7 @@ apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);
 apiRouter.get("/admin/uso", asyncHandler(adminUsoController));
+apiRouter.get("/admin/feedback", asyncHandler(adminFeedbackController));
+
+// Feedback do resumo da IA (enviado pelo app; passa pelo x-app-token normal).
+apiRouter.post("/feedback", asyncHandler(feedbackController));

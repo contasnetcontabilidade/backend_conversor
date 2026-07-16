@@ -17,7 +17,8 @@ function isExempt(path: string): boolean {
     path.startsWith("/gmail/oauth/") || // fluxo OAuth do Gmail no navegador
 
     path === "/admin" || // pagina do painel (login proprio)
-    path === "/admin/uso" // protegida por senha (Authorization Bearer)
+    path === "/admin/uso" || // protegida por senha (Authorization Bearer)
+    path === "/admin/feedback" // idem (senha do admin no navegador)
   );
 }
 

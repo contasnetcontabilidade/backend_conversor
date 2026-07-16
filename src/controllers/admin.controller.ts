@@ -1,6 +1,11 @@
 import { Request, Response } from "express";
 import { custoUsd, getUsdBrl } from "../services/pricing";
 import { getRelatorioUso } from "../services/usage";
+import {
+  registrarFeedback,
+  listarFeedback,
+  type FeedbackEntry,
+} from "../services/feedback";
 
 function senhaAdmin(): string {
   return process.env.ADMIN_PASSWORD || "Contas@2074";
@@ -9,6 +14,57 @@ function senhaAdmin(): string {
 function isAdmin(req: Request): boolean {
   const auth = req.header("authorization") || "";
   return auth === `Bearer ${senhaAdmin()}`;
+}
+
+// POST /api/feedback — registra feedback do resumo da IA (explicito/implicito).
+// Aceita SO campos conhecidos e limitados (nunca transcricao/conteudo do resumo).
+export async function feedbackController(req: Request, res: Response) {
+  const b = (
+    req.body && typeof req.body === "object" ? req.body : {}
+  ) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const bool = (v: unknown) => v === true || v === "true";
+  const ratingRaw = str(b.rating);
+  const dv = (
+    b.divergencias && typeof b.divergencias === "object" ? b.divergencias : {}
+  ) as Record<string, unknown>;
+
+  const entry: FeedbackEntry = {
+    ts: new Date().toISOString(),
+    tipo: b.tipo === "implicito" ? "implicito" : "explicito",
+    origem: str(b.origem).slice(0, 20) || "ligacao",
+    id: str(b.id).slice(0, 120),
+    modelo: str(b.modelo).slice(0, 60) || undefined,
+    ramal: str(b.ramal).slice(0, 40) || undefined,
+    usuario: str(b.usuario).slice(0, 120) || undefined,
+    rating: ratingRaw === "up" || ratingRaw === "down" ? ratingRaw : null,
+    tags: Array.isArray(b.tags)
+      ? b.tags.map((t) => String(t).slice(0, 60)).slice(0, 10)
+      : [],
+    comentario: str(b.comentario).slice(0, 1000) || undefined,
+    divergencias: {
+      clienteMudou: bool(dv.clienteMudou),
+      setorMudou: bool(dv.setorMudou),
+      executorMudou: bool(dv.executorMudou),
+      assuntoSugerido: str(dv.assuntoSugerido).slice(0, 120),
+      assuntoFinal: str(dv.assuntoFinal).slice(0, 120),
+      assuntoMudou: bool(dv.assuntoMudou),
+    },
+    descEditada: bool(b.descEditada),
+    iaOk: b.iaOk === undefined ? undefined : bool(b.iaOk),
+  };
+  await registrarFeedback(entry).catch(() => undefined);
+  res.status(200).json({ ok: true });
+}
+
+// GET /api/admin/feedback — lista os feedbacks (protegido pela senha do admin).
+export async function adminFeedbackController(req: Request, res: Response) {
+  if (!isAdmin(req)) {
+    res.status(401).json({ ok: false, message: "Nao autorizado." });
+    return;
+  }
+  const itens = await listarFeedback(500).catch(() => []);
+  res.status(200).json({ ok: true, itens });
 }
 
 // GET /api/admin/uso — relatorio de tokens + custo (protegido por senha).
@@ -366,6 +422,17 @@ body.win-max .titlebar .ic-restore{display:inline}
       </table>
     </div>
   </div>
+
+  <div class="panel">
+    <h3>Feedback da IA</h3>
+    <div id="fb-stats" class="muted" style="margin-bottom:12px">Carregando…</div>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr><th>Data</th><th>Usuário</th><th>Fonte</th><th>Avaliação</th><th>Divergências / tags</th><th>Comentário</th></tr></thead>
+        <tbody id="tbody-feedback"><tr><td colspan="6" class="muted">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -438,6 +505,47 @@ async function carregar(){
   var agora=new Date();
   document.getElementById("atualizado").textContent="atualizado "+String(agora.getHours()).padStart(2,"0")+":"+String(agora.getMinutes()).padStart(2,"0");
   render();
+  carregarFeedback();
+}
+
+function escFb(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+async function carregarFeedback(){
+  var tb=document.getElementById("tbody-feedback");
+  try{
+    var r=await fetch("/api/admin/feedback",{headers:{Authorization:"Bearer "+senha()}});
+    if(!r.ok){ if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Falha ao carregar feedback.</td></tr>'; return; }
+    var d=await r.json();
+    renderFeedback((d&&d.itens)||[]);
+  }catch(e){ if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Falha de rede.</td></tr>'; }
+}
+function renderFeedback(itens){
+  var st=document.getElementById("fb-stats");
+  var tb=document.getElementById("tbody-feedback");
+  if(!itens.length){ if(st)st.textContent="Sem feedback ainda."; if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Sem feedback ainda.</td></tr>'; return; }
+  var up=0,down=0,editada=0,implic=0,dvC=0,dvA=0,dvS=0,dvE=0,tagCount={};
+  itens.forEach(function(f){
+    if(f.rating==="up")up++; if(f.rating==="down")down++;
+    if(f.descEditada)editada++;
+    if(f.tipo==="implicito"){implic++;var dv=f.divergencias||{};
+      if(dv.clienteMudou)dvC++; if(dv.assuntoMudou)dvA++; if(dv.setorMudou)dvS++; if(dv.executorMudou)dvE++;}
+    (f.tags||[]).forEach(function(t){tagCount[t]=(tagCount[t]||0)+1;});
+  });
+  var pct=function(n,d){return d>0?Math.round(n/d*100)+"%":"—";};
+  var topTags=Object.keys(tagCount).sort(function(a,b){return tagCount[b]-tagCount[a];}).slice(0,4)
+    .map(function(t){return escFb(t)+" ("+tagCount[t]+")";}).join(", ")||"—";
+  if(st){st.innerHTML="<b>"+itens.length+"</b> feedbacks · 👍 <b>"+up+"</b> · 👎 <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
+  if(tb){tb.innerHTML=itens.map(function(f){
+    var data="";try{data=new Date(f.ts).toLocaleString("pt-BR");}catch(e){data=escFb(f.ts);}
+    var aval=f.rating==="up"?"👍":(f.rating==="down"?"👎":(f.tipo==="implicito"?"(implícito)":"—"));
+    var dv=f.divergencias||{};var divs=[];
+    if(dv.assuntoMudou)divs.push("assunto: "+escFb(dv.assuntoSugerido||"?")+" → "+escFb(dv.assuntoFinal||"?"));
+    if(dv.clienteMudou)divs.push("cliente trocado");
+    if(dv.setorMudou)divs.push("setor trocado");
+    if(dv.executorMudou)divs.push("executor trocado");
+    if(f.descEditada)divs.push("descrição editada");
+    (f.tags||[]).forEach(function(t){divs.push(escFb(t));});
+    return "<tr><td>"+escFb(data)+"</td><td>"+escFb(f.usuario||f.ramal||"—")+"</td><td>"+escFb(f.origem||"—")+"</td><td>"+aval+"</td><td>"+(divs.join("; ")||"—")+"</td><td>"+escFb(f.comentario||"")+"</td></tr>";
+  }).join("");}
 }
 
 function render(){
