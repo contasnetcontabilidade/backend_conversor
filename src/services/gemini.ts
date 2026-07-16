@@ -287,7 +287,14 @@ Campos obrigatorios:
 - titulo: string (assunto curto do chamado, ate ~80 caracteres)
 - resumo: string (resumo executivo do atendimento, 2 a 5 frases: o que o cliente pediu/relatou e o desfecho/pendencia)
 - pontos_principais: string[] (os principais topicos/fatos tratados, curtos e objetivos)
-- providencias_sugeridas: string[] (acoes/pendencias a executar; array vazio se nao houver)
+- providencias_sugeridas: string[] (acoes CONCRETAS a executar como proximo passo).
+  Sugira uma acao SEMPRE que o conteudo indicar algo que mereca ser tratado, MESMO que
+  o cliente nao tenha pedido explicitamente (ex.: alerta/notificacao de sistema sobre
+  pendencias ou tarefas vencidas -> "Verificar e tratar as pendencias/tarefas vencidas
+  no sistema mencionado"; aviso de prazo/documento -> "Conferir o prazo e retornar ao
+  cliente"). Seja concreto e curto, baseando-se SOMENTE no que aparece no conteudo (nao
+  invente dados). Deixe o array VAZIO apenas quando realmente nao houver nada a fazer
+  (ex.: um simples agradecimento ou confirmacao, sem qualquer acao pertinente).
 - cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
   cliente SE aparecerem ${fontePalavra} (inclusive na assinatura); capte o nome mesmo que informal.
   Use string vazia "" quando nao houver.
