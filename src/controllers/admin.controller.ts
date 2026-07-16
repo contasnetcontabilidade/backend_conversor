@@ -328,6 +328,12 @@ body.win-max .titlebar .ic-restore{display:inline}
   <h1>Custos de Inteligência Artificial</h1>
   <div class="sub" id="status">Consumo de tokens do Gemini (transcrição + resumo) e custo estimado.</div>
 
+  <div class="seg" id="nav-view" style="margin:0 0 16px">
+    <button data-v="custos" class="on">📊 Custos</button>
+    <button data-v="feedback">💬 Feedback da IA</button>
+  </div>
+
+  <div id="view-custos">
   <div class="period">
     <div class="seg" id="seg-periodo">
       <button data-p="7d">7 dias</button>
@@ -423,6 +429,9 @@ body.win-max .titlebar .ic-restore{display:inline}
     </div>
   </div>
 
+  </div><!-- /view-custos -->
+
+  <div id="view-feedback" class="hidden">
   <div class="panel">
     <h3>Feedback da IA</h3>
     <div id="fb-stats" class="muted" style="margin-bottom:12px">Carregando…</div>
@@ -433,6 +442,7 @@ body.win-max .titlebar .ic-restore{display:inline}
       </table>
     </div>
   </div>
+  </div><!-- /view-feedback -->
 </div>
 
 <script>
@@ -440,6 +450,9 @@ var THEME_KEY="painel-tema";
 function setTheme(t){document.documentElement.setAttribute("data-theme",t);document.getElementById("tema").textContent=t==="dark"?"☀️":"🌙";try{localStorage.setItem(THEME_KEY,t)}catch(e){}}
 setTheme((function(){try{return localStorage.getItem(THEME_KEY)||"dark"}catch(e){return "dark"}})());
 document.getElementById("tema").onclick=function(){setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");if(DADOS)render()};
+
+// Abas: Custos x Feedback da IA
+(function(){var nav=document.getElementById("nav-view");if(!nav)return;var btns=nav.querySelectorAll("button");for(var i=0;i<btns.length;i++){btns[i].onclick=function(){var v=this.getAttribute("data-v");for(var j=0;j<btns.length;j++)btns[j].classList.toggle("on",btns[j]===this);document.getElementById("view-custos").classList.toggle("hidden",v!=="custos");document.getElementById("view-feedback").classList.toggle("hidden",v!=="feedback");if(v==="feedback")carregarFeedback();};}})();
 
 var fmtBRL=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:2});
 var fmtBRL4=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:4});
