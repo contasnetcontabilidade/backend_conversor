@@ -434,6 +434,10 @@ body.win-max .titlebar .ic-restore{display:inline}
   <div id="view-feedback" class="hidden">
   <div class="panel">
     <h3>Feedback da IA</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="mini-btn" id="fb-csv" title="Baixar em CSV (abre no Excel)">⬇ Exportar CSV</button>
+      <button class="mini-btn" id="fb-json" title="Baixar em JSON (dados brutos)">⬇ Exportar JSON</button>
+    </div>
     <div id="fb-stats" class="muted" style="margin-bottom:12px">Carregando…</div>
     <div style="overflow:auto">
       <table>
@@ -522,15 +526,58 @@ async function carregar(){
 }
 
 function escFb(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+var FEEDBACK=[]; // ultimo lote carregado (usado na exportacao)
 async function carregarFeedback(){
   var tb=document.getElementById("tbody-feedback");
   try{
     var r=await fetch("/api/admin/feedback",{headers:{Authorization:"Bearer "+senha()}});
     if(!r.ok){ if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Falha ao carregar feedback.</td></tr>'; return; }
     var d=await r.json();
-    renderFeedback((d&&d.itens)||[]);
+    FEEDBACK=(d&&d.itens)||[];
+    renderFeedback(FEEDBACK);
   }catch(e){ if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Falha de rede.</td></tr>'; }
 }
+
+// ---- Exportacao (CSV para Excel / JSON bruto) ----
+// Usa o lote ja carregado no navegador; nao envia nada pro servidor.
+function csvCampo(v){var s=String(v==null?"":v);return /[";\\n\\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}
+function baixarArquivo(conteudo,tipo,nome){
+  var blob=new Blob([conteudo],{type:tipo});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url;a.download=nome;document.body.appendChild(a);a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url);},1000);
+}
+function exportarFeedback(fmt){
+  if(!FEEDBACK.length){alert("Sem feedback para exportar.");return;}
+  var hoje=new Date().toISOString().slice(0,10);
+  if(fmt==="json"){
+    baixarArquivo(JSON.stringify(FEEDBACK,null,2),"application/json;charset=utf-8","feedback-ia-"+hoje+".json");
+    return;
+  }
+  // CSV com ";" e BOM: e o que o Excel pt-BR abre certinho (acentos inclusive).
+  var cols=["Data","Tipo","Origem","Usuario","Ramal","Modelo","Avaliacao","Tags","Comentario",
+    "DescricaoEditada","IA_OK","ClienteMudou","AssuntoMudou","AssuntoSugerido","AssuntoFinal",
+    "SetorMudou","ExecutorMudou","Id"];
+  var linhas=[cols.join(";")];
+  FEEDBACK.forEach(function(f){
+    var dv=f.divergencias||{};
+    var data="";try{data=new Date(f.ts).toLocaleString("pt-BR");}catch(e){data=f.ts||"";}
+    linhas.push([data,f.tipo||"",f.origem||"",f.usuario||"",f.ramal||"",f.modelo||"",
+      f.rating||"",(f.tags||[]).join(", "),f.comentario||"",
+      f.descEditada?"sim":"nao",f.iaOk===false?"nao":"sim",
+      dv.clienteMudou?"sim":"nao",dv.assuntoMudou?"sim":"nao",
+      dv.assuntoSugerido||"",dv.assuntoFinal||"",
+      dv.setorMudou?"sim":"nao",dv.executorMudou?"sim":"nao",f.id||""
+    ].map(csvCampo).join(";"));
+  });
+  baixarArquivo("\\ufeff"+linhas.join("\\r\\n"),"text/csv;charset=utf-8","feedback-ia-"+hoje+".csv");
+}
+(function(){
+  var c=document.getElementById("fb-csv"); if(c)c.onclick=function(){exportarFeedback("csv");};
+  var j=document.getElementById("fb-json"); if(j)j.onclick=function(){exportarFeedback("json");};
+})();
 function renderFeedback(itens){
   var st=document.getElementById("fb-stats");
   var tb=document.getElementById("tbody-feedback");
