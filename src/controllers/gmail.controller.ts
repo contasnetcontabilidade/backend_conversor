@@ -238,6 +238,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
       ramal,
       usuario,
       fonte: "email",
+      qtdMensagens,
     }));
   } catch (error) {
     iaOk = false;

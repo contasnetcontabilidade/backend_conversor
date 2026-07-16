@@ -45,6 +45,9 @@ export type ResumoInput = {
   origem?: "ligacao" | "email";
   // Fonte para o painel de custos separar ligacao x e-mail.
   fonte?: "ligacao" | "email" | "resumo";
+  // Quantidade de mensagens quando o conteudo e uma conversa (thread de e-mail).
+  // >1 ativa a instrucao para NAO perder nenhuma solicitacao de nenhuma mensagem.
+  qtdMensagens?: number;
 };
 
 function getGeminiClient() {
@@ -275,12 +278,24 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
     };
   }
 
-  const contexto =
-    origem === "email"
+  const qtdMsgs = Number(input.qtdMensagens) || 1;
+  const ehConversa = origem === "email" && qtdMsgs > 1;
+  const contexto = ehConversa
+    ? `Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de uma CONVERSA por e-mail (thread) com ${qtdMsgs} mensagens, recebida de um cliente. As mensagens vem em ordem cronologica, separadas por linhas como "--- Mensagem 1/${qtdMsgs} — de Fulano ---".`
+    : origem === "email"
       ? "Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de um E-MAIL recebido de um cliente."
       : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
   const fontePalavra = origem === "email" ? "no e-mail" : "na ligacao";
-  const prompt = `${contexto}
+  // Instrucao extra para conversas: cobrir TODAS as mensagens, sem perder pedidos.
+  const blocoConversa = ehConversa
+    ? `\nIMPORTANTE (conversa com varias mensagens): leia TODAS as ${qtdMsgs} mensagens e
+NAO perca nenhuma solicitacao, pergunta, prazo ou pendencia de NENHUMA delas — inclua cada
+uma nos pontos_principais e/ou providencias_sugeridas. Trechos citados/repetidos de mensagens
+anteriores (respostas que copiam o e-mail original) contam UMA vez so: nao duplique. Se pontos
+mudaram ao longo da conversa (ex.: pedido corrigido ou ja resolvido depois), reflita o estado
+MAIS ATUAL no resumo, mas registre as pendencias que continuam em aberto.\n`
+    : "";
+  const prompt = `${contexto}${blocoConversa}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
 Campos obrigatorios:
