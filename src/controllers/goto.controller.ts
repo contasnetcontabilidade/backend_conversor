@@ -324,11 +324,15 @@ async function routeCallEnded(
 
     if (!report) {
       // Fallback (relatorio nunca ficou pronto): usa o evento (cobre saida externa).
+      // Numero do cliente = o discado (dialString = event.to).
       if (eventEnvolveExterno(body)) {
         const ramais = extractExtensions(body);
-        await Promise.all(
-          ramais.map((r) => publicarRamal(r, { ...event, tipo: "externo" })),
-        );
+        const ev: CallEndedEvent = {
+          ...event,
+          tipo: "externo",
+          ...(event.to ? { contatoNumero: event.to } : {}),
+        };
+        await Promise.all(ramais.map((r) => publicarRamal(r, ev)));
       }
       return;
     }
@@ -346,10 +350,23 @@ async function routeCallEnded(
     );
 
     if (analise.tipo === "externo") {
+      // Numero do CLIENTE:
+      //  - SAIDA (OUTBOUND): e o numero DISCADO (dialString = event.to). O relatorio
+      //    as vezes traz o proprio numero do escritorio no participante externo.
+      //  - ENTRADA (INBOUND): segue o numero do relatorio (caller = quem ligou).
+      const dir = String(
+        event.direction || (report as Record<string, unknown>).direction || "",
+      ).toUpperCase();
+      const numeroCliente =
+        dir.includes("OUT") && event.to ? event.to : analise.numeroExterno;
+      console.log(
+        `[goto:externo] conv=${conversationSpaceId} dir=${event.direction || "-"} ` +
+          `dialString=${event.to || "-"} numExtReport=${analise.numeroExterno || "-"} => ${numeroCliente || "-"}`,
+      );
       const ev: CallEndedEvent = {
         ...event,
         tipo: "externo",
-        contatoNumero: analise.numeroExterno,
+        contatoNumero: numeroCliente,
       };
       await Promise.all(analise.answerers.map((a) => publicarRamal(a.ramal, ev)));
       return;
