@@ -6,6 +6,7 @@ import {
   listarFeedback,
   type FeedbackEntry,
 } from "../services/feedback";
+import { PROMPT_VERSION } from "../services/gemini";
 
 function senhaAdmin(): string {
   return process.env.ADMIN_PASSWORD || "Contas@2074";
@@ -34,6 +35,7 @@ export async function feedbackController(req: Request, res: Response) {
     tipo: b.tipo === "implicito" ? "implicito" : "explicito",
     origem: str(b.origem).slice(0, 20) || "ligacao",
     id: str(b.id).slice(0, 120),
+    promptVersion: PROMPT_VERSION, // carimbo do prompt vigente (autoritativo)
     modelo: str(b.modelo).slice(0, 60) || undefined,
     ramal: str(b.ramal).slice(0, 40) || undefined,
     usuario: str(b.usuario).slice(0, 120) || undefined,
@@ -448,15 +450,16 @@ body.win-max .titlebar .ic-restore{display:inline}
   <div id="view-feedback" class="hidden">
   <div class="panel">
     <h3>Feedback da IA</h3>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
       <button class="mini-btn" id="fb-csv" title="Baixar em CSV (abre no Excel)">⬇ Exportar CSV</button>
       <button class="mini-btn" id="fb-json" title="Baixar em JSON (dados brutos)">⬇ Exportar JSON</button>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);cursor:pointer" title="Mostra e exporta só o feedback do prompt em uso (ignora o dos prompts antigos)"><input type="checkbox" id="fb-so-atual" checked> Só do prompt atual</label>
     </div>
     <div id="fb-stats" class="muted" style="margin-bottom:12px">Carregando…</div>
     <div style="overflow:auto">
       <table>
-        <thead><tr><th>Data</th><th>Usuário</th><th>Fonte</th><th>Avaliação</th><th>Divergências / tags</th><th>Comentário</th></tr></thead>
-        <tbody id="tbody-feedback"><tr><td colspan="6" class="muted">Carregando…</td></tr></tbody>
+        <thead><tr><th>Data</th><th>Usuário</th><th>Fonte</th><th>Prompt</th><th>Avaliação</th><th>Divergências / tags</th><th>Comentário</th></tr></thead>
+        <tbody id="tbody-feedback"><tr><td colspan="7" class="muted">Carregando…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -572,15 +575,23 @@ function checarNovidadesPainel(){
 
 function escFb(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 var FEEDBACK=[]; // ultimo lote carregado (usado na exportacao)
+// Versao do prompt em uso (carimbada em cada feedback). Injetada pelo servidor.
+var PROMPT_VERSION_ATUAL=${JSON.stringify(PROMPT_VERSION)};
+// Lista visivel/exportada: respeita o filtro "Só do prompt atual".
+function feedbackVisiveis(){
+  var cb=document.getElementById("fb-so-atual");
+  if(cb&&cb.checked){return FEEDBACK.filter(function(f){return (f.promptVersion||"")===PROMPT_VERSION_ATUAL;});}
+  return FEEDBACK;
+}
 async function carregarFeedback(){
   var tb=document.getElementById("tbody-feedback");
   try{
     var r=await fetch("/api/admin/feedback",{headers:{Authorization:"Bearer "+senha()}});
-    if(!r.ok){ if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Falha ao carregar feedback.</td></tr>'; return; }
+    if(!r.ok){ if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Falha ao carregar feedback.</td></tr>'; return; }
     var d=await r.json();
     FEEDBACK=(d&&d.itens)||[];
-    renderFeedback(FEEDBACK);
-  }catch(e){ if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Falha de rede.</td></tr>'; }
+    renderFeedback(feedbackVisiveis());
+  }catch(e){ if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Falha de rede.</td></tr>'; }
 }
 
 // ---- Exportacao (CSV para Excel / JSON bruto) ----
@@ -595,21 +606,22 @@ function baixarArquivo(conteudo,tipo,nome){
   setTimeout(function(){URL.revokeObjectURL(url);},1000);
 }
 function exportarFeedback(fmt){
-  if(!FEEDBACK.length){alert("Sem feedback para exportar.");return;}
+  var itens=feedbackVisiveis();
+  if(!itens.length){alert("Sem feedback para exportar.");return;}
   var hoje=new Date().toISOString().slice(0,10);
   if(fmt==="json"){
-    baixarArquivo("\\ufeff"+JSON.stringify(FEEDBACK,null,2),"application/json;charset=utf-8","feedback-ia-"+hoje+".json");
+    baixarArquivo("\\ufeff"+JSON.stringify(itens,null,2),"application/json;charset=utf-8","feedback-ia-"+hoje+".json");
     return;
   }
   // CSV com ";" e BOM: e o que o Excel pt-BR abre certinho (acentos inclusive).
-  var cols=["Data","Tipo","Origem","Usuario","Ramal","Modelo","Avaliacao","Tags","Comentario",
+  var cols=["Data","PromptVersao","Tipo","Origem","Usuario","Ramal","Modelo","Avaliacao","Tags","Comentario",
     "DescricaoEditada","IA_OK","ClienteMudou","AssuntoMudou","AssuntoSugerido","AssuntoFinal",
     "SetorMudou","ExecutorMudou","Id"];
   var linhas=[cols.join(";")];
-  FEEDBACK.forEach(function(f){
+  itens.forEach(function(f){
     var dv=f.divergencias||{};
     var data="";try{data=new Date(f.ts).toLocaleString("pt-BR");}catch(e){data=f.ts||"";}
-    linhas.push([data,f.tipo||"",f.origem||"",f.usuario||"",f.ramal||"",f.modelo||"",
+    linhas.push([data,f.promptVersion||"",f.tipo||"",f.origem||"",f.usuario||"",f.ramal||"",f.modelo||"",
       f.rating||"",(f.tags||[]).join(", "),f.comentario||"",
       f.descEditada?"sim":"nao",f.iaOk===false?"nao":"sim",
       dv.clienteMudou?"sim":"nao",dv.assuntoMudou?"sim":"nao",
@@ -622,11 +634,15 @@ function exportarFeedback(fmt){
 (function(){
   var c=document.getElementById("fb-csv"); if(c)c.onclick=function(){exportarFeedback("csv");};
   var j=document.getElementById("fb-json"); if(j)j.onclick=function(){exportarFeedback("json");};
+  var cb=document.getElementById("fb-so-atual"); if(cb)cb.onchange=function(){renderFeedback(feedbackVisiveis());};
 })();
 function renderFeedback(itens){
   var st=document.getElementById("fb-stats");
   var tb=document.getElementById("tbody-feedback");
-  if(!itens.length){ if(st)st.textContent="Sem feedback ainda."; if(tb)tb.innerHTML='<tr><td colspan="6" class="muted">Sem feedback ainda.</td></tr>'; return; }
+  // Resumo por versao de prompt (sempre sobre TODO o lote, ignora o filtro).
+  var doAtual=FEEDBACK.filter(function(f){return (f.promptVersion||"")===PROMPT_VERSION_ATUAL;}).length;
+  var verInfo="Prompt atual: <b>"+escFb(PROMPT_VERSION_ATUAL)+"</b> · <b>"+doAtual+"</b> de "+FEEDBACK.length+" feedbacks são deste prompt";
+  if(!itens.length){ if(st)st.innerHTML=verInfo+" · sem itens para exibir."; if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Sem feedback para o filtro atual.</td></tr>'; return; }
   var up=0,down=0,editada=0,implic=0,dvC=0,dvA=0,dvS=0,dvE=0,tagCount={};
   itens.forEach(function(f){
     if(f.rating==="up")up++; if(f.rating==="down")down++;
@@ -638,10 +654,12 @@ function renderFeedback(itens){
   var pct=function(n,d){return d>0?Math.round(n/d*100)+"%":"—";};
   var topTags=Object.keys(tagCount).sort(function(a,b){return tagCount[b]-tagCount[a];}).slice(0,4)
     .map(function(t){return escFb(t)+" ("+tagCount[t]+")";}).join(", ")||"—";
-  if(st){st.innerHTML="<b>"+itens.length+"</b> feedbacks · 👍 <b>"+up+"</b> · 👎 <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
+  if(st){st.innerHTML=verInfo+"<br><b>"+itens.length+"</b> exibidos · 👍 <b>"+up+"</b> · 👎 <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
   if(tb){tb.innerHTML=itens.map(function(f){
     var data="";try{data=new Date(f.ts).toLocaleString("pt-BR");}catch(e){data=escFb(f.ts);}
     var aval=f.rating==="up"?"👍":(f.rating==="down"?"👎":(f.tipo==="implicito"?"(implícito)":"—"));
+    var pv=f.promptVersion||"—";
+    var pvCell=(f.promptVersion&&f.promptVersion!==PROMPT_VERSION_ATUAL)?'<span title="prompt antigo" style="color:var(--muted)">'+escFb(pv)+'</span>':escFb(pv);
     var dv=f.divergencias||{};var divs=[];
     if(dv.assuntoMudou)divs.push("assunto: "+escFb(dv.assuntoSugerido||"?")+" → "+escFb(dv.assuntoFinal||"?"));
     if(dv.clienteMudou)divs.push("cliente trocado");
@@ -649,7 +667,7 @@ function renderFeedback(itens){
     if(dv.executorMudou)divs.push("executor trocado");
     if(f.descEditada)divs.push("descrição editada");
     (f.tags||[]).forEach(function(t){divs.push(escFb(t));});
-    return "<tr><td>"+escFb(data)+"</td><td>"+escFb(f.usuario||f.ramal||"—")+"</td><td>"+escFb(f.origem||"—")+"</td><td>"+aval+"</td><td>"+(divs.join("; ")||"—")+"</td><td>"+escFb(f.comentario||"")+"</td></tr>";
+    return "<tr><td>"+escFb(data)+"</td><td>"+escFb(f.usuario||f.ramal||"—")+"</td><td>"+escFb(f.origem||"—")+"</td><td>"+pvCell+"</td><td>"+aval+"</td><td>"+(divs.join("; ")||"—")+"</td><td>"+escFb(f.comentario||"")+"</td></tr>";
   }).join("");}
 }
 

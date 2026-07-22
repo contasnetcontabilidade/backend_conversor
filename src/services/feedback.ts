@@ -24,6 +24,7 @@ export interface FeedbackEntry {
   tipo: "explicito" | "implicito";
   origem: string; // "ligacao" | "email" | "resumo"
   id: string; // conversationSpaceId / messageId / "" (gravador)
+  promptVersion?: string; // versao do prompt vigente quando o feedback foi dado
   modelo?: string;
   ramal?: string;
   usuario?: string;

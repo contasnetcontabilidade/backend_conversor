@@ -12,6 +12,14 @@ const DEFAULT_AUDIO_FILE = process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV"
 // (thinkingBudget 0). Sobrescrivel por GEMINI_MODEL no ambiente.
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 
+// ============================================================================
+// VERSAO DO PROMPT — *** AO ALTERAR O PROMPT DO RESUMO, ATUALIZE ESTA DATA ***
+// Cada feedback e carimbado com este valor. Assim, ao analisar/refinar o prompt,
+// olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
+// provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
+// ============================================================================
+export const PROMPT_VERSION = "2026-07-21";
+
 let geminiClient: GoogleGenAI | null = null;
 
 export type ResumoJson = {
