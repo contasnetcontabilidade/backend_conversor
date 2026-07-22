@@ -345,8 +345,10 @@ body.win-max .titlebar .ic-restore{display:inline}
     <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
     <div class="spacer"></div>
     <label>Câmbio R$</label> <input type="number" step="0.01" min="0" class="cambio" id="cambio" title="Câmbio USD→BRL (editável)" />
-    <button class="mini-btn" id="csv-completo" title="Relatório completo (todo o histórico, todas as seções)">⬇ Relatório completo</button>
-    <button class="mini-btn" id="csv-periodo" title="Relatório do período selecionado (todas as seções)">⬇ Relatório do período</button>
+    <button class="mini-btn" id="csv-completo" title="CSV completo (todo o histórico, todas as seções)">⬇ CSV completo</button>
+    <button class="mini-btn" id="csv-periodo" title="CSV do período selecionado">⬇ CSV período</button>
+    <button class="mini-btn" id="xls-completo" title="Excel com abas (todo o histórico)">⬇ Excel completo</button>
+    <button class="mini-btn" id="xls-periodo" title="Excel com abas (período selecionado)">⬇ Excel período</button>
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="auto" /> auto 5min</label>
   </div>
 
@@ -727,11 +729,14 @@ function renderTabelaDia(dias,c){
 var charts={};
 function chart(id,cfg){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),cfg)}
 
-// ---- Relatorios CSV (multi-secao, BOM + ; + decimal em virgula p/ Excel pt-BR) ----
-function baixar(nome,texto){var b=new Blob([texto],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download=nome;a.click();setTimeout(function(){URL.revokeObjectURL(u)},1500);}
+// ---- Relatorios de custo (multi-secao): CSV (Excel pt-BR) e Excel XML (abas) ----
+function baixar(nome,texto,tipo){var b=new Blob([texto],{type:tipo||"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download=nome;a.click();setTimeout(function(){URL.revokeObjectURL(u)},1500);}
 function numBR(n,dec){return Number(n||0).toFixed(dec).replace(".",",");}
-// Monta o relatorio completo (todas as secoes) para o intervalo [de,ate].
-function relatorioCsv(de,ate,titulo,incluir3dias){
+function escXml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function Sc(s){return {s:s==null?"":String(s)};}          // celula texto
+function Nc(n,d){return {n:Number(n||0),d:d};}            // celula numero (d casas)
+// Modelo comum das secoes; CSV e Excel consomem daqui (sem duplicar logica).
+function montarSecoes(de,ate,incluir3dias,incluirMes){
   var c=cot();
   var rowsP=noPeriodo(DADOS.porDiaModelo,de,ate);
   var t=totais(rowsP);
@@ -739,66 +744,112 @@ function relatorioCsv(de,ate,titulo,incluir3dias){
   var ramais=ramalAgg(noPeriodo(DADOS.porRamal,de,ate));
   var fonteRows=noPeriodo(DADOS.porFonte,de,ate);
   var custoLigBrl=(t.transcUsd+t.resumoUsd)*c;
-  var L=[];var add=function(){L.push(Array.prototype.slice.call(arguments).map(csvCampo).join(";"));};
+  var secoes=[];
 
-  add("RELATORIO DE CUSTOS DE IA - "+titulo);
-  var ger="";try{ger=new Date().toLocaleString("pt-BR");}catch(e){ger="";}
-  add("Gerado em",ger);add("Periodo",de+" a "+ate);add("Cambio (USD->BRL)",numBR(c,4));add("");
-
-  add("== RESUMO GERAL ==");add("Metrica","Valor");
-  add("Custo total (BRL)",numBR(t.custoUsd*c,2));
-  add("Custo total (USD)",numBR(t.custoUsd,4));
-  add("Tokens entrada",t.inputTokens);
-  add("Tokens saida",t.outputTokens);
-  add("Tokens total",t.inputTokens+t.outputTokens);
-  add("Chamadas IA",t.calls);
-  add("Ligacoes/itens (resumos)",t.ligacoes);
-  add("Custo transcricao (BRL)",numBR(t.transcUsd*c,2));
-  add("Custo resumo (BRL)",numBR(t.resumoUsd*c,2));
-  add("Custo medio por ligacao (BRL)",numBR(t.ligacoes?custoLigBrl/t.ligacoes:0,4));
-  add("");
+  secoes.push({nome:"Resumo geral",linhas:[
+    [Sc("Metrica"),Sc("Valor")],
+    [Sc("Custo total (BRL)"),Nc(t.custoUsd*c,2)],
+    [Sc("Custo total (USD)"),Nc(t.custoUsd,4)],
+    [Sc("Tokens entrada"),Nc(t.inputTokens,0)],
+    [Sc("Tokens saida"),Nc(t.outputTokens,0)],
+    [Sc("Tokens total"),Nc(t.inputTokens+t.outputTokens,0)],
+    [Sc("Chamadas IA"),Nc(t.calls,0)],
+    [Sc("Ligacoes/itens (resumos)"),Nc(t.ligacoes,0)],
+    [Sc("Custo transcricao (BRL)"),Nc(t.transcUsd*c,2)],
+    [Sc("Custo resumo (BRL)"),Nc(t.resumoUsd*c,2)],
+    [Sc("Custo medio por ligacao (BRL)"),Nc(t.ligacoes?custoLigBrl/t.ligacoes:0,4)]
+  ]});
 
   if(incluir3dias){
-    add("== ULTIMOS 3 DIAS ==");add("dia","tokens","chamadas","ligacoes","custo_brl");
+    var l3=[[Sc("dia"),Sc("tokens"),Sc("chamadas"),Sc("ligacoes"),Sc("custo_brl")]];
     var d0=hojeUTC();var alvo=[d0,addDias(d0,-1),addDias(d0,-2)];
     var mapaDia={};dias.forEach(function(x){mapaDia[x.dia]=x;});
     var tot3=0;
-    alvo.forEach(function(d){var x=mapaDia[d]||{inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0};tot3+=x.custoUsd*c;add(d,x.inputTokens+x.outputTokens,x.calls,x.ligacoes,numBR(x.custoUsd*c,2));});
-    add("Total 3 dias","","","",numBR(tot3,2));add("");
+    alvo.forEach(function(d){var x=mapaDia[d]||{inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0};tot3+=x.custoUsd*c;l3.push([Sc(d),Nc(x.inputTokens+x.outputTokens,0),Nc(x.calls,0),Nc(x.ligacoes,0),Nc(x.custoUsd*c,2)]);});
+    l3.push([Sc("Total 3 dias"),Sc(""),Sc(""),Sc(""),Nc(tot3,2)]);
+    secoes.push({nome:"Ultimos 3 dias",linhas:l3});
   }
 
-  add("== POR DIA ==");add("dia","tokens_entrada","tokens_saida","chamadas","ligacoes","custo_usd","custo_brl");
-  dias.forEach(function(x){add(x.dia,x.inputTokens,x.outputTokens,x.calls,x.ligacoes,numBR(x.custoUsd,6),numBR(x.custoUsd*c,4));});
-  add("");
+  var ld=[[Sc("dia"),Sc("tokens_entrada"),Sc("tokens_saida"),Sc("chamadas"),Sc("ligacoes"),Sc("custo_usd"),Sc("custo_brl")]];
+  dias.forEach(function(x){ld.push([Sc(x.dia),Nc(x.inputTokens,0),Nc(x.outputTokens,0),Nc(x.calls,0),Nc(x.ligacoes,0),Nc(x.custoUsd,6),Nc(x.custoUsd*c,4)]);});
+  secoes.push({nome:"Por dia",linhas:ld});
 
-  add("== POR RAMAL / USUARIO ==");add("ramal","usuario","ligacoes","chamadas","custo_usd","custo_brl","pct_do_total");
+  var lr=[[Sc("ramal"),Sc("usuario"),Sc("ligacoes"),Sc("chamadas"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct_do_total")]];
   var somaR=ramais.reduce(function(a,x){return a+x.custoUsd},0);
-  ramais.forEach(function(x){var p=t.custoUsd>0?Math.round(x.custoUsd/t.custoUsd*100):0;add(x.ramal||"—",x.usuario||"—",x.ligacoes,x.calls,numBR(x.custoUsd,6),numBR(x.custoUsd*c,4),p+"%");});
+  ramais.forEach(function(x){var p=t.custoUsd>0?Math.round(x.custoUsd/t.custoUsd*100):0;lr.push([Sc(x.ramal||"—"),Sc(x.usuario||"—"),Nc(x.ligacoes,0),Nc(x.calls,0),Nc(x.custoUsd,6),Nc(x.custoUsd*c,4),Sc(p+"%")]);});
   var naoAtrib=t.custoUsd-somaR;
-  if(naoAtrib>0.0000001){var p2=t.custoUsd>0?Math.round(naoAtrib/t.custoUsd*100):0;add("—","nao atribuido","","",numBR(naoAtrib,6),numBR(naoAtrib*c,4),p2+"%");}
-  add("");
+  if(naoAtrib>0.0000001){var p2=t.custoUsd>0?Math.round(naoAtrib/t.custoUsd*100):0;lr.push([Sc("—"),Sc("nao atribuido"),Sc(""),Sc(""),Nc(naoAtrib,6),Nc(naoAtrib*c,4),Sc(p2+"%")]);}
+  secoes.push({nome:"Por ramal",linhas:lr});
 
-  add("== POR FONTE (LIGACAO x EMAIL x RESUMO) ==");add("fonte","itens","custo_usd","custo_brl","pct");
+  var lf=[[Sc("fonte"),Sc("itens"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct")]];
   var fAgg={};fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={usd:0,itens:0});a.usd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
   var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Resumo (gravacao)","resumo"]];
   var totF=0;fLista.forEach(function(f){totF+=(fAgg[f[1]]&&fAgg[f[1]].usd)||0;});
-  fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;add(f[0],a.itens,numBR(a.usd,6),numBR(a.usd*c,4),p+"%");});
-  add("");
+  fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;lf.push([Sc(f[0]),Nc(a.itens,0),Nc(a.usd,6),Nc(a.usd*c,4),Sc(p+"%")]);});
+  secoes.push({nome:"Por fonte",linhas:lf});
 
-  add("== POR MODELO + OPERACAO ==");add("modelo","operacao","tokens_entrada","tokens_saida","chamadas","custo_usd","custo_brl");
+  var lm=[[Sc("modelo"),Sc("operacao"),Sc("tokens_entrada"),Sc("tokens_saida"),Sc("chamadas"),Sc("custo_usd"),Sc("custo_brl")]];
   var moAgg={};rowsP.forEach(function(r){var k=r.model+"||"+r.op;var a=moAgg[k]||(moAgg[k]={model:r.model,op:r.op,i:0,o:0,calls:0,usd:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;a.usd+=r.custoUsd;});
-  Object.keys(moAgg).forEach(function(k){var a=moAgg[k];add(a.model,a.op,a.i,a.o,a.calls,numBR(a.usd,6),numBR(a.usd*c,4));});
-  add("");
+  Object.keys(moAgg).forEach(function(k){var a=moAgg[k];lm.push([Sc(a.model),Sc(a.op),Nc(a.i,0),Nc(a.o,0),Nc(a.calls,0),Nc(a.usd,6),Nc(a.usd*c,4)]);});
+  secoes.push({nome:"Por modelo e operacao",linhas:lm});
 
-  add("== TRANSCRICAO vs RESUMO ==");add("operacao","custo_usd","custo_brl","pct");
+  var lt=[[Sc("operacao"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct")]];
   var totTR=t.transcUsd+t.resumoUsd;
-  add("Transcricao",numBR(t.transcUsd,6),numBR(t.transcUsd*c,4),(totTR>0?Math.round(t.transcUsd/totTR*100):0)+"%");
-  add("Resumo",numBR(t.resumoUsd,6),numBR(t.resumoUsd*c,4),(totTR>0?Math.round(t.resumoUsd/totTR*100):0)+"%");
+  lt.push([Sc("Transcricao"),Nc(t.transcUsd,6),Nc(t.transcUsd*c,4),Sc((totTR>0?Math.round(t.transcUsd/totTR*100):0)+"%")]);
+  lt.push([Sc("Resumo"),Nc(t.resumoUsd,6),Nc(t.resumoUsd*c,4),Sc((totTR>0?Math.round(t.resumoUsd/totTR*100):0)+"%")]);
+  secoes.push({nome:"Transcricao x Resumo",linhas:lt});
 
+  if(incluirMes){
+    var mesAgg={};rowsP.forEach(function(r){var mes=r.dia.slice(0,7);var a=mesAgg[mes]||(mesAgg[mes]={i:0,o:0,calls:0,ligacoes:0,usd:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;if(r.op==="resumo")a.ligacoes+=r.calls;a.usd+=r.custoUsd;});
+    var meses=Object.keys(mesAgg).sort();
+    var lms=[[Sc("mes"),Sc("tokens"),Sc("chamadas"),Sc("ligacoes"),Sc("custo_brl"),Sc("variacao_vs_anterior")]];
+    var prev=null;
+    meses.forEach(function(m){var a=mesAgg[m];var brl=a.usd*c;var vv="—";if(prev!==null&&prev>0){var dd=(brl-prev)/prev*100;vv=(dd>=0?"+":"")+Math.round(dd)+"%";}lms.push([Sc(m),Nc(a.i+a.o,0),Nc(a.calls,0),Nc(a.ligacoes,0),Nc(brl,2),Sc(vv)]);prev=brl;});
+    secoes.push({nome:"Por mes",linhas:lms});
+  }
+
+  return secoes;
+}
+function celCsv(x){return x.n!==undefined?numBR(x.n,x.d):x.s;}
+function secoesParaCsv(secoes,de,ate,titulo){
+  var L=[];var add=function(){L.push(Array.prototype.slice.call(arguments).map(csvCampo).join(";"));};
+  var ger="";try{ger=new Date().toLocaleString("pt-BR");}catch(e){ger="";}
+  add("RELATORIO DE CUSTOS DE IA - "+titulo);
+  add("Gerado em",ger);add("Periodo",de+" a "+ate);add("Cambio (USD->BRL)",numBR(cot(),4));add("");
+  secoes.forEach(function(sec){
+    add("== "+sec.nome.toUpperCase()+" ==");
+    sec.linhas.forEach(function(row){L.push(row.map(function(x){return csvCampo(celCsv(x));}).join(";"));});
+    add("");
+  });
   return "\\ufeff"+L.join("\\r\\n");
 }
-function csvCompleto(){if(!DADOS){alert("Sem dados.");return;}baixar("relatorio_custos_completo_"+hojeUTC()+".csv",relatorioCsv(minDia(),hojeUTC(),"COMPLETO (todo o historico)",true));}
-function csvPeriodo(){if(!DADOS){alert("Sem dados.");return;}var iv=intervalo();baixar("relatorio_custos_"+iv.de+"_a_"+iv.ate+".csv",relatorioCsv(iv.de,iv.ate,"PERIODO "+iv.de+" a "+iv.ate,false));}
+function secoesParaXml(secoes,de,ate,titulo){
+  var ger="";try{ger=new Date().toLocaleString("pt-BR");}catch(e){ger="";}
+  var info={nome:"Info",linhas:[
+    [Sc("Relatorio"),Sc(titulo)],
+    [Sc("Gerado em"),Sc(ger)],
+    [Sc("Periodo"),Sc(de+" a "+ate)],
+    [Sc("Cambio (USD->BRL)"),Nc(cot(),4)]
+  ]};
+  var todas=[info].concat(secoes);
+  var x=['<?xml version="1.0" encoding="UTF-8"?>','<?mso-application progid="Excel.Sheet"?>','<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'];
+  todas.forEach(function(sec){
+    x.push('<Worksheet ss:Name="'+escXml(sec.nome).slice(0,31)+'"><Table>');
+    sec.linhas.forEach(function(row){
+      x.push('<Row>'+row.map(function(c){
+        if(c.n!==undefined)return '<Cell><Data ss:Type="Number">'+Number(c.n).toFixed(c.d)+'</Data></Cell>';
+        return '<Cell><Data ss:Type="String">'+escXml(c.s)+'</Data></Cell>';
+      }).join("")+'</Row>');
+    });
+    x.push('</Table></Worksheet>');
+  });
+  x.push('</Workbook>');
+  return x.join("\\n");
+}
+function csvCompleto(){if(!DADOS){alert("Sem dados.");return;}var de=minDia(),ate=hojeUTC();baixar("relatorio_custos_completo_"+ate+".csv",secoesParaCsv(montarSecoes(de,ate,true,true),de,ate,"COMPLETO (todo o historico)"));}
+function csvPeriodo(){if(!DADOS){alert("Sem dados.");return;}var iv=intervalo();baixar("relatorio_custos_"+iv.de+"_a_"+iv.ate+".csv",secoesParaCsv(montarSecoes(iv.de,iv.ate,false,false),iv.de,iv.ate,"PERIODO "+iv.de+" a "+iv.ate));}
+function xlsCompleto(){if(!DADOS){alert("Sem dados.");return;}var de=minDia(),ate=hojeUTC();baixar("relatorio_custos_completo_"+ate+".xls",secoesParaXml(montarSecoes(de,ate,true,true),de,ate,"COMPLETO (todo o historico)"),"application/vnd.ms-excel;charset=utf-8");}
+function xlsPeriodo(){if(!DADOS){alert("Sem dados.");return;}var iv=intervalo();baixar("relatorio_custos_"+iv.de+"_a_"+iv.ate+".xls",secoesParaXml(montarSecoes(iv.de,iv.ate,false,false),iv.de,iv.ate,"PERIODO "+iv.de+" a "+iv.ate),"application/vnd.ms-excel;charset=utf-8");}
 
 // ---- controles ----
 function selPeriodo(p){PERIODO.preset=p;
@@ -811,6 +862,8 @@ document.getElementById("dt-ate").onchange=function(){PERIODO.ate=this.value||nu
 document.getElementById("cambio").oninput=function(){var v=parseFloat(this.value);CAMBIO=isFinite(v)&&v>0?v:null;render()};
 document.getElementById("csv-completo").onclick=csvCompleto;
 document.getElementById("csv-periodo").onclick=csvPeriodo;
+document.getElementById("xls-completo").onclick=xlsCompleto;
+document.getElementById("xls-periodo").onclick=xlsPeriodo;
 document.getElementById("auto").onchange=function(){if(this.checked){timerAuto=setInterval(carregar,300000)}else{clearInterval(timerAuto);timerAuto=null}};
 (function(){var ths=document.querySelectorAll("#tbody-dia");
   var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}if(DADOS)render();};})();
