@@ -202,6 +202,13 @@ export async function suitePreviewController(req: Request, res: Response) {
   // Ramal de QUEM CLICOU em "abrir chamado" (mandado pelo desktop). O chamado
   // (setor/executor/custo) e atribuido a essa pessoa.
   const ramalClicou = getOptionalString(body, "ramal");
+  // Setor/executor do PERFIL (conta ativa no desktop). Quando vem, tem PRIORIDADE
+  // sobre o env e sobre o match por nome do GoTo — assim o chamado usa o executor
+  // que a pessoa configurou no perfil (mesmo comportamento do fluxo de e-mail).
+  const setorIdPerfil = getOptionalString(body, "setorId");
+  const setorNomePerfil = getOptionalString(body, "setorNome");
+  const execIdPerfil = getOptionalString(body, "executorId");
+  const execNomePerfil = getOptionalString(body, "executorNome");
 
   // Ja existe chamado para esta ligacao? -> em tratamento (nao roda a IA de novo).
   const jaCriadoPrev = await getChamadoCriado(conversationSpaceId).catch(
@@ -420,15 +427,29 @@ export async function suitePreviewController(req: Request, res: Response) {
     );
   }
 
-  const [origem, setor, executor] = await Promise.all([
+  // Setor/executor: PERFIL (o que a pessoa configurou) > env > match por nome do
+  // GoTo. So faz o lookup por nome quando nao veio nem perfil nem env.
+  const precisaSetorLookup = !setorIdPerfil && !setorEnv;
+  const precisaExecLookup = !execIdPerfil && !execEnv;
+  const [origem, setorLk, execLk] = await Promise.all([
     resolverOrigem(),
-    setorEnv
-      ? Promise.resolve({ id: setorEnv, fonte: "env" as const })
-      : resolverSetorPorNomeUsuario(nomeUsuario),
-    execEnv
-      ? Promise.resolve({ id: execEnv, fonte: "env" as const })
-      : resolverExecutorPorNome(nomeUsuario),
+    precisaSetorLookup
+      ? resolverSetorPorNomeUsuario(nomeUsuario)
+      : Promise.resolve(null),
+    precisaExecLookup
+      ? resolverExecutorPorNome(nomeUsuario)
+      : Promise.resolve(null),
   ]);
+  const setor: RefResolvida = setorIdPerfil
+    ? { id: setorIdPerfil, nome: setorNomePerfil || undefined, fonte: "perfil" }
+    : setorEnv
+      ? { id: setorEnv, fonte: "env" }
+      : (setorLk as RefResolvida);
+  const executor: RefResolvida = execIdPerfil
+    ? { id: execIdPerfil, nome: execNomePerfil || undefined, fonte: "perfil" }
+    : execEnv
+      ? { id: execEnv, fonte: "env" }
+      : (execLk as RefResolvida);
 
   const clienteEncontrado =
     cliente.status === "encontrado" ? cliente.cliente : undefined;
