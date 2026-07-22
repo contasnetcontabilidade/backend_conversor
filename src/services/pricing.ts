@@ -1,4 +1,17 @@
+import { Redis } from "@upstash/redis";
 import { getErrorMessage } from "../lib/errors";
+
+// Redis (Upstash/KV) para cachear a cotacao ENTRE execucoes serverless (o cache
+// em memoria nao sobrevive a instancias frias na Vercel).
+let redisFx: Redis | null = null;
+function getRedisFx(): Redis | null {
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token =
+    process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+  if (!url || !token) return null;
+  if (!redisFx) redisFx = new Redis({ url, token });
+  return redisFx;
+}
 
 // Precos do Gemini em USD por 1 milhao de tokens (input/output).
 // ATENCAO: valores de referencia — CONFIRMAR os precos atuais em
@@ -36,32 +49,86 @@ export function custoUsd(
   return (inputTokens / 1e6) * p.input + (outputTokens / 1e6) * p.output;
 }
 
-// --- Cambio USD -> BRL (cache em memoria de 6h; fallback via env/constante) ---
+// --- Cambio USD -> BRL: automatico, com varias fontes + cache (Redis + memoria).
+// Fontes tentadas na ordem; a 1a que responder vale. AwesomeAPI (BR) as vezes e
+// bloqueada em datacenter (Vercel), por isso ha fallback(s) que funcionam de nuvem.
+const FX_KEY = "fx:usdbrl";
+const FX_TTL_SEG = 6 * 60 * 60; // 6h
+const FONTES_FX: { nome: string; url: string; extrair: (d: unknown) => number }[] =
+  [
+    {
+      nome: "awesomeapi",
+      url: "https://economia.awesomeapi.com.br/json/last/USD-BRL",
+      extrair: (d) =>
+        Number((d as { USDBRL?: { bid?: string } })?.USDBRL?.bid),
+    },
+    {
+      nome: "open.er-api",
+      url: "https://open.er-api.com/v6/latest/USD",
+      extrair: (d) => Number((d as { rates?: { BRL?: number } })?.rates?.BRL),
+    },
+  ];
+
 let cotacaoCache: { valor: number; expiraEm: number } | null = null;
+
+async function lerCotacaoRedis(): Promise<number | null> {
+  const r = getRedisFx();
+  if (!r) return null;
+  try {
+    const v = await r.get<string | number>(FX_KEY);
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+async function salvarCotacaoRedis(valor: number): Promise<void> {
+  const r = getRedisFx();
+  if (!r) return;
+  try {
+    await r.set(FX_KEY, String(valor), { ex: FX_TTL_SEG });
+  } catch {
+    /* best-effort */
+  }
+}
 
 export async function getUsdBrl(): Promise<number> {
   const fallback = Number(process.env.GEMINI_USD_BRL) || 5.4;
 
+  // 1) cache em memoria (instancia quente)
   if (cotacaoCache && Date.now() < cotacaoCache.expiraEm) {
     return cotacaoCache.valor;
   }
-
-  try {
-    const res = await fetch(
-      "https://economia.awesomeapi.com.br/json/last/USD-BRL",
-      { signal: AbortSignal.timeout(4000) },
-    );
-    if (res.ok) {
-      const data = (await res.json()) as Record<string, { bid?: string }>;
-      const bid = Number(data?.USDBRL?.bid);
-      if (Number.isFinite(bid) && bid > 0) {
-        cotacaoCache = { valor: bid, expiraEm: Date.now() + 6 * 60 * 60 * 1000 };
-        return bid;
+  // 2) cache no Redis (sobrevive a instancias frias)
+  const doRedis = await lerCotacaoRedis();
+  if (doRedis) {
+    cotacaoCache = { valor: doRedis, expiraEm: Date.now() + 30 * 60 * 1000 };
+    return doRedis;
+  }
+  // 3) busca nas fontes, na ordem
+  for (const f of FONTES_FX) {
+    try {
+      const res = await fetch(f.url, { signal: AbortSignal.timeout(6000) });
+      if (!res.ok) {
+        console.warn(`[pricing] ${f.nome} HTTP ${res.status}`);
+        continue;
       }
+      const valor = f.extrair(await res.json());
+      if (Number.isFinite(valor) && valor > 0) {
+        cotacaoCache = {
+          valor,
+          expiraEm: Date.now() + FX_TTL_SEG * 1000,
+        };
+        await salvarCotacaoRedis(valor);
+        console.log(`[pricing] cotacao USD-BRL=${valor} via ${f.nome}`);
+        return valor;
+      }
+      console.warn(`[pricing] ${f.nome} sem valor valido`);
+    } catch (error) {
+      console.warn(`[pricing] falha ${f.nome}: ${getErrorMessage(error)}`);
     }
-  } catch (error) {
-    console.warn("[pricing] cotacao indisponivel:", getErrorMessage(error));
   }
 
+  console.warn(`[pricing] todas as fontes falharam -> fallback ${fallback}`);
   return fallback;
 }
