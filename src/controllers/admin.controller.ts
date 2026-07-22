@@ -234,6 +234,17 @@ h1{font-size:22px;margin-bottom:4px}.sub{color:var(--muted);font-size:13px;margi
 .period .cambio{width:84px;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:7px 9px;font-size:12.5px}
 .mini-btn{background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:8px 12px;cursor:pointer;font-size:12.5px}
 .mini-btn:hover{border-color:var(--accent)}
+.nov-ov{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(6,16,30,.6);padding:20px}
+.nov-ov.hidden{display:none}
+.nov-card{width:100%;max-width:460px;background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.5);overflow:hidden}
+.nov-h{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:700;color:var(--text)}
+.nov-h button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}
+.nov-l{padding:6px 16px;max-height:60vh;overflow:auto}
+.nov-it{display:flex;gap:11px;padding:11px 0;border-bottom:1px solid var(--border)}
+.nov-it:last-child{border-bottom:none}
+.nov-it .em{font-size:18px;flex:0 0 auto;line-height:1.4}
+.nov-it .tx{font-size:13px;color:var(--text);line-height:1.5}
+.nov-f{padding:12px 16px;border-top:1px solid var(--border);text-align:right}
 .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:22px}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
 .card{background:linear-gradient(180deg,var(--card-2),var(--card));border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
@@ -349,6 +360,7 @@ body.win-max .titlebar .ic-restore{display:inline}
     <button class="mini-btn" id="csv-periodo" title="CSV do período selecionado">⬇ CSV período</button>
     <button class="mini-btn" id="xls-completo" title="Excel com abas (todo o histórico)">⬇ Excel completo</button>
     <button class="mini-btn" id="xls-periodo" title="Excel com abas (período selecionado)">⬇ Excel período</button>
+    <button class="mini-btn" id="painel-nov" title="Novidades do painel de custos">✨ Novidades</button>
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="auto" /> auto 5min</label>
   </div>
 
@@ -449,6 +461,15 @@ body.win-max .titlebar .ic-restore{display:inline}
     </div>
   </div>
   </div><!-- /view-feedback -->
+
+  <!-- Novidades do painel de custos (changelog proprio; aparece ao acessar) -->
+  <div id="nov-overlay" class="nov-ov hidden">
+    <div class="nov-card">
+      <div class="nov-h"><b>✨ Novidades do painel</b><button id="nov-x" title="Fechar">✕</button></div>
+      <div id="nov-list" class="nov-l"></div>
+      <div class="nov-f"><button class="mini-btn" id="nov-ok">Entendi</button></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -525,6 +546,28 @@ async function carregar(){
   document.getElementById("atualizado").textContent="atualizado "+String(agora.getHours()).padStart(2,"0")+":"+String(agora.getMinutes()).padStart(2,"0");
   render();
   carregarFeedback();
+  checarNovidadesPainel();
+}
+
+// ---- Novidades do painel de custos (changelog proprio, so deste painel) ----
+// Bump PAINEL_NOV_VER quando adicionar novidades -> reaparece 1x ao acessar.
+var PAINEL_NOV_VER="2026-07";
+var PAINEL_NOV=[
+  {ic:"📄",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
+  {ic:"📊",tx:"Exportação em <b>Excel com abas</b> (uma aba por seção), com números de verdade — dá pra somar e ordenar."},
+  {ic:"📆",tx:"Seção <b>Por mês</b>: comparativo mês a mês com variação % em relação ao mês anterior."},
+  {ic:"💬",tx:"Aba <b>Feedback da IA</b> com exportação em <b>CSV/JSON</b> e estatísticas (👍/👎, divergências, tags)."},
+  {ic:"🔤",tx:"Correção de <b>acentos</b> nos arquivos exportados (abrem certinho no Excel, sem “Ã§”)."}
+];
+function renderNovidadesPainel(){
+  var l=document.getElementById("nov-list");
+  if(l)l.innerHTML=PAINEL_NOV.map(function(n){return '<div class="nov-it"><span class="em">'+n.ic+'</span><span class="tx">'+n.tx+'</span></div>';}).join("");
+}
+function abrirNovidadesPainel(){renderNovidadesPainel();var o=document.getElementById("nov-overlay");if(o)o.classList.remove("hidden");}
+function fecharNovidadesPainel(){var o=document.getElementById("nov-overlay");if(o)o.classList.add("hidden");}
+function checarNovidadesPainel(){
+  var seen="";try{seen=localStorage.getItem("painel-novidades-visto")||"";}catch(e){}
+  if(seen!==PAINEL_NOV_VER){abrirNovidadesPainel();try{localStorage.setItem("painel-novidades-visto",PAINEL_NOV_VER);}catch(e){}}
 }
 
 function escFb(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
@@ -864,6 +907,10 @@ document.getElementById("csv-completo").onclick=csvCompleto;
 document.getElementById("csv-periodo").onclick=csvPeriodo;
 document.getElementById("xls-completo").onclick=xlsCompleto;
 document.getElementById("xls-periodo").onclick=xlsPeriodo;
+document.getElementById("painel-nov").onclick=abrirNovidadesPainel;
+document.getElementById("nov-x").onclick=fecharNovidadesPainel;
+document.getElementById("nov-ok").onclick=fecharNovidadesPainel;
+document.getElementById("nov-overlay").addEventListener("click",function(e){if(e.target===this)fecharNovidadesPainel();});
 document.getElementById("auto").onchange=function(){if(this.checked){timerAuto=setInterval(carregar,300000)}else{clearInterval(timerAuto);timerAuto=null}};
 (function(){var ths=document.querySelectorAll("#tbody-dia");
   var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}if(DADOS)render();};})();
