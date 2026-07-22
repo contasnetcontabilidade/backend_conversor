@@ -310,9 +310,12 @@ Campos obrigatorios:
   cliente"). Seja concreto e curto, baseando-se SOMENTE no que aparece no conteudo (nao
   invente dados). Deixe o array VAZIO apenas quando realmente nao houver nada a fazer
   (ex.: um simples agradecimento ou confirmacao, sem qualquer acao pertinente).
-- cliente_mencionado: objeto { nome: string, cnpj: string } com o nome/razao social e o CNPJ do
-  cliente SE aparecerem ${fontePalavra} (inclusive na assinatura); capte o nome mesmo que informal.
-  Use string vazia "" quando nao houver.
+- cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique a EMPRESA cliente usando,
+  nesta ordem de prioridade: (1) o CNPJ, se aparecer; (2) a ASSINATURA ${fontePalavra}; (3) quando houver
+  e-mail do remetente, o DOMINIO dele (ex.: "joao@transportesluz.com.br" -> "Transportes Luz"), IGNORANDO
+  dominios genericos (gmail, hotmail, outlook, yahoo, live, bol, uol, terra, icloud). Prefira a razao
+  social/nome mais completo e oficial; capte o nome mesmo que informal. NAO invente: se nao der para
+  identificar com seguranca, use "" nos dois campos.
 - assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
   "Folha de pagamento", "Abertura de empresa"; "" se incerto).
 - assunto_escolhido: objeto { id: string, nome: string }. Com base no conteudo, escolha na

@@ -345,8 +345,8 @@ body.win-max .titlebar .ic-restore{display:inline}
     <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
     <div class="spacer"></div>
     <label>Câmbio R$</label> <input type="number" step="0.01" min="0" class="cambio" id="cambio" title="Câmbio USD→BRL (editável)" />
-    <button class="mini-btn" id="csv-dia" title="Exportar CSV por dia">⬇ CSV dia</button>
-    <button class="mini-btn" id="csv-ramal" title="Exportar CSV por ramal">⬇ CSV ramal</button>
+    <button class="mini-btn" id="csv-completo" title="Relatório completo (todo o histórico, todas as seções)">⬇ Relatório completo</button>
+    <button class="mini-btn" id="csv-periodo" title="Relatório do período selecionado (todas as seções)">⬇ Relatório do período</button>
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="auto" /> auto 5min</label>
   </div>
 
@@ -553,7 +553,7 @@ function exportarFeedback(fmt){
   if(!FEEDBACK.length){alert("Sem feedback para exportar.");return;}
   var hoje=new Date().toISOString().slice(0,10);
   if(fmt==="json"){
-    baixarArquivo(JSON.stringify(FEEDBACK,null,2),"application/json;charset=utf-8","feedback-ia-"+hoje+".json");
+    baixarArquivo("\\ufeff"+JSON.stringify(FEEDBACK,null,2),"application/json;charset=utf-8","feedback-ia-"+hoje+".json");
     return;
   }
   // CSV com ";" e BOM: e o que o Excel pt-BR abre certinho (acentos inclusive).
@@ -727,16 +727,78 @@ function renderTabelaDia(dias,c){
 var charts={};
 function chart(id,cfg){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),cfg)}
 
-// ---- CSV (#11) ----
+// ---- Relatorios CSV (multi-secao, BOM + ; + decimal em virgula p/ Excel pt-BR) ----
 function baixar(nome,texto){var b=new Blob([texto],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download=nome;a.click();setTimeout(function(){URL.revokeObjectURL(u)},1500);}
-function csvDia(){if(!DADOS)return;var iv=intervalo(),c=cot();var dias=porDiaAgg(noPeriodo(DADOS.porDiaModelo,iv.de,iv.ate));
-  var linhas=[["dia","tokens_entrada","tokens_saida","chamadas","ligacoes","custo_usd","custo_brl"]];
-  dias.forEach(function(x){linhas.push([x.dia,x.inputTokens,x.outputTokens,x.calls,x.ligacoes,x.custoUsd.toFixed(6),(x.custoUsd*c).toFixed(4)])});
-  baixar("custos_por_dia_"+iv.de+"_a_"+iv.ate+".csv",linhas.map(function(l){return l.join(";")}).join("\\n"));}
-function csvRamal(){if(!DADOS)return;var iv=intervalo(),c=cot();var rs=ramalAgg(noPeriodo(DADOS.porRamal,iv.de,iv.ate));
-  var linhas=[["ramal","usuario","ligacoes","chamadas","custo_usd","custo_brl"]];
-  rs.forEach(function(x){linhas.push([x.ramal,x.usuario,x.ligacoes,x.calls,x.custoUsd.toFixed(6),(x.custoUsd*c).toFixed(4)])});
-  baixar("custos_por_ramal_"+iv.de+"_a_"+iv.ate+".csv",linhas.map(function(l){return l.join(";")}).join("\\n"));}
+function numBR(n,dec){return Number(n||0).toFixed(dec).replace(".",",");}
+// Monta o relatorio completo (todas as secoes) para o intervalo [de,ate].
+function relatorioCsv(de,ate,titulo,incluir3dias){
+  var c=cot();
+  var rowsP=noPeriodo(DADOS.porDiaModelo,de,ate);
+  var t=totais(rowsP);
+  var dias=porDiaAgg(rowsP);
+  var ramais=ramalAgg(noPeriodo(DADOS.porRamal,de,ate));
+  var fonteRows=noPeriodo(DADOS.porFonte,de,ate);
+  var custoLigBrl=(t.transcUsd+t.resumoUsd)*c;
+  var L=[];var add=function(){L.push(Array.prototype.slice.call(arguments).map(csvCampo).join(";"));};
+
+  add("RELATORIO DE CUSTOS DE IA - "+titulo);
+  var ger="";try{ger=new Date().toLocaleString("pt-BR");}catch(e){ger="";}
+  add("Gerado em",ger);add("Periodo",de+" a "+ate);add("Cambio (USD->BRL)",numBR(c,4));add("");
+
+  add("== RESUMO GERAL ==");add("Metrica","Valor");
+  add("Custo total (BRL)",numBR(t.custoUsd*c,2));
+  add("Custo total (USD)",numBR(t.custoUsd,4));
+  add("Tokens entrada",t.inputTokens);
+  add("Tokens saida",t.outputTokens);
+  add("Tokens total",t.inputTokens+t.outputTokens);
+  add("Chamadas IA",t.calls);
+  add("Ligacoes/itens (resumos)",t.ligacoes);
+  add("Custo transcricao (BRL)",numBR(t.transcUsd*c,2));
+  add("Custo resumo (BRL)",numBR(t.resumoUsd*c,2));
+  add("Custo medio por ligacao (BRL)",numBR(t.ligacoes?custoLigBrl/t.ligacoes:0,4));
+  add("");
+
+  if(incluir3dias){
+    add("== ULTIMOS 3 DIAS ==");add("dia","tokens","chamadas","ligacoes","custo_brl");
+    var d0=hojeUTC();var alvo=[d0,addDias(d0,-1),addDias(d0,-2)];
+    var mapaDia={};dias.forEach(function(x){mapaDia[x.dia]=x;});
+    var tot3=0;
+    alvo.forEach(function(d){var x=mapaDia[d]||{inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0};tot3+=x.custoUsd*c;add(d,x.inputTokens+x.outputTokens,x.calls,x.ligacoes,numBR(x.custoUsd*c,2));});
+    add("Total 3 dias","","","",numBR(tot3,2));add("");
+  }
+
+  add("== POR DIA ==");add("dia","tokens_entrada","tokens_saida","chamadas","ligacoes","custo_usd","custo_brl");
+  dias.forEach(function(x){add(x.dia,x.inputTokens,x.outputTokens,x.calls,x.ligacoes,numBR(x.custoUsd,6),numBR(x.custoUsd*c,4));});
+  add("");
+
+  add("== POR RAMAL / USUARIO ==");add("ramal","usuario","ligacoes","chamadas","custo_usd","custo_brl","pct_do_total");
+  var somaR=ramais.reduce(function(a,x){return a+x.custoUsd},0);
+  ramais.forEach(function(x){var p=t.custoUsd>0?Math.round(x.custoUsd/t.custoUsd*100):0;add(x.ramal||"—",x.usuario||"—",x.ligacoes,x.calls,numBR(x.custoUsd,6),numBR(x.custoUsd*c,4),p+"%");});
+  var naoAtrib=t.custoUsd-somaR;
+  if(naoAtrib>0.0000001){var p2=t.custoUsd>0?Math.round(naoAtrib/t.custoUsd*100):0;add("—","nao atribuido","","",numBR(naoAtrib,6),numBR(naoAtrib*c,4),p2+"%");}
+  add("");
+
+  add("== POR FONTE (LIGACAO x EMAIL x RESUMO) ==");add("fonte","itens","custo_usd","custo_brl","pct");
+  var fAgg={};fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={usd:0,itens:0});a.usd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
+  var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Resumo (gravacao)","resumo"]];
+  var totF=0;fLista.forEach(function(f){totF+=(fAgg[f[1]]&&fAgg[f[1]].usd)||0;});
+  fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;add(f[0],a.itens,numBR(a.usd,6),numBR(a.usd*c,4),p+"%");});
+  add("");
+
+  add("== POR MODELO + OPERACAO ==");add("modelo","operacao","tokens_entrada","tokens_saida","chamadas","custo_usd","custo_brl");
+  var moAgg={};rowsP.forEach(function(r){var k=r.model+"||"+r.op;var a=moAgg[k]||(moAgg[k]={model:r.model,op:r.op,i:0,o:0,calls:0,usd:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;a.usd+=r.custoUsd;});
+  Object.keys(moAgg).forEach(function(k){var a=moAgg[k];add(a.model,a.op,a.i,a.o,a.calls,numBR(a.usd,6),numBR(a.usd*c,4));});
+  add("");
+
+  add("== TRANSCRICAO vs RESUMO ==");add("operacao","custo_usd","custo_brl","pct");
+  var totTR=t.transcUsd+t.resumoUsd;
+  add("Transcricao",numBR(t.transcUsd,6),numBR(t.transcUsd*c,4),(totTR>0?Math.round(t.transcUsd/totTR*100):0)+"%");
+  add("Resumo",numBR(t.resumoUsd,6),numBR(t.resumoUsd*c,4),(totTR>0?Math.round(t.resumoUsd/totTR*100):0)+"%");
+
+  return "\\ufeff"+L.join("\\r\\n");
+}
+function csvCompleto(){if(!DADOS){alert("Sem dados.");return;}baixar("relatorio_custos_completo_"+hojeUTC()+".csv",relatorioCsv(minDia(),hojeUTC(),"COMPLETO (todo o historico)",true));}
+function csvPeriodo(){if(!DADOS){alert("Sem dados.");return;}var iv=intervalo();baixar("relatorio_custos_"+iv.de+"_a_"+iv.ate+".csv",relatorioCsv(iv.de,iv.ate,"PERIODO "+iv.de+" a "+iv.ate,false));}
 
 // ---- controles ----
 function selPeriodo(p){PERIODO.preset=p;
@@ -747,8 +809,8 @@ function selPeriodo(p){PERIODO.preset=p;
 document.getElementById("dt-de").onchange=function(){PERIODO.de=this.value||null;render()};
 document.getElementById("dt-ate").onchange=function(){PERIODO.ate=this.value||null;render()};
 document.getElementById("cambio").oninput=function(){var v=parseFloat(this.value);CAMBIO=isFinite(v)&&v>0?v:null;render()};
-document.getElementById("csv-dia").onclick=csvDia;
-document.getElementById("csv-ramal").onclick=csvRamal;
+document.getElementById("csv-completo").onclick=csvCompleto;
+document.getElementById("csv-periodo").onclick=csvPeriodo;
 document.getElementById("auto").onchange=function(){if(this.checked){timerAuto=setInterval(carregar,300000)}else{clearInterval(timerAuto);timerAuto=null}};
 (function(){var ths=document.querySelectorAll("#tbody-dia");
   var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}if(DADOS)render();};})();
