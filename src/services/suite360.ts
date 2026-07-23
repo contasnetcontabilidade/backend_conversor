@@ -91,7 +91,9 @@ async function suiteRequest(
   headers.set("Authorization", `Bearer ${key}`);
   headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
+    // charset explicito: sem ele, o Suite pode ler o corpo UTF-8 como Latin-1 e
+    // quebrar os acentos (ex.: "AntÃ´nio" em vez de "Antonio") na descricao.
+    headers.set("Content-Type", "application/json; charset=utf-8");
   }
 
   let res: Response;
