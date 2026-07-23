@@ -43,43 +43,26 @@ function inferMime(filePath: string): string {
   }
 }
 
-interface FastPhrase {
-  text?: string;
-  speaker?: number;
-}
 interface FastResponse {
   durationMilliseconds?: number;
   combinedPhrases?: { text?: string }[];
-  phrases?: FastPhrase[];
+  phrases?: { text?: string }[];
 }
 
-// Monta o texto final. Se houver diarizacao (speaker por frase), prefixa
-// "Falante N:" ao mudar de interlocutor; senao usa o texto combinado.
+// Monta o texto final a partir do texto combinado; se faltar, junta as frases.
 function montarTranscript(data: FastResponse): string {
-  const phrases = Array.isArray(data.phrases) ? data.phrases : [];
-  const temSpeaker = phrases.some((p) => p && p.speaker != null);
-  if (phrases.length && temSpeaker) {
-    let out = "";
-    let ultimo: number | null = null;
-    for (const p of phrases) {
-      const txt = String(p?.text || "").trim();
-      if (!txt) continue;
-      const sp = p?.speaker ?? null;
-      if (sp != null && sp !== ultimo) {
-        out += (out ? "\n" : "") + `Falante ${sp}: `;
-        ultimo = sp;
-      } else if (out) {
-        out += " ";
-      }
-      out += txt;
-    }
-    if (out.trim()) return out.trim();
-  }
   const cp = Array.isArray(data.combinedPhrases) ? data.combinedPhrases : [];
-  return cp
+  const combinado = cp
     .map((c) => String(c?.text || "").trim())
     .filter(Boolean)
     .join("\n")
+    .trim();
+  if (combinado) return combinado;
+  const ph = Array.isArray(data.phrases) ? data.phrases : [];
+  return ph
+    .map((p) => String(p?.text || "").trim())
+    .filter(Boolean)
+    .join(" ")
     .trim();
 }
 
@@ -98,15 +81,11 @@ export async function transcreverAudioAzure(
 
   const apiVersion = (process.env.AZURE_SPEECH_API_VERSION || "2024-11-15").trim();
   const locale = (process.env.AZURE_SPEECH_LOCALE || "pt-BR").trim();
-  const diarizar = /^(1|true|sim|on)$/i.test(
-    (process.env.AZURE_SPEECH_DIARIZATION || "").trim(),
-  );
 
   const definition: Record<string, unknown> = {
     locales: [locale],
     profanityFilterMode: "None",
   };
-  if (diarizar) definition.diarization = { maxSpeakers: 2, enabled: true };
 
   const buf = await fs.promises.readFile(audioPath);
   const form = new FormData();
