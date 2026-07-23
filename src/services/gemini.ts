@@ -18,7 +18,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-07-21";
+export const PROMPT_VERSION = "2026-07-23";
 
 let geminiClient: GoogleGenAI | null = null;
 
@@ -330,6 +330,10 @@ Campos obrigatorios:
   "LISTA DE ASSUNTOS DISPONIVEIS" abaixo (quando houver) o item que MELHOR representa o motivo do
   atendimento, e copie o id e o nome EXATAMENTE como aparecem na lista. Escolha o mais especifico que
   se aplique. Se realmente nada se encaixar (ou se nao houver lista), use id e nome vazios.
+O escritorio que registra o chamado se chama "Contas Contabilidade". Se na transcricao o nome do PROPRIO
+escritorio vier com grafia claramente errada por falha de transcricao (ex.: "Contos Contabilidade",
+"Pontas Contabilidade", "Contas Contabil"), use a forma correta "Contas Contabilidade" no resumo. Isso vale
+SO para o nome do proprio escritorio — NUNCA corrija nem invente nomes de clientes.
 Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
 
   // Lista de assuntos do Suite para a IA escolher UM (quando fornecida pelo controller).
