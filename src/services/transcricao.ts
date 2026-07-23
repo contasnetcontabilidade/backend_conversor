@@ -8,6 +8,7 @@ import { AppError, getErrorMessage } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
 import { recordUsage } from "./usage";
 import { thinkingConfigFor } from "./geminiThinking";
+import { transcreverAudioAzure, azureConfigurado } from "./azureSpeech";
 
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
@@ -41,7 +42,7 @@ const MODELS_LIST = [
 ] as const;
 
 type WhisperModel = (typeof MODELS_LIST)[number];
-type TranscriptionProvider = "whisper" | "gemini";
+type TranscriptionProvider = "whisper" | "gemini" | "azure";
 
 export type TranscricaoInput = {
   audioPath?: string;
@@ -104,7 +105,25 @@ function getGeminiClient() {
   return geminiClient;
 }
 
-function resolveTranscriptionProvider(): TranscriptionProvider {
+// Allowlist de ramais liberados para o Azure (piloto). Default: "258".
+function ramalLiberadoAzure(ramal?: string): boolean {
+  const lista = (process.env.AZURE_TRANSCRICAO_RAMAIS ?? "258")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const r = String(ramal || "").trim();
+  return !!r && lista.includes(r);
+}
+
+function resolveTranscriptionProvider(
+  identidade: IdentidadeUso = {},
+): TranscriptionProvider {
+  // Azure so entra quando esta configurado (key+regiao) E o ramal esta liberado.
+  // Enquanto a key nao existir, ninguem cai no Azure (fica tudo no padrao).
+  if (azureConfigurado() && ramalLiberadoAzure(identidade.ramal)) {
+    return "azure";
+  }
+
   const fromEnv = (process.env.TRANSCRICAO_PROVIDER ?? "").trim().toLowerCase();
   if (fromEnv === "whisper" || fromEnv === "gemini") {
     return fromEnv;
@@ -651,14 +670,48 @@ export async function transcreverAudio(
     });
   }
 
-  const provider = resolveTranscriptionProvider();
+  const identidade: IdentidadeUso = {
+    ramal: input.ramal,
+    usuario: input.usuario,
+    nomesConhecidos: input.nomesConhecidos,
+    fonte: input.fonte,
+  };
+  const provider = resolveTranscriptionProvider(identidade);
+
+  if (provider === "azure") {
+    try {
+      const { transcript } = await transcreverAudioAzure(audioPath);
+      if (!transcript.trim()) {
+        // Azure processou mas nao detectou fala -> mesmo tratamento do Gemini.
+        throw new AppError({
+          statusCode: 422,
+          code: "AUDIO_SEM_FALA",
+          message: "Nenhuma fala foi detectada no audio.",
+        });
+      }
+      const srtPath = writeSrtWithFallback(
+        `${audioPath}.srt`,
+        buildFallbackSrt(transcript),
+      );
+      console.log(`[transcricao] via Azure Speech (ramal=${input.ramal || "-"}).`);
+      return { audioPath, srtPath, transcript };
+    } catch (error) {
+      // "Sem fala" e legitimo -> propaga. Qualquer outra falha do Azure ->
+      // cai no Gemini para nao quebrar o fluxo.
+      if (error instanceof AppError && error.code === "AUDIO_SEM_FALA") {
+        throw error;
+      }
+      console.warn(
+        `[transcricao] Azure falhou, usando Gemini como fallback: ${getErrorMessage(
+          error,
+        )}`,
+      );
+      return transcreverComGemini(audioPath, identidade);
+    }
+  }
+
   if (provider === "gemini") {
-    return transcreverComGemini(audioPath, {
-      ramal: input.ramal,
-      usuario: input.usuario,
-      nomesConhecidos: input.nomesConhecidos,
-      fonte: input.fonte,
-    });
+    return transcreverComGemini(audioPath, identidade);
   }
 
   const modelName = resolveModelName(input.modelName);
