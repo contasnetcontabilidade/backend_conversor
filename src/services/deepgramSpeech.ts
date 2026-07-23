@@ -1,6 +1,13 @@
 import fs from "fs";
 import path from "path";
 import { AppError, getErrorMessage } from "../lib/errors";
+import { recordUsage } from "./usage";
+
+type IdentidadeUso = {
+  ramal?: string;
+  usuario?: string;
+  fonte?: "ligacao" | "email" | "resumo";
+};
 
 // Deepgram Speech-to-Text (Nova-3) — arquivo gravado, REST sincrono.
 // POST do audio bruto -> transcript no JSON. Ativa so quando DEEPGRAM_API_KEY
@@ -35,6 +42,7 @@ export function deepgramConfigurado(): boolean {
 }
 
 interface DeepgramResponse {
+  metadata?: { duration?: number }; // duracao do audio em segundos (p/ o custo)
   results?: {
     channels?: {
       alternatives?: { transcript?: string }[];
@@ -55,6 +63,7 @@ function montarTranscript(data: DeepgramResponse): string {
 
 export async function transcreverAudioDeepgram(
   audioPath: string,
+  identidade: IdentidadeUso = {},
 ): Promise<{ transcript: string }> {
   const key = (process.env.DEEPGRAM_API_KEY || "").trim();
   if (!key) {
@@ -116,6 +125,20 @@ export async function transcreverAudioDeepgram(
     data = JSON.parse(corpo) as DeepgramResponse;
   } catch {
     data = {};
+  }
+
+  // Registra o gasto no painel de custos: Deepgram cobra por MINUTO de audio,
+  // entao guardamos a duracao (segundos). model "deepgram-<model>" para o preco.
+  const audioSec = Math.round(Number(data?.metadata?.duration) || 0);
+  if (audioSec > 0) {
+    await recordUsage({
+      model: `deepgram-${model}`,
+      op: "transcricao",
+      audioSec,
+      ramal: identidade.ramal,
+      usuario: identidade.usuario,
+      fonte: identidade.fonte,
+    }).catch(() => undefined);
   }
 
   return { transcript: montarTranscript(data) };

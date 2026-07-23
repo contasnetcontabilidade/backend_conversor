@@ -49,6 +49,29 @@ export function custoUsd(
   return (inputTokens / 1e6) * p.input + (outputTokens / 1e6) * p.output;
 }
 
+// Deepgram cobra por MINUTO de audio (nao por token). Preco padrao = Nova-2
+// gravado (US$ 0,0043/min). Sobrescrivel por DEEPGRAM_USD_POR_MIN.
+export const DEEPGRAM_USD_POR_MIN =
+  Number(process.env.DEEPGRAM_USD_POR_MIN) || 0.0043;
+
+export function ehModeloPorMinuto(model: string): boolean {
+  return /^deepgram/i.test(model || "");
+}
+
+// Custo de uma linha de uso, escolhendo a base certa: Deepgram = segundos de
+// audio; demais (Gemini) = tokens.
+export function custoLinha(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  audioSec: number,
+): number {
+  if (ehModeloPorMinuto(model)) {
+    return (Math.max(0, audioSec) / 60) * DEEPGRAM_USD_POR_MIN;
+  }
+  return custoUsd(model, inputTokens, outputTokens);
+}
+
 // --- Cambio USD -> BRL: automatico, com varias fontes + cache (Redis + memoria).
 // Fontes tentadas na ordem; a 1a que responder vale. AwesomeAPI (BR) as vezes e
 // bloqueada em datacenter (Vercel), por isso ha fallback(s) que funcionam de nuvem.

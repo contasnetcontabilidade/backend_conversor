@@ -109,15 +109,17 @@ function getGeminiClient() {
   return geminiClient;
 }
 
-// Allowlist de ramais liberados para um provedor alternativo (piloto).
-// Default "258". Ex.: DEEPGRAM_TRANSCRICAO_RAMAIS / AZURE_TRANSCRICAO_RAMAIS.
+// Ramais liberados para um provedor alternativo. VAZIO/nao setado = TODOS os
+// ramais. Se setar uma lista (ex.: "258,207") -> so esses. Envs:
+// DEEPGRAM_TRANSCRICAO_RAMAIS / AZURE_TRANSCRICAO_RAMAIS.
 function ramalLiberado(ramal: string | undefined, envName: string): boolean {
-  const lista = (process.env[envName] ?? "258")
+  const raw = (process.env[envName] ?? "").trim();
+  if (!raw) return true; // vazio = todos
+  const lista = raw
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const r = String(ramal || "").trim();
-  return !!r && lista.includes(r);
+  return lista.includes(String(ramal || "").trim());
 }
 
 function resolveTranscriptionProvider(
@@ -673,13 +675,16 @@ function normalizeTranscriptionError(
 // Executa um provedor alternativo (Deepgram/Azure) e, em qualquer falha que NAO
 // seja "sem fala", cai no Gemini para nao quebrar o fluxo. "Sem fala" propaga.
 async function transcreverComFallback(
-  provedor: (audioPath: string) => Promise<{ transcript: string }>,
+  provedor: (
+    audioPath: string,
+    identidade: IdentidadeUso,
+  ) => Promise<{ transcript: string }>,
   nome: string,
   audioPath: string,
   identidade: IdentidadeUso,
 ): Promise<TranscricaoResultado> {
   try {
-    const { transcript } = await provedor(audioPath);
+    const { transcript } = await provedor(audioPath, identidade);
     if (!transcript.trim()) {
       throw new AppError({
         statusCode: 422,

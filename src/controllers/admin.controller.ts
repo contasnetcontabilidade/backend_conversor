@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { custoUsd, getUsdBrl } from "../services/pricing";
+import { custoLinha, getUsdBrl } from "../services/pricing";
 import { getRelatorioUso } from "../services/usage";
 import {
   registrarFeedback,
@@ -85,7 +85,7 @@ export async function adminUsoController(req: Request, res: Response) {
   const linhas = relatorio.linhas
     .map((l) => ({
       ...l,
-      custoUsd: custoUsd(l.model, l.inputTokens, l.outputTokens),
+      custoUsd: custoLinha(l.model, l.inputTokens, l.outputTokens, l.audioSec),
     }))
     .sort((a, b) => b.custoUsd - a.custoUsd);
 
@@ -93,7 +93,7 @@ export async function adminUsoController(req: Request, res: Response) {
   // O frontend agrega/filtra por periodo em cima disto.
   const porDiaModelo = relatorio.porDiaModelo.map((d) => ({
     ...d,
-    custoUsd: custoUsd(d.model, d.inputTokens, d.outputTokens),
+    custoUsd: custoLinha(d.model, d.inputTokens, d.outputTokens, d.audioSec),
   }));
 
   // Detalhe por dia+ramal+op (colapsa o modelo apos precificar).
@@ -107,6 +107,7 @@ export async function adminUsoController(req: Request, res: Response) {
       inputTokens: number;
       outputTokens: number;
       calls: number;
+      audioSec: number;
       custoUsd: number;
     }
   >();
@@ -122,12 +123,14 @@ export async function adminUsoController(req: Request, res: Response) {
         inputTokens: 0,
         outputTokens: 0,
         calls: 0,
+        audioSec: 0,
         custoUsd: 0,
       };
     cur.inputTokens += it.inputTokens;
     cur.outputTokens += it.outputTokens;
     cur.calls += it.calls;
-    cur.custoUsd += custoUsd(it.model, it.inputTokens, it.outputTokens);
+    cur.audioSec += it.audioSec;
+    cur.custoUsd += custoLinha(it.model, it.inputTokens, it.outputTokens, it.audioSec);
     if (!cur.usuario && it.usuario) cur.usuario = it.usuario;
     ramalMap.set(chave, cur);
   }
@@ -144,6 +147,7 @@ export async function adminUsoController(req: Request, res: Response) {
       inputTokens: number;
       outputTokens: number;
       calls: number;
+      audioSec: number;
       custoUsd: number;
     }
   >();
@@ -158,12 +162,14 @@ export async function adminUsoController(req: Request, res: Response) {
         inputTokens: 0,
         outputTokens: 0,
         calls: 0,
+        audioSec: 0,
         custoUsd: 0,
       };
     cur.inputTokens += it.inputTokens;
     cur.outputTokens += it.outputTokens;
     cur.calls += it.calls;
-    cur.custoUsd += custoUsd(it.model, it.inputTokens, it.outputTokens);
+    cur.audioSec += it.audioSec;
+    cur.custoUsd += custoLinha(it.model, it.inputTokens, it.outputTokens, it.audioSec);
     fonteMap.set(chave, cur);
   }
   const porFonte = Array.from(fonteMap.values());
@@ -175,10 +181,11 @@ export async function adminUsoController(req: Request, res: Response) {
       acc.inputTokens += l.inputTokens;
       acc.outputTokens += l.outputTokens;
       acc.calls += l.calls;
+      acc.audioSec += l.audioSec;
       acc.custoUsd += l.custoUsd;
       return acc;
     },
-    { inputTokens: 0, outputTokens: 0, calls: 0, custoUsd: 0 },
+    { inputTokens: 0, outputTokens: 0, calls: 0, audioSec: 0, custoUsd: 0 },
   );
   const custoBrl = totais.custoUsd * cotacao;
 
@@ -520,8 +527,9 @@ function intervalo(){
 function noPeriodo(rows,de,ate){return (rows||[]).filter(function(r){return r.dia>=de&&r.dia<=ate})}
 
 // ---- agregacoes ----
-function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0};
-  rows.forEach(function(r){t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;
+function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0,audioSec:0,deepgramUsd:0};
+  rows.forEach(function(r){t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;t.audioSec+=r.audioSec||0;
+    if(/^deepgram/i.test(r.model||""))t.deepgramUsd+=r.custoUsd;
     if(r.op==="resumo"){t.ligacoes+=r.calls;t.resumoUsd+=r.custoUsd}if(r.op==="transcricao")t.transcUsd+=r.custoUsd});
   return t;}
 function porDiaAgg(rows){var m={};
@@ -693,6 +701,7 @@ function render(){
   var brlS="câmbio R$ "+Number(c).toFixed(2);
   if(custoAnt>0){var delta=(custoAtual-custoAnt)/custoAnt*100;var up=delta>=0;
     brlS+=' · <span class="delta '+(up?"up":"down")+'">'+(up?"▲":"▼")+" "+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
+  if(t.audioSec>0){brlS+=' · 🎙️ Deepgram: <b>'+fmtInt.format(Math.round(t.audioSec/60))+' min</b> ('+fmtBRL.format(t.deepgramUsd*c)+')';}
   document.getElementById("c-brl-s").innerHTML=brlS;
 
   // Projecao do mes (#4)
@@ -768,7 +777,7 @@ function render(){
   var tb=document.getElementById("tbody");
   var linhas=DADOS.linhas||[];
   if(!linhas.length){tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum uso registrado ainda.</td></tr>';}
-  else{tb.innerHTML=linhas.map(function(l){return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+fmtInt.format(l.inputTokens)+"</td><td class='right'>"+fmtInt.format(l.outputTokens)+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*c)+"</td></tr>"}).join("");}
+  else{tb.innerHTML=linhas.map(function(l){var ehMin=/^deepgram/i.test(l.model);var ent=ehMin?(fmtInt.format(Math.round((l.audioSec||0)/60))+" min"):fmtInt.format(l.inputTokens);var sai=ehMin?"—":fmtInt.format(l.outputTokens);return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+ent+"</td><td class='right'>"+sai+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*c)+"</td></tr>"}).join("");}
 }
 
 function baseOpt(muted,grid,money){return {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}}

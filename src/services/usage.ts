@@ -21,7 +21,8 @@ function getRedis(): Redis | null {
 
 export type Operacao = "transcricao" | "resumo";
 export type Fonte = "ligacao" | "email" | "resumo";
-type Metric = "in" | "out" | "calls";
+// "sec" = segundos de audio (provedores cobrados por minuto, ex.: Deepgram).
+type Metric = "in" | "out" | "calls" | "sec";
 
 const KEY_DIAS = "uso:dias";
 const KEY_RAMAIS = "uso:ramais"; // HASH ramal -> nome do usuario
@@ -56,6 +57,7 @@ export async function recordUsage(params: {
   op: Operacao;
   inputTokens?: number;
   outputTokens?: number;
+  audioSec?: number; // segundos de audio (Deepgram e afins, cobrados por minuto)
   ramal?: string;
   usuario?: string;
   fonte?: Fonte;
@@ -66,6 +68,7 @@ export async function recordUsage(params: {
   const model = (params.model || "desconhecido").trim() || "desconhecido";
   const inTok = Math.max(0, Math.floor(params.inputTokens || 0));
   const outTok = Math.max(0, Math.floor(params.outputTokens || 0));
+  const sec = Math.max(0, Math.floor(params.audioSec || 0));
   const dia = hoje();
   const ramal = String(params.ramal || "").trim();
   const usuario = String(params.usuario || "").trim();
@@ -79,6 +82,7 @@ export async function recordUsage(params: {
       r.hincrby(k, field(model, params.op, "out"), outTok),
       r.hincrby(k, field(model, params.op, "calls"), 1),
     ];
+    if (sec) ops.push(r.hincrby(k, field(model, params.op, "sec"), sec));
     if (ramal) {
       const ku = keyDiaUser(dia);
       ops.push(
@@ -86,6 +90,8 @@ export async function recordUsage(params: {
         r.hincrby(ku, fieldUser(model, params.op, ramal, "out"), outTok),
         r.hincrby(ku, fieldUser(model, params.op, ramal, "calls"), 1),
       );
+      if (sec)
+        ops.push(r.hincrby(ku, fieldUser(model, params.op, ramal, "sec"), sec));
       // Guarda/atualiza o nome exibido do ramal (last-write-wins).
       if (usuario) ops.push(r.hset(KEY_RAMAIS, { [ramal]: usuario }));
     }
@@ -96,6 +102,8 @@ export async function recordUsage(params: {
         r.hincrby(kf, fieldFonte(fonte, model, params.op, "out"), outTok),
         r.hincrby(kf, fieldFonte(fonte, model, params.op, "calls"), 1),
       );
+      if (sec)
+        ops.push(r.hincrby(kf, fieldFonte(fonte, model, params.op, "sec"), sec));
     }
     await Promise.all(ops);
   } catch (error) {
@@ -109,6 +117,7 @@ export interface UsoLinha {
   inputTokens: number;
   outputTokens: number;
   calls: number;
+  audioSec: number;
 }
 
 export interface UsoPorDia {
@@ -116,6 +125,7 @@ export interface UsoPorDia {
   inputTokens: number;
   outputTokens: number;
   calls: number;
+  audioSec: number;
 }
 
 // Detalhe cru por dia + modelo + operacao (para custo por dia, tabela, ranking).
@@ -126,6 +136,7 @@ export interface UsoPorDiaModelo {
   inputTokens: number;
   outputTokens: number;
   calls: number;
+  audioSec: number;
 }
 
 // Detalhe cru por dia + ramal + modelo + operacao (para gasto por ramal/usuario).
@@ -138,6 +149,7 @@ export interface UsoPorRamal {
   inputTokens: number;
   outputTokens: number;
   calls: number;
+  audioSec: number;
 }
 
 // Detalhe cru por dia + fonte (ligacao/email) + modelo + operacao.
@@ -149,6 +161,7 @@ export interface UsoPorFonte {
   inputTokens: number;
   outputTokens: number;
   calls: number;
+  audioSec: number;
 }
 
 export interface RelatorioUso {
@@ -192,6 +205,7 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
     let diaIn = 0;
     let diaOut = 0;
     let diaCalls = 0;
+    let diaSec = 0;
 
     for (const [rawField, rawValue] of Object.entries(hash)) {
       const parts = rawField.split("::");
@@ -208,6 +222,7 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
           inputTokens: 0,
           outputTokens: 0,
           calls: 0,
+          audioSec: 0,
         } as UsoLinha);
       const item =
         doDia.get(chave) ||
@@ -218,6 +233,7 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
           inputTokens: 0,
           outputTokens: 0,
           calls: 0,
+          audioSec: 0,
         } as UsoPorDiaModelo);
 
       if (metric === "in") {
@@ -232,12 +248,22 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
         linha.calls += value;
         item.calls += value;
         diaCalls += value;
+      } else if (metric === "sec") {
+        linha.audioSec += value;
+        item.audioSec += value;
+        diaSec += value;
       }
       agg.set(chave, linha);
       doDia.set(chave, item);
     }
 
-    porDia.push({ dia, inputTokens: diaIn, outputTokens: diaOut, calls: diaCalls });
+    porDia.push({
+      dia,
+      inputTokens: diaIn,
+      outputTokens: diaOut,
+      calls: diaCalls,
+      audioSec: diaSec,
+    });
     for (const it of doDia.values()) porDiaModelo.push(it);
 
     // --- Detalhe por ramal do dia (uso:du:<dia>) ---
@@ -263,11 +289,13 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
           inputTokens: 0,
           outputTokens: 0,
           calls: 0,
+          audioSec: 0,
         } as UsoPorRamal);
 
       if (metric === "in") item.inputTokens += value;
       else if (metric === "out") item.outputTokens += value;
       else if (metric === "calls") item.calls += value;
+      else if (metric === "sec") item.audioSec += value;
       doDiaRamal.set(chave, item);
     }
     for (const it of doDiaRamal.values()) porRamal.push(it);
@@ -294,11 +322,13 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
           inputTokens: 0,
           outputTokens: 0,
           calls: 0,
+          audioSec: 0,
         } as UsoPorFonte);
 
       if (metric === "in") item.inputTokens += value;
       else if (metric === "out") item.outputTokens += value;
       else if (metric === "calls") item.calls += value;
+      else if (metric === "sec") item.audioSec += value;
       doDiaFonte.set(chave, item);
     }
     for (const it of doDiaFonte.values()) porFonte.push(it);
