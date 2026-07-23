@@ -268,7 +268,12 @@ export function extractRecordingIds(report: Record<string, unknown>): string[] {
 // Baixa a gravacao (fluxo em 2 passos, com o token no PATH):
 //  1) GET .../recordings/{id}/content        -> { token, status }
 //  2) GET .../recordings/{id}/content/{token} -> bytes do audio (MP3)
-export async function downloadRecording(recordingId: string): Promise<string> {
+// Abre a gravacao no GoTo e devolve a RESPOSTA (nao consome o corpo) + extensao.
+// Usado tanto para transcrever (baixa para tmp) quanto para streamar o download
+// ao usuario sem bufferizar tudo (evita o limite de tamanho da funcao serverless).
+export async function obterGravacao(
+  recordingId: string,
+): Promise<{ response: Response; ext: string }> {
   // 1) token de acesso a gravacao
   const tokenRes = await authedFetch(
     `${API_BASE}/recording/v1/recordings/${encodeURIComponent(
@@ -321,7 +326,12 @@ export async function downloadRecording(recordingId: string): Promise<string> {
   const contentType = mediaRes.headers.get("content-type") || "";
   // Formato padrao das gravacoes GoTo e MP3 (o content-type vem octet-stream).
   const ext = /wav/i.test(contentType) ? ".wav" : ".mp3";
-  const buffer = Buffer.from(await mediaRes.arrayBuffer());
+  return { response: mediaRes, ext };
+}
+
+export async function downloadRecording(recordingId: string): Promise<string> {
+  const { response, ext } = await obterGravacao(recordingId);
+  const buffer = Buffer.from(await response.arrayBuffer());
   const filePath = path.join(os.tmpdir(), `goto-recording-${Date.now()}${ext}`);
   await fs.promises.writeFile(filePath, buffer);
   return filePath;

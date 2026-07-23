@@ -8,11 +8,14 @@ import {
   buildAuthorizeUrl,
   exchangeCodeForTokens,
 } from "../services/gotoAuth";
+import { Readable } from "node:stream";
 import {
   downloadRecording,
   extractRecordingId,
+  extractRecordingIds,
   getCallReport,
   listarHistoricoChamadas,
+  obterGravacao,
   setupCallEventsSubscription,
 } from "../services/gotoApi";
 import {
@@ -445,6 +448,54 @@ export async function gotoHistoricoController(req: Request, res: Response) {
 }
 
 // POST /goto/chamado — baixa a gravacao da chamada e gera transcricao + resumo.
+// GET /goto/gravacao?conversationSpaceId=X&i=0 — baixa a gravacao da ligacao e a
+// envia (stream) para o app salvar. Protegida pelo x-app-token normal do app.
+// Numa ligacao com varios trechos, ?i seleciona o trecho; X-Recording-Count no
+// header diz quantos existem (o app pode baixar cada um).
+export async function gotoGravacaoController(req: Request, res: Response) {
+  const conversationSpaceId =
+    typeof req.query.conversationSpaceId === "string"
+      ? req.query.conversationSpaceId.trim()
+      : "";
+  if (!conversationSpaceId) {
+    throw new AppError({
+      statusCode: 400,
+      code: "CONVERSATION_ID_REQUIRED",
+      message: "Informe conversationSpaceId.",
+    });
+  }
+  const i = Math.max(0, parseInt(String(req.query.i ?? "0"), 10) || 0);
+
+  const report = await getCallReport(conversationSpaceId);
+  const recordingIds = extractRecordingIds(report);
+  if (!recordingIds.length) {
+    throw new AppError({
+      statusCode: 404,
+      code: "RECORDING_NOT_FOUND",
+      message: "Nenhuma gravacao encontrada para esta ligacao.",
+    });
+  }
+  const idx = Math.min(i, recordingIds.length - 1);
+  const { response, ext } = await obterGravacao(recordingIds[idx]);
+
+  const nome = `ligacao_${conversationSpaceId.slice(0, 8)}${
+    recordingIds.length > 1 ? `_trecho${idx + 1}` : ""
+  }${ext}`;
+  res.setHeader("Content-Type", ext === ".wav" ? "audio/wav" : "audio/mpeg");
+  res.setHeader("Content-Disposition", `attachment; filename="${nome}"`);
+  res.setHeader("X-Recording-Count", String(recordingIds.length));
+  res.setHeader("Access-Control-Expose-Headers", "X-Recording-Count");
+  const len = response.headers.get("content-length");
+  if (len) res.setHeader("Content-Length", len);
+
+  if (response.body) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    Readable.fromWeb(response.body as any).pipe(res);
+  } else {
+    res.end(Buffer.from(await response.arrayBuffer()));
+  }
+}
+
 export async function gotoChamadoController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
   const conversationSpaceId = getOptionalString(body, "conversationSpaceId");

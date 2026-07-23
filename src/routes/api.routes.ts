@@ -10,6 +10,7 @@ import {
   gotoAblyTokenController,
   gotoChamadoController,
   gotoEventosController,
+  gotoGravacaoController,
   gotoHistoricoController,
   gotoOAuthCallbackController,
   gotoOAuthStartController,
@@ -79,6 +80,7 @@ apiRouter.post("/goto/setup/:token", asyncHandler(gotoSetupController));
 apiRouter.post("/goto/webhook/:token", asyncHandler(gotoWebhookController));
 apiRouter.get("/goto/eventos", asyncHandler(gotoEventosController));
 apiRouter.get("/goto/historico", asyncHandler(gotoHistoricoController));
+apiRouter.get("/goto/gravacao", asyncHandler(gotoGravacaoController));
 apiRouter.get("/goto/ably-token", asyncHandler(gotoAblyTokenController));
 apiRouter.post("/goto/chamado", asyncHandler(gotoChamadoController));
 
