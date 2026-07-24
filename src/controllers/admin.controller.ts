@@ -257,8 +257,10 @@ h1{font-size:22px;margin-bottom:4px}.sub{color:var(--muted);font-size:13px;margi
 .nov-it .em{font-size:18px;flex:0 0 auto;line-height:1.4}
 .nov-it .tx{font-size:13px;color:var(--text);line-height:1.5}
 .nov-f{padding:12px 16px;border-top:1px solid var(--border);text-align:right}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:14px;margin-bottom:22px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:22px}
+.card .v{min-width:0;word-break:break-word}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.cards{grid-template-columns:1fr}}
 .card{background:linear-gradient(180deg,var(--card-2),var(--card));border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
 .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--border)}
 .card.brand::before{background:var(--brand-2)}.card.accent::before{background:var(--accent)}.card.gold::before{background:var(--gold)}.card.teal::before{background:#14b8a6}
@@ -431,6 +433,16 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <div class="panel">
+    <h3>Uso por usuário — hoje</h3>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Chamadas</th><th class="right">Min (Deepgram)</th><th class="right">Custo R$</th></tr></thead>
+        <tbody id="tbody-ramal-hoje"><tr><td colspan="5" class="muted">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
     <h3>Custo por dia</h3>
     <div style="overflow:auto">
       <table>
@@ -541,8 +553,8 @@ function porDiaAgg(rows){var m={};
     a.inputTokens+=r.inputTokens;a.outputTokens+=r.outputTokens;a.calls+=r.calls;a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.ligacoes+=r.calls});
   return Object.keys(m).sort().map(function(k){return m[k]});}
 function ramalAgg(rows){var m={};
-  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0});
-    a.calls+=r.calls;a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
+  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0,audioSec:0});
+    a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.audioSec+=r.audioSec||0;if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
   return Object.keys(m).map(function(k){return m[k]}).sort(function(a,b){return b.custoUsd-a.custoUsd});}
 
 async function carregar(){
@@ -710,7 +722,7 @@ function render(){
   // Card do Deepgram: créditos restantes (destaque) + uso do período (sub).
   var dgCred=document.getElementById("dg-cred"),dgSub=document.getElementById("dg-cred-s");
   var temSaldo=DADOS&&typeof DADOS.deepgramSaldoUsd==='number';
-  if(dgCred)dgCred.textContent=temSaldo?fmtUSD(DADOS.deepgramSaldoUsd):"—";
+  if(dgCred)dgCred.textContent=temSaldo?("US$ "+DADOS.deepgramSaldoUsd.toFixed(2).replace(".",",")):"—";
   if(dgSub)dgSub.innerHTML=fmtInt.format(Math.round((t.audioSec||0)/60))+" min · "+fmtBRL.format((t.deepgramUsd||0)*c)+" no período"+(temSaldo?"":" · saldo indisponível");
 
   // Projecao do mes (#4)
@@ -772,6 +784,14 @@ function render(){
     var html=ramais.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
     if(naoAtrib>0.0000001)html+="<tr><td class='muted'>—</td><td class='muted'>não atribuído</td><td class='right muted'>—</td><td class='right muted'>"+fmtBRL.format(naoAtrib*c)+"</td></tr>";
     tbr.innerHTML=html;
+  }
+
+  // Uso por usuário HOJE (mesma fonte, filtrado ao dia atual em UTC).
+  var ramaisHoje=ramalAgg(noPeriodo(DADOS.porRamal,hojeUTC(),hojeUTC()));
+  var tbrh=document.getElementById("tbody-ramal-hoje");
+  if(tbrh){
+    if(!ramaisHoje.length)tbrh.innerHTML='<tr><td colspan="5" class="muted">Sem uso registrado hoje.</td></tr>';
+    else tbrh.innerHTML=ramaisHoje.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
   }
 
   // #8 Ranking dias mais caros
