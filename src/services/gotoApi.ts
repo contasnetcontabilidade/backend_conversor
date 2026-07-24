@@ -274,13 +274,29 @@ export function extractRecordingIds(report: Record<string, unknown>): string[] {
 export async function obterGravacao(
   recordingId: string,
 ): Promise<{ response: Response; ext: string }> {
-  // 1) token de acesso a gravacao
-  const tokenRes = await authedFetch(
-    `${API_BASE}/recording/v1/recordings/${encodeURIComponent(
-      recordingId,
-    )}/content`,
-  );
-  const tokenPayload = await readJson(tokenRes);
+  // 1) token de acesso a gravacao. O endpoint do GoTo as vezes devolve 5xx
+  // (502/503/504) de forma transitoria enquanto o token e gerado do lado deles,
+  // entao tentamos algumas vezes com backoff antes de desistir.
+  const tokenUrl = `${API_BASE}/recording/v1/recordings/${encodeURIComponent(
+    recordingId,
+  )}/content`;
+  let tokenRes: Response;
+  let tokenPayload: unknown;
+  const MAX_TENTATIVAS = 4;
+  for (let tentativa = 1; ; tentativa += 1) {
+    tokenRes = await authedFetch(tokenUrl);
+    tokenPayload = await readJson(tokenRes);
+    // 5xx = falha transitoria do GoTo -> vale a pena repetir
+    if (tokenRes.status >= 500 && tentativa < MAX_TENTATIVAS) {
+      const esperaMs = 500 * 2 ** (tentativa - 1); // 500, 1000, 2000ms
+      console.warn(
+        `[goto] token da gravacao HTTP ${tokenRes.status} (tentativa ${tentativa}/${MAX_TENTATIVAS}); retry em ${esperaMs}ms`,
+      );
+      await new Promise((r) => setTimeout(r, esperaMs));
+      continue;
+    }
+    break;
+  }
   if (!tokenRes.ok || !isRecord(tokenPayload)) {
     throw new AppError({
       statusCode: 502,
