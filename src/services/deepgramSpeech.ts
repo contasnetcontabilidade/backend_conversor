@@ -78,6 +78,76 @@ export function deepgramConfigurado(): boolean {
   return !!(process.env.DEEPGRAM_API_KEY || "").trim();
 }
 
+// --- Saldo/creditos do Deepgram (billing) para o painel de custos ---
+// Usa DEEPGRAM_BILLING_KEY se existir; senao a DEEPGRAM_API_KEY (que precisa ter
+// o escopo billing:read). Cacheado ~15min para nao bater na API a cada acesso.
+// Best-effort: retorna null (sem quebrar nada) se a key nao tiver permissao,
+// nao houver projeto, ou a API falhar.
+const DG_API_BASE = "https://api.deepgram.com";
+let saldoCache: { valor: number | null; expiraEm: number } | null = null;
+let projectIdCache = "";
+
+function keyBilling(): string {
+  return (
+    process.env.DEEPGRAM_BILLING_KEY ||
+    process.env.DEEPGRAM_API_KEY ||
+    ""
+  ).trim();
+}
+
+async function resolverProjectId(key: string): Promise<string> {
+  const fromEnv = (process.env.DEEPGRAM_PROJECT_ID || "").trim();
+  if (fromEnv) return fromEnv;
+  if (projectIdCache) return projectIdCache;
+  try {
+    const res = await fetch(`${DG_API_BASE}/v1/projects`, {
+      headers: { Authorization: `Token ${key}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return "";
+    const data = (await res.json()) as {
+      projects?: { project_id?: string }[];
+    };
+    projectIdCache = data?.projects?.[0]?.project_id || "";
+    return projectIdCache;
+  } catch {
+    return "";
+  }
+}
+
+export async function getSaldoDeepgramUsd(): Promise<number | null> {
+  const key = keyBilling();
+  if (!key) return null;
+  if (saldoCache && Date.now() < saldoCache.expiraEm) return saldoCache.valor;
+  const guardar = (valor: number | null) => {
+    saldoCache = { valor, expiraEm: Date.now() + 15 * 60 * 1000 };
+    return valor;
+  };
+  try {
+    const projectId = await resolverProjectId(key);
+    if (!projectId) return guardar(null);
+    const res = await fetch(
+      `${DG_API_BASE}/v1/projects/${projectId}/balances`,
+      {
+        headers: { Authorization: `Token ${key}` },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (!res.ok) return guardar(null);
+    const data = (await res.json()) as {
+      balances?: { amount?: number; dollar_amount?: number }[];
+    };
+    const balances = Array.isArray(data?.balances) ? data.balances : [];
+    const total = balances.reduce(
+      (s, b) => s + (Number(b?.amount ?? b?.dollar_amount) || 0),
+      0,
+    );
+    return guardar(total);
+  } catch {
+    return guardar(null);
+  }
+}
+
 interface DeepgramResponse {
   metadata?: { duration?: number }; // duracao do audio em segundos (p/ o custo)
   results?: {

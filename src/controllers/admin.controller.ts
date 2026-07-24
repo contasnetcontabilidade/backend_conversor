@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { custoLinha, getUsdBrl } from "../services/pricing";
 import { getRelatorioUso } from "../services/usage";
+import { getSaldoDeepgramUsd } from "../services/deepgramSpeech";
 import {
   registrarFeedback,
   listarFeedback,
@@ -76,9 +77,10 @@ export async function adminUsoController(req: Request, res: Response) {
     return;
   }
 
-  const [relatorio, cotacao] = await Promise.all([
+  const [relatorio, cotacao, deepgramSaldoUsd] = await Promise.all([
     getRelatorioUso(),
     getUsdBrl(),
+    getSaldoDeepgramUsd(), // null se a key nao tiver billing:read
   ]);
 
   // Agregado por modelo+operacao (todo o periodo), com custo.
@@ -193,6 +195,7 @@ export async function adminUsoController(req: Request, res: Response) {
     ok: true,
     configurado: relatorio.configurado,
     cotacao,
+    deepgramSaldoUsd, // creditos restantes no Deepgram (null se indisponivel)
     totais: {
       ...totais,
       tokens: totais.inputTokens + totais.outputTokens,
@@ -702,6 +705,7 @@ function render(){
   if(custoAnt>0){var delta=(custoAtual-custoAnt)/custoAnt*100;var up=delta>=0;
     brlS+=' · <span class="delta '+(up?"up":"down")+'">'+(up?"▲":"▼")+" "+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
   if(t.audioSec>0){brlS+=' · 🎙️ Deepgram: <b>'+fmtInt.format(Math.round(t.audioSec/60))+' min</b> ('+fmtBRL.format(t.deepgramUsd*c)+')';}
+  if(DADOS&&typeof DADOS.deepgramSaldoUsd==='number'){brlS+=' · 💳 Créditos Deepgram: <b>'+fmtUSD(DADOS.deepgramSaldoUsd)+'</b> ('+fmtBRL.format(DADOS.deepgramSaldoUsd*c)+')';}
   document.getElementById("c-brl-s").innerHTML=brlS;
 
   // Projecao do mes (#4)
