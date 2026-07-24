@@ -7,7 +7,40 @@ type IdentidadeUso = {
   ramal?: string;
   usuario?: string;
   fonte?: "ligacao" | "email" | "resumo";
+  // Funcionarios do escritorio NESTA ligacao (do relatorio GoTo). Entram como
+  // keyterms para melhorar a grafia de nomes proprios. Escala sozinho: gente
+  // nova aparece nos participantes da propria ligacao, sem cadastro manual.
+  nomesConhecidos?: string[];
 };
+
+// Termos-chave FIXOS (nome do escritorio, jargao) — configuraveis por env, sem
+// depender do relatorio da chamada. Padrao ja cobre "Contas Contabilidade"
+// (que a transcricao as vezes ouvia como "Contos"). Os nomes dos FUNCIONARIOS
+// vem por ligacao (nomesConhecidos), entao nao entram aqui.
+function keytermsFixos(): string[] {
+  const raw = (process.env.DEEPGRAM_KEYTERMS || "Contas Contabilidade").trim();
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Monta a lista de termos (fixos + nomes da ligacao), sem repetir.
+function montarKeyterms(identidade: IdentidadeUso): string[] {
+  const nomes = (identidade.nomesConhecidos || [])
+    .map((n) => String(n || "").trim())
+    .filter((n) => n.length >= 2);
+  const vistos = new Set<string>();
+  const out: string[] = [];
+  for (const t of [...keytermsFixos(), ...nomes]) {
+    const k = t.toLowerCase();
+    if (!vistos.has(k)) {
+      vistos.add(k);
+      out.push(t);
+    }
+  }
+  return out.slice(0, 100); // limite defensivo
+}
 
 // Deepgram Speech-to-Text (Nova-3) — arquivo gravado, REST sincrono.
 // POST do audio bruto -> transcript no JSON. Ativa so quando DEEPGRAM_API_KEY
@@ -86,6 +119,27 @@ export async function transcreverAudioDeepgram(
     smart_format: "true",
     mip_opt_out: "true", // audio do cliente nao vai pro treino da Deepgram
   });
+
+  // Boost de nomes proprios (nome do escritorio + funcionarios da ligacao).
+  // Nova-3 usa "keyterm" (aceita frases); Nova-2 e anteriores usam "keywords"
+  // (por palavra — entao quebramos as frases, ex.: "Contas Contabilidade" ->
+  // "Contas" e "Contabilidade", reforcando cada uma).
+  const termos = montarKeyterms(identidade);
+  if (termos.length) {
+    const usaKeyterm = /nova-3/i.test(model);
+    const aEnviar = usaKeyterm
+      ? termos
+      : Array.from(
+          new Set(
+            termos
+              .flatMap((t) => t.split(/\s+/))
+              .map((w) => w.trim())
+              .filter((w) => w.length >= 2),
+          ),
+        );
+    for (const t of aEnviar) params.append(usaKeyterm ? "keyterm" : "keywords", t);
+  }
+
   const url = `${base}/v1/listen?${params.toString()}`;
 
   const buf = await fs.promises.readFile(audioPath);
