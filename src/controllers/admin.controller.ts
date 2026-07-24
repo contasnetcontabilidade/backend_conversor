@@ -375,7 +375,6 @@ body.win-max .titlebar .ic-restore{display:inline}
     <button class="mini-btn" id="xls-completo" title="Excel com abas (todo o histórico)">⬇ Excel completo</button>
     <button class="mini-btn" id="xls-periodo" title="Excel com abas (período selecionado)">⬇ Excel período</button>
     <button class="mini-btn" id="painel-nov" title="Novidades do painel de custos">✨ Novidades</button>
-    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="auto" /> auto 5min</label>
   </div>
 
   <div class="cards">
@@ -968,7 +967,8 @@ document.getElementById("painel-nov").onclick=abrirNovidadesPainel;
 document.getElementById("nov-x").onclick=fecharNovidadesPainel;
 document.getElementById("nov-ok").onclick=fecharNovidadesPainel;
 document.getElementById("nov-overlay").addEventListener("click",function(e){if(e.target===this)fecharNovidadesPainel();});
-document.getElementById("auto").onchange=function(){if(this.checked){timerAuto=setInterval(carregar,300000)}else{clearInterval(timerAuto);timerAuto=null}};
+// Auto-refresh do painel: SEMPRE ligado, a cada 1 min (obrigatorio; sem opcao de desligar).
+setInterval(function(){if(senha()&&!document.getElementById("app").classList.contains("hidden"))carregar();},60000);
 (function(){var ths=document.querySelectorAll("#tbody-dia");
   var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}if(DADOS)render();};})();
 
