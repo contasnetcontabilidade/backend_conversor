@@ -257,15 +257,15 @@ h1{font-size:22px;margin-bottom:4px}.sub{color:var(--muted);font-size:13px;margi
 .nov-it .em{font-size:18px;flex:0 0 auto;line-height:1.4}
 .nov-it .tx{font-size:13px;color:var(--text);line-height:1.5}
 .nov-f{padding:12px 16px;border-top:1px solid var(--border);text-align:right}
-.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:22px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:14px;margin-bottom:22px}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
 .card{background:linear-gradient(180deg,var(--card-2),var(--card));border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
 .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--border)}
-.card.brand::before{background:var(--brand-2)}.card.accent::before{background:var(--accent)}.card.gold::before{background:var(--gold)}
+.card.brand::before{background:var(--brand-2)}.card.accent::before{background:var(--accent)}.card.gold::before{background:var(--gold)}.card.teal::before{background:#14b8a6}
 .card .k{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
 .card .v{font-size:23px;font-weight:700;margin-top:8px}
 .card .s{font-size:12px;color:var(--muted);margin-top:4px}
-.card.accent .v{color:var(--accent)}.card.gold .v{color:var(--gold)}
+.card.accent .v{color:var(--accent)}.card.gold .v{color:var(--gold)}.card.teal .v{color:#2dd4bf}
 .delta{font-weight:600}.delta.up{color:var(--danger)}.delta.down{color:var(--accent)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px}
 @media(max-width:900px){.grid2{grid-template-columns:1fr}}
@@ -382,6 +382,7 @@ body.win-max .titlebar .ic-restore{display:inline}
     <div class="card gold"><div class="k">Projeção do mês (R$)</div><div class="v" id="c-proj">—</div><div class="s" id="c-proj-s">no ritmo atual</div></div>
     <div class="card"><div class="k">Tokens (período)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
     <div class="card"><div class="k">Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
+    <div class="card teal"><div class="k">🎙️ Deepgram</div><div class="v" id="dg-cred">—</div><div class="s" id="dg-cred-s">créditos restantes</div></div>
   </div>
 
   <div class="panel">
@@ -704,9 +705,13 @@ function render(){
   var brlS="câmbio R$ "+Number(c).toFixed(2);
   if(custoAnt>0){var delta=(custoAtual-custoAnt)/custoAnt*100;var up=delta>=0;
     brlS+=' · <span class="delta '+(up?"up":"down")+'">'+(up?"▲":"▼")+" "+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
-  if(t.audioSec>0){brlS+=' · 🎙️ Deepgram: <b>'+fmtInt.format(Math.round(t.audioSec/60))+' min</b> ('+fmtBRL.format(t.deepgramUsd*c)+')';}
-  if(DADOS&&typeof DADOS.deepgramSaldoUsd==='number'){brlS+=' · 💳 Créditos Deepgram: <b>'+fmtUSD(DADOS.deepgramSaldoUsd)+'</b> ('+fmtBRL.format(DADOS.deepgramSaldoUsd*c)+')';}
   document.getElementById("c-brl-s").innerHTML=brlS;
+
+  // Card do Deepgram: créditos restantes (destaque) + uso do período (sub).
+  var dgCred=document.getElementById("dg-cred"),dgSub=document.getElementById("dg-cred-s");
+  var temSaldo=DADOS&&typeof DADOS.deepgramSaldoUsd==='number';
+  if(dgCred)dgCred.textContent=temSaldo?fmtUSD(DADOS.deepgramSaldoUsd):"—";
+  if(dgSub)dgSub.innerHTML=fmtInt.format(Math.round((t.audioSec||0)/60))+" min · "+fmtBRL.format((t.deepgramUsd||0)*c)+" no período"+(temSaldo?"":" · saldo indisponível");
 
   // Projecao do mes (#4)
   var mesDe=primeiroDiaMes(),mesAte=hojeUTC();
