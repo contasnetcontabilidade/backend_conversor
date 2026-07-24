@@ -436,8 +436,8 @@ body.win-max .titlebar .ic-restore{display:inline}
     <h3>Uso por usuário — hoje</h3>
     <div style="overflow:auto">
       <table>
-        <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Chamadas</th><th class="right">Min (Deepgram)</th><th class="right">Custo R$</th></tr></thead>
-        <tbody id="tbody-ramal-hoje"><tr><td colspan="5" class="muted">Carregando…</td></tr></tbody>
+        <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Chamadas</th><th class="right">Tokens</th><th class="right">Min (Deepgram)</th><th class="right">Custo R$</th></tr></thead>
+        <tbody id="tbody-ramal-hoje"><tr><td colspan="6" class="muted">Carregando…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -451,9 +451,10 @@ body.win-max .titlebar .ic-restore{display:inline}
           <th class="sortable right" data-col="tokens">Tokens</th>
           <th class="sortable right" data-col="calls">Chamadas</th>
           <th class="sortable right" data-col="ligacoes">Ligações</th>
+          <th class="sortable right" data-col="audioSec">Min (Deepgram)</th>
           <th class="sortable right" data-col="custoUsd">Custo R$</th>
         </tr></thead>
-        <tbody id="tbody-dia"><tr><td colspan="5" class="muted">Carregando…</td></tr></tbody>
+        <tbody id="tbody-dia"><tr><td colspan="6" class="muted">Carregando…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -549,12 +550,12 @@ function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,lig
     if(r.op==="resumo"){t.ligacoes+=r.calls;t.resumoUsd+=r.custoUsd}if(r.op==="transcricao")t.transcUsd+=r.custoUsd});
   return t;}
 function porDiaAgg(rows){var m={};
-  rows.forEach(function(r){var a=m[r.dia]||(m[r.dia]={dia:r.dia,inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0});
-    a.inputTokens+=r.inputTokens;a.outputTokens+=r.outputTokens;a.calls+=r.calls;a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.ligacoes+=r.calls});
+  rows.forEach(function(r){var a=m[r.dia]||(m[r.dia]={dia:r.dia,inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0,audioSec:0});
+    a.inputTokens+=r.inputTokens;a.outputTokens+=r.outputTokens;a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.audioSec+=r.audioSec||0;if(r.op==="resumo")a.ligacoes+=r.calls});
   return Object.keys(m).sort().map(function(k){return m[k]});}
 function ramalAgg(rows){var m={};
-  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0,audioSec:0});
-    a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.audioSec+=r.audioSec||0;if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
+  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0,audioSec:0,tokens:0});
+    a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.audioSec+=r.audioSec||0;a.tokens+=(r.inputTokens||0)+(r.outputTokens||0);if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
   return Object.keys(m).map(function(k){return m[k]}).sort(function(a,b){return b.custoUsd-a.custoUsd});}
 
 async function carregar(){
@@ -790,8 +791,8 @@ function render(){
   var ramaisHoje=ramalAgg(noPeriodo(DADOS.porRamal,hojeUTC(),hojeUTC()));
   var tbrh=document.getElementById("tbody-ramal-hoje");
   if(tbrh){
-    if(!ramaisHoje.length)tbrh.innerHTML='<tr><td colspan="5" class="muted">Sem uso registrado hoje.</td></tr>';
-    else tbrh.innerHTML=ramaisHoje.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
+    if(!ramaisHoje.length)tbrh.innerHTML='<tr><td colspan="6" class="muted">Sem uso registrado hoje.</td></tr>';
+    else tbrh.innerHTML=ramaisHoje.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.tokens||0)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
   }
 
   // #8 Ranking dias mais caros
@@ -821,8 +822,8 @@ function renderTabelaDia(dias,c){
     if(va<vb)return -1*ORD.dir;if(va>vb)return 1*ORD.dir;return 0;
   });
   var tb=document.getElementById("tbody-dia");
-  if(!arr.length){tb.innerHTML='<tr><td colspan="5" class="muted">Sem dados no período.</td></tr>';return;}
-  tb.innerHTML=arr.map(function(x){return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
+  if(!arr.length){tb.innerHTML='<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>';return;}
+  tb.innerHTML=arr.map(function(x){return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
 }
 
 var charts={};
