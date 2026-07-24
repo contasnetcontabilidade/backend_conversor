@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { recordUsage } from "./usage";
+import keytermsConfig from "../config/keyterms.json";
 
 type IdentidadeUso = {
   ramal?: string;
@@ -13,15 +14,18 @@ type IdentidadeUso = {
   nomesConhecidos?: string[];
 };
 
-// Termos-chave FIXOS (nome do escritorio, jargao) — configuraveis por env, sem
-// depender do relatorio da chamada. Padrao ja cobre "Contas Contabilidade"
-// (que a transcricao as vezes ouvia como "Contos"). Os nomes dos FUNCIONARIOS
-// vem por ligacao (nomesConhecidos), entao nao entram aqui.
+// Termos-chave FIXOS (nome do escritorio, jargao) — mantidos no arquivo
+// src/config/keyterms.json (basta editar a lista "termos"). Nao dependem do
+// relatorio da chamada. Os nomes dos FUNCIONARIOS vem por ligacao
+// (nomesConhecidos), entao nao entram aqui. A env DEEPGRAM_KEYTERMS ainda e
+// aceita como extra opcional (mesclada), mas nao e necessaria.
 function keytermsFixos(): string[] {
-  const raw = (process.env.DEEPGRAM_KEYTERMS || "Contas Contabilidade").trim();
-  return raw
-    .split(",")
-    .map((s) => s.trim())
+  const doJson = Array.isArray(keytermsConfig?.termos)
+    ? keytermsConfig.termos
+    : [];
+  const daEnv = (process.env.DEEPGRAM_KEYTERMS || "").split(",");
+  return [...doJson, ...daEnv]
+    .map((s) => String(s || "").trim())
     .filter(Boolean);
 }
 

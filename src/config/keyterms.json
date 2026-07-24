@@ -1,0 +1,6 @@
+{
+  "_comentario": "Termos-chave FIXOS para a transcricao (Deepgram) melhorar a grafia de nomes proprios que o audio costuma errar. So o que NAO vem do relatorio da chamada: nome do escritorio, siglas, jargao, sistemas citados. Os nomes dos FUNCIONARIOS entram automaticamente por ligacao (participantes do GoTo), entao NAO precisam ser listados aqui. Para adicionar, basta por a palavra/frase na lista 'termos' abaixo.",
+  "termos": [
+    "Contas Contabilidade"
+  ]
+}
