@@ -12,12 +12,14 @@ import {
 } from "./goto.controller";
 import {
   getChamadoCriado,
+  getPreviewCache,
   liberarCriacao,
   liberarPreview,
   marcarChamadoAberto,
   reservarCriacao,
   reservarPreview,
   salvarChamadoCriado,
+  salvarPreviewCache,
 } from "../services/store";
 import { isAblyConfigured, publishChamadoCriado } from "../services/ably";
 import {
@@ -304,81 +306,115 @@ export async function suitePreviewController(req: Request, res: Response) {
     ),
   );
 
-  // Transcreve TODOS os trechos de gravacao (transferencia = varios trechos) e
-  // concatena na ordem. Trecho silencioso (AUDIO_SEM_FALA) e pulado; se TODOS
-  // vierem vazios, propaga o erro. RECORDING_NOT_READY sobe para o retry do app.
-  let transcript = "";
-  for (let i = 0; i < recordingIds.length; i += 1) {
-    const audioPath = await downloadRecording(recordingIds[i]);
-    let parte = "";
-    try {
-      const t = await transcreverAudio({
-        audioPath,
-        ramal: ramalUsuario,
-        usuario: nomeUsuario,
-        nomesConhecidos,
-        fonte: "ligacao",
-      });
-      parte = String(t.transcript || "").trim();
-    } catch (error) {
-      const code = error instanceof AppError ? error.code : "";
-      if (code === "AUDIO_SEM_FALA") continue; // trecho mudo: ignora
-      throw error;
-    }
-    if (!parte) continue;
-    if (transcript) transcript += "\n\n";
-    if (recordingIds.length > 1) {
-      transcript += `--- Trecho ${i + 1}/${recordingIds.length} ---\n`;
-    }
-    transcript += parte;
-  }
-  if (!transcript.trim()) {
-    throw new AppError({
-      statusCode: 422,
-      code: "AUDIO_SEM_FALA",
-      message: "Nenhuma fala foi detectada no audio.",
-    });
-  }
-  const gravacaoNota = `Gravacao disponivel no GoTo (${recordingIds.length} trecho${
-    recordingIds.length > 1 ? "s" : ""
-  }: ${recordingIds.join(", ")}).`;
-
-  // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito).
-  // Best-effort: se a busca falhar, a IA segue sem lista e caimos no match textual.
+  // Lista de assuntos do Suite para a IA escolher UM (com base no que foi dito) e
+  // para validar o assunto vindo do cache. Best-effort: se falhar, segue sem lista.
   const tiposDisponiveis = await buscarTipos().catch(() => []);
 
-  // A IA e best-effort: se falhar (raro, com o retry), NAO cancela o fluxo.
-  // Segue para a revisao com os campos da IA vazios (o usuario preenche a mao).
+  // Cache do preview: se esta ligacao JA foi processada (transcrita + resumida) e
+  // o chamado ainda nao foi criado, reaproveita o resultado — sem re-baixar a
+  // gravacao, re-transcrever nem re-resumir. `forcarReprocesso` no corpo ignora
+  // o cache (escotilha de seguranca; o app normal nao envia).
+  const forcarReprocesso = body?.forcarReprocesso === true;
+  const cache = forcarReprocesso
+    ? null
+    : await getPreviewCache(conversationSpaceId).catch(() => null);
+
+  let transcript: string;
+  let gravacaoNota: string;
   let resumo: ResumoJson;
   let iaOk = true;
-  try {
-    ({ resumo } = await gerarResumoGemini({
-      text: transcript,
-      model: geminiModel,
-      assuntosDisponiveis: tiposDisponiveis.map((t) => ({
-        id: t.id,
-        nome: t.nome,
-      })),
-      ramal: ramalUsuario,
-      usuario: nomeUsuario,
-      fonte: "ligacao",
-    }));
-  } catch (error) {
-    iaOk = false;
-    console.warn(
-      `[suite360:preview] req=${requestId} resumo da IA falhou: ${getErrorMessage(
-        error,
-      )} — seguindo com campos vazios.`,
+
+  if (cache) {
+    transcript = cache.transcript;
+    gravacaoNota = cache.gravacaoNota;
+    resumo = cache.resumo as ResumoJson;
+    iaOk = cache.iaOk;
+    console.log(
+      `[suite360:preview] req=${requestId} conv=${conversationSpaceId} ` +
+        "cache HIT — reaproveitando transcricao/resumo (sem reprocessar).",
     );
-    resumo = {
-      titulo: "",
-      resumo: "",
-      pontos_principais: [],
-      providencias_sugeridas: [],
-      cliente_mencionado: { nome: "", cnpj: "" },
-      assunto_sugerido: "",
-      assunto_escolhido: { id: "", nome: "" },
-    };
+  } else {
+    // Transcreve TODOS os trechos de gravacao (transferencia = varios trechos) e
+    // concatena na ordem. Trecho silencioso (AUDIO_SEM_FALA) e pulado; se TODOS
+    // vierem vazios, propaga o erro. RECORDING_NOT_READY sobe para o retry do app.
+    transcript = "";
+    for (let i = 0; i < recordingIds.length; i += 1) {
+      const audioPath = await downloadRecording(recordingIds[i]);
+      let parte = "";
+      try {
+        const t = await transcreverAudio({
+          audioPath,
+          ramal: ramalUsuario,
+          usuario: nomeUsuario,
+          nomesConhecidos,
+          fonte: "ligacao",
+        });
+        parte = String(t.transcript || "").trim();
+      } catch (error) {
+        const code = error instanceof AppError ? error.code : "";
+        if (code === "AUDIO_SEM_FALA") continue; // trecho mudo: ignora
+        throw error;
+      }
+      if (!parte) continue;
+      if (transcript) transcript += "\n\n";
+      if (recordingIds.length > 1) {
+        transcript += `--- Trecho ${i + 1}/${recordingIds.length} ---\n`;
+      }
+      transcript += parte;
+    }
+    if (!transcript.trim()) {
+      throw new AppError({
+        statusCode: 422,
+        code: "AUDIO_SEM_FALA",
+        message: "Nenhuma fala foi detectada no audio.",
+      });
+    }
+    gravacaoNota = `Gravacao disponivel no GoTo (${recordingIds.length} trecho${
+      recordingIds.length > 1 ? "s" : ""
+    }: ${recordingIds.join(", ")}).`;
+
+    // A IA e best-effort: se falhar (raro, com o retry), NAO cancela o fluxo.
+    // Segue para a revisao com os campos da IA vazios (o usuario preenche a mao).
+    try {
+      ({ resumo } = await gerarResumoGemini({
+        text: transcript,
+        model: geminiModel,
+        assuntosDisponiveis: tiposDisponiveis.map((t) => ({
+          id: t.id,
+          nome: t.nome,
+        })),
+        ramal: ramalUsuario,
+        usuario: nomeUsuario,
+        fonte: "ligacao",
+      }));
+    } catch (error) {
+      iaOk = false;
+      console.warn(
+        `[suite360:preview] req=${requestId} resumo da IA falhou: ${getErrorMessage(
+          error,
+        )} — seguindo com campos vazios.`,
+      );
+      resumo = {
+        titulo: "",
+        resumo: "",
+        pontos_principais: [],
+        providencias_sugeridas: [],
+        cliente_mencionado: { nome: "", cnpj: "" },
+        assunto_sugerido: "",
+        assunto_escolhido: { id: "", nome: "" },
+      };
+    }
+
+    // So guarda no cache quando deu tudo certo (transcricao + resumo). Se a IA
+    // falhou, NAO cacheia — assim reabrir tenta de novo em vez de fixar o vazio.
+    if (iaOk) {
+      await salvarPreviewCache(conversationSpaceId, {
+        transcript,
+        resumo,
+        iaOk,
+        gravacaoNota,
+      }).catch(() => undefined);
+    }
   }
 
   // ----- Cliente -----

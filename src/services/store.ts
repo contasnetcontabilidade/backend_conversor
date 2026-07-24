@@ -176,6 +176,55 @@ export async function salvarChamadoCriado(
 ) {
   await setValue(`${ns}:chamado:${id}`, JSON.stringify(dados), ttlSeg);
 }
+// ---- Cache do PREVIEW (transcricao + resumo da IA) ----
+// Evita REPROCESSAR (re-baixar a gravacao, re-transcrever e re-resumir) uma
+// ligacao ja processada quando o atendente reabre o preview sem ter criado o
+// chamado. Chaveado SO por conversationSpaceId: transcript/resumo dependem so da
+// gravacao, nao de quem clicou (cliente/setor/executor sao recomputados sempre).
+// TTL curto (cobre reabrir no mesmo dia/semana); some sozinho depois.
+const PREVIEW_CACHE_TTL_SEG =
+  Number(process.env.PREVIEW_CACHE_TTL_SEG) || 48 * 3600; // 48h
+
+export interface PreviewCacheDados {
+  transcript: string;
+  resumo: unknown; // ResumoJson (evita dependencia circular com o controller)
+  iaOk: boolean;
+  gravacaoNota: string;
+}
+
+export async function getPreviewCache(
+  conversationSpaceId: string,
+): Promise<PreviewCacheDados | null> {
+  if (!conversationSpaceId) return null;
+  const raw = (await getValue(
+    `goto:previewcache:${conversationSpaceId}`,
+  )) as unknown;
+  if (!raw) return null;
+  let obj: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (obj && typeof (obj as PreviewCacheDados).transcript === "string") {
+    return obj as PreviewCacheDados;
+  }
+  return null;
+}
+export async function salvarPreviewCache(
+  conversationSpaceId: string,
+  dados: PreviewCacheDados,
+) {
+  if (!conversationSpaceId) return;
+  await setValue(
+    `goto:previewcache:${conversationSpaceId}`,
+    JSON.stringify(dados),
+    PREVIEW_CACHE_TTL_SEG,
+  );
+}
+
 // Lock atomico (SET NX) para impedir criacao concorrente do mesmo item.
 // Retorna true se conseguiu reservar (deve criar); false se ja ha uma em andamento.
 export async function reservarCriacao(
