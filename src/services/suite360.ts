@@ -805,6 +805,8 @@ export interface DadosDescricao {
   razaoSocial?: string;
   cnpj?: string;
   dataHora?: string;
+  tipo?: string; // "interno" | "externo"
+  numeroExterno?: string; // numero do cliente (chamada externa)
   telefoneOrigem?: string;
   telefoneDestino?: string;
   duracao?: string;
@@ -823,6 +825,22 @@ function linhas(itens?: string[]): string {
   return itens.map((i) => `- ${i}`).join("\n");
 }
 
+// Rotula os telefones da chamada. Em ligacao EXTERNA mostra o numero do cliente
+// e o ramal do escritorio (independente de entrada/saida) — evita a confusao de
+// "origem/destino" quando os dois lados sao do escritorio. Em INTERNA (ou quando
+// nao ha numero externo identificado) mantem origem/destino (ambos sao ramais).
+function linhasTelefone(d: DadosDescricao): string {
+  const externo = (d.numeroExterno || "").trim();
+  if (d.tipo === "interno" || !externo) {
+    return `- Telefone origem: ${d.telefoneOrigem || "-"}
+- Telefone destino: ${d.telefoneDestino || "-"}`;
+  }
+  const ramal =
+    d.telefoneDestino === externo ? d.telefoneOrigem : d.telefoneDestino;
+  return `- Telefone do cliente: ${externo}
+- Ramal do escritorio: ${ramal || "-"}`;
+}
+
 export function montarDescricao(d: DadosDescricao): string {
   const cliente =
     [d.razaoSocial, d.cnpj].filter(Boolean).join(" - ") || "(nao identificado)";
@@ -833,8 +851,7 @@ ${cliente}
 
 Dados da chamada:
 - Data/hora: ${d.dataHora || "-"}
-- Telefone origem: ${d.telefoneOrigem || "-"}
-- Telefone destino: ${d.telefoneDestino || "-"}
+${linhasTelefone(d)}
 - Duracao: ${d.duracao || "-"}
 ${
   d.atendentes && d.atendentes.length > 1

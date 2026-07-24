@@ -458,6 +458,8 @@ export async function suitePreviewController(req: Request, res: Response) {
     razaoSocial: clienteEncontrado?.razao_social,
     cnpj: clienteEncontrado?.cnpj,
     dataHora: meta.dataHora,
+    tipo: analise?.tipo || "",
+    numeroExterno,
     telefoneOrigem: meta.telefoneOrigem,
     telefoneDestino: meta.telefoneDestino,
     duracao: meta.duracao,
