@@ -9,11 +9,33 @@ import {
   getOptionalString,
 } from "../utils/request";
 
+// Versao do package.json. Vale tanto em dev (src/controllers -> ../../) quanto
+// no build da Vercel (dist/controllers -> ../../). Se falhar, nao quebra nada.
+function versaoApp(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return String(require("../../package.json").version || "");
+  } catch {
+    return "";
+  }
+}
+
+// GET /health — sonda de vida E identidade do build.
+// O `commit` responde "qual codigo esta no ar?" sem precisar abrir o painel da
+// Vercel nem caçar marcador no HTML (o webhook de deploy ja falhou 2x).
 export async function healthController(_req: Request, res: Response) {
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA || "";
   res.status(200).json({
     ok: true,
     status: "up",
     timestamp: new Date().toISOString(),
+    versao: versaoApp(),
+    commit: sha.slice(0, 7),
+    commitCompleto: sha,
+    branch: process.env.VERCEL_GIT_COMMIT_REF || "",
+    mensagemCommit: process.env.VERCEL_GIT_COMMIT_MESSAGE || "",
+    ambiente: process.env.VERCEL_ENV || (process.env.VERCEL ? "vercel" : "local"),
+    regiao: process.env.VERCEL_REGION || "",
   });
 }
 

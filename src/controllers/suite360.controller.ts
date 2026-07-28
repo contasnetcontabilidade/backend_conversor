@@ -22,6 +22,7 @@ import {
   salvarPreviewCache,
 } from "../services/store";
 import { isAblyConfigured, publishChamadoCriado } from "../services/ably";
+import { registrarCustoChamado } from "../services/custoChamados";
 import {
   buscarClientes,
   buscarOrigens,
@@ -348,6 +349,7 @@ export async function suitePreviewController(req: Request, res: Response) {
           usuario: nomeUsuario,
           nomesConhecidos,
           fonte: "ligacao",
+          itemId: conversationSpaceId,
         });
         parte = String(t.transcript || "").trim();
       } catch (error) {
@@ -386,6 +388,7 @@ export async function suitePreviewController(req: Request, res: Response) {
         ramal: ramalUsuario,
         usuario: nomeUsuario,
         fonte: "ligacao",
+        itemId: conversationSpaceId,
       }));
     } catch (error) {
       iaOk = false;
@@ -432,7 +435,10 @@ export async function suitePreviewController(req: Request, res: Response) {
   } else if (numeroExterno) {
     cliente = await resolverClientePorTelefone(numeroExterno);
     if (cliente.status !== "encontrado") {
-      const porMencao = await resolverClientePorMencao(resumo.cliente_mencionado);
+      const porMencao = await resolverClientePorMencao(
+        resumo.cliente_mencionado,
+        resumo.cliente_alternativas,
+      );
       if (porMencao) {
         cliente = { status: "encontrado", cliente: porMencao, via: "ia_mencao" };
       }
@@ -717,6 +723,22 @@ export async function suiteCriarController(req: Request, res: Response) {
     ).catch(() => undefined);
     await liberarCriacao(conversationSpaceId).catch(() => undefined);
     await broadcastChamadoCriado(conversationSpaceId);
+  }
+
+  // Custo de IA deste atendimento -> cliente/assunto (painel). So em criacao
+  // real: em dry-run nao existe chamado de verdade para atribuir custo.
+  if (!dryRun && conversationSpaceId) {
+    await registrarCustoChamado({
+      itemId: conversationSpaceId,
+      fonte: "ligacao",
+      clienteId: String(chamadoBody.cliente_id ?? ""),
+      cliente: getOptionalString(body, "cliente_nome"),
+      assuntoId: String(chamadoBody.tipo_apontamento_id ?? ""),
+      assunto: getOptionalString(body, "assunto_nome"),
+      ramal: getOptionalString(body, "ramal"),
+      usuario: getOptionalString(body, "usuario"),
+      protocolo,
+    }).catch(() => undefined);
   }
 
   if (dryRun) {

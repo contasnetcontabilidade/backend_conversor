@@ -18,7 +18,15 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-07-23";
+export const PROMPT_VERSION = "2026-07-28";
+
+// Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
+// nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
+// trocado em 9 de 10 e-mails, e o caso classico e o e-mail encaminhado por
+// alguem de dentro (o remetente vira "cliente" por engano).
+const NOME_ESCRITORIO = process.env.ESCRITORIO_NOME || "Contas Contabilidade";
+const DOMINIOS_ESCRITORIO =
+  process.env.ESCRITORIO_DOMINIOS || "contas.com.br, contasnet.com.br";
 
 let geminiClient: GoogleGenAI | null = null;
 
@@ -28,6 +36,9 @@ export type ResumoJson = {
   pontos_principais: string[];
   providencias_sugeridas: string[];
   cliente_mencionado: { nome: string; cnpj: string };
+  // Outros nomes plausiveis do MESMO cliente (nome fantasia, razao social, etc).
+  // Plano B para achar o cadastro quando o nome principal nao casa.
+  cliente_alternativas?: string[];
   // Assunto/tipo do chamado sugerido em texto livre (fallback).
   assunto_sugerido: string;
   // Assunto ESCOLHIDO pela IA a partir da lista de tipos do Suite (id + nome).
@@ -56,6 +67,9 @@ export type ResumoInput = {
   // Quantidade de mensagens quando o conteudo e uma conversa (thread de e-mail).
   // >1 ativa a instrucao para NAO perder nenhuma solicitacao de nenhuma mensagem.
   qtdMensagens?: number;
+  // Id do atendimento (conversationSpaceId / messageId): amarra o custo desta
+  // chamada de IA ao chamado que sair dela (custo por cliente/assunto).
+  itemId?: string;
 };
 
 function getGeminiClient() {
@@ -139,6 +153,12 @@ function parseResumoJson(rawText: string): ResumoJson {
     nome: String(clienteRaw.nome ?? "").trim(),
     cnpj: String(clienteRaw.cnpj ?? "").trim(),
   };
+  const clienteAlternativas = Array.isArray(parsed.cliente_alternativas)
+    ? parsed.cliente_alternativas
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
   const assuntoSugerido = String(parsed.assunto_sugerido ?? "").trim();
   const escolhaRaw = isRecord(parsed.assunto_escolhido)
     ? parsed.assunto_escolhido
@@ -166,6 +186,7 @@ function parseResumoJson(rawText: string): ResumoJson {
     pontos_principais: pontos,
     providencias_sugeridas: providencias,
     cliente_mencionado: clienteMencionado,
+    cliente_alternativas: clienteAlternativas,
     assunto_sugerido: assuntoSugerido,
     assunto_escolhido: assuntoEscolhido,
   };
@@ -280,6 +301,7 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
         pontos_principais: [],
         providencias_sugeridas: [],
         cliente_mencionado: { nome: "", cnpj: "" },
+        cliente_alternativas: [],
         assunto_sugerido: "",
         assunto_escolhido: { id: "", nome: "" },
       },
@@ -318,18 +340,33 @@ Campos obrigatorios:
   cliente"). Seja concreto e curto, baseando-se SOMENTE no que aparece no conteudo (nao
   invente dados). Deixe o array VAZIO apenas quando realmente nao houver nada a fazer
   (ex.: um simples agradecimento ou confirmacao, sem qualquer acao pertinente).
-- cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique a EMPRESA cliente usando,
-  nesta ordem de prioridade: (1) o CNPJ, se aparecer; (2) a ASSINATURA ${fontePalavra}; (3) quando houver
-  e-mail do remetente, o DOMINIO dele (ex.: "joao@transportesluz.com.br" -> "Transportes Luz"), IGNORANDO
-  dominios genericos (gmail, hotmail, outlook, yahoo, live, bol, uol, terra, icloud). Prefira a razao
-  social/nome mais completo e oficial; capte o nome mesmo que informal. NAO invente: se nao der para
-  identificar com seguranca, use "" nos dois campos.
+- cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique QUEM E ATENDIDO — a empresa
+  (ou a pessoa fisica) do outro lado do atendimento. Ordem de prioridade: (1) o CNPJ/CPF, se aparecer;
+  (2) a ASSINATURA ${fontePalavra}; (3) quando houver e-mail do remetente, o DOMINIO dele
+  (ex.: "joao@transportesluz.com.br" -> "Transportes Luz"), IGNORANDO dominios genericos (gmail, hotmail,
+  outlook, yahoo, live, bol, uol, terra, icloud).
+  REGRAS QUE MAIS ERRAM NA PRATICA — siga a risca:
+  a) O escritorio ${NOME_ESCRITORIO} e QUEM ATENDE, NUNCA o cliente. Se o remetente for do proprio
+     escritorio (dominios ${DOMINIOS_ESCRITORIO}) — tipico de e-mail ENCAMINHADO ou resposta interna —
+     IGNORE o remetente e procure o cliente no CORPO: no trecho encaminhado ("De:", "Em ... escreveu:"),
+     na assinatura original ou na empresa citada no texto.
+  b) Prefira a EMPRESA a pessoa: "Joao Silva - Transportes Luz Ltda" -> nome = "Transportes Luz Ltda".
+     Se o atendido for pessoa fisica (sem empresa alguma), aí sim use o nome completo da pessoa.
+  c) Nao confunda com terceiros citados (banco, prefeitura, orgao, fornecedor, sistema): cliente e quem
+     PEDE o servico ao escritorio.
+  d) Escreva o nome como aparece, sem abreviar nem "corrigir" — a busca no sistema e por texto.
+  NAO invente: se nao der para identificar com seguranca, use "" nos dois campos.
+- cliente_alternativas: string[] (0 a 3 itens). Outros nomes plausiveis para o mesmo cliente, do mais
+  para o menos provavel (ex.: nome fantasia, razao social completa, nome sem "Ltda/ME", nome da pessoa
+  que assina). Servem de plano B para localizar o cadastro. Array vazio se nao houver duvida.
 - assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
   "Folha de pagamento", "Abertura de empresa"; "" se incerto).
 - assunto_escolhido: objeto { id: string, nome: string }. Com base no conteudo, escolha na
   "LISTA DE ASSUNTOS DISPONIVEIS" abaixo (quando houver) o item que MELHOR representa o motivo do
   atendimento, e copie o id e o nome EXATAMENTE como aparecem na lista. Escolha o mais especifico que
-  se aplique. Se realmente nada se encaixar (ou se nao houver lista), use id e nome vazios.
+  se aplique. A lista e longa e cobre quase tudo: percorra-a inteira antes de desistir e prefira o item
+  razoavelmente proximo a deixar vazio (quem revisa troca em 1 clique; vazio obriga a procurar do zero).
+  Deixe vazio SO se nada na lista tiver relacao com o assunto.
 O escritorio que registra o chamado se chama "Contas Contabilidade". Se na transcricao o nome do PROPRIO
 escritorio vier com grafia claramente errada por falha de transcricao (ex.: "Contos Contabilidade",
 "Pontas Contabilidade", "Contas Contabil"), use a forma correta "Contas Contabilidade" no resumo. Isso vale
@@ -355,6 +392,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
       "pontos_principais",
       "providencias_sugeridas",
       "cliente_mencionado",
+      "cliente_alternativas",
       "assunto_sugerido",
       "assunto_escolhido",
     ],
@@ -369,6 +407,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         required: ["nome", "cnpj"],
         properties: { nome: { type: "string" }, cnpj: { type: "string" } },
       },
+      cliente_alternativas: { type: "array", items: { type: "string" } },
       assunto_sugerido: { type: "string" },
       assunto_escolhido: {
         type: "object",
@@ -419,6 +458,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         ramal: input.ramal,
         usuario: input.usuario,
         fonte: input.fonte,
+        itemId: input.itemId,
       });
 
       return { srtPath, resumo };

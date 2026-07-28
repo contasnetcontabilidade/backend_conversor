@@ -7,7 +7,14 @@ import {
   listarFeedback,
   type FeedbackEntry,
 } from "../services/feedback";
+import {
+  registrarErro,
+  listarErros,
+  limparErros,
+  type ErroEntry,
+} from "../services/erros";
 import { PROMPT_VERSION } from "../services/gemini";
+import { listarCustoChamados } from "../services/custoChamados";
 
 function senhaAdmin(): string {
   return process.env.ADMIN_PASSWORD || "Contas@2074";
@@ -60,6 +67,59 @@ export async function feedbackController(req: Request, res: Response) {
   res.status(200).json({ ok: true });
 }
 
+// POST /api/erros — o desktop reporta um erro que estourou na maquina do usuario.
+// Aceita SO campos conhecidos e capados (nunca transcricao/resumo/conteudo).
+export async function erroController(req: Request, res: Response) {
+  const b = (
+    req.body && typeof req.body === "object" ? req.body : {}
+  ) as Record<string, unknown>;
+  const str = (v: unknown, max: number) =>
+    typeof v === "string" ? v.slice(0, max) : "";
+
+  const mensagem = str(b.mensagem, 500).trim();
+  if (!mensagem) {
+    // Sem mensagem nao ha o que investigar — descarta em silencio (o app nao
+    // deve nem perceber; telemetria jamais atrapalha o fluxo do usuario).
+    res.status(200).json({ ok: true, ignorado: true });
+    return;
+  }
+
+  const entry: ErroEntry = {
+    ts: new Date().toISOString(),
+    origem: str(b.origem, 20) || "desktop",
+    tipo: str(b.tipo, 20) || "erro",
+    mensagem,
+    stack: str(b.stack, 2000) || undefined,
+    contexto: str(b.contexto, 120) || undefined,
+    versao: str(b.versao, 20) || undefined,
+    ramal: str(b.ramal, 40) || undefined,
+    usuario: str(b.usuario, 120) || undefined,
+    plataforma: str(b.plataforma, 60) || undefined,
+  };
+  await registrarErro(entry).catch(() => undefined);
+  res.status(200).json({ ok: true });
+}
+
+// GET /api/admin/erros — lista os erros reportados (protegido pela senha).
+export async function adminErrosController(req: Request, res: Response) {
+  if (!isAdmin(req)) {
+    res.status(401).json({ ok: false, message: "Nao autorizado." });
+    return;
+  }
+  const itens = await listarErros(300).catch(() => []);
+  res.status(200).json({ ok: true, itens });
+}
+
+// POST /api/admin/erros/limpar — zera a lista depois de tratar os erros.
+export async function adminErrosLimparController(req: Request, res: Response) {
+  if (!isAdmin(req)) {
+    res.status(401).json({ ok: false, message: "Nao autorizado." });
+    return;
+  }
+  await limparErros().catch(() => undefined);
+  res.status(200).json({ ok: true });
+}
+
 // GET /api/admin/feedback — lista os feedbacks (protegido pela senha do admin).
 export async function adminFeedbackController(req: Request, res: Response) {
   if (!isAdmin(req)) {
@@ -77,10 +137,11 @@ export async function adminUsoController(req: Request, res: Response) {
     return;
   }
 
-  const [relatorio, cotacao, deepgramSaldoUsd] = await Promise.all([
+  const [relatorio, cotacao, deepgramSaldoUsd, chamados] = await Promise.all([
     getRelatorioUso(),
     getUsdBrl(),
     getSaldoDeepgramUsd(), // null se a key nao tiver billing:read
+    listarCustoChamados().catch(() => []), // custo por cliente/assunto
   ]);
 
   // Agregado por modelo+operacao (todo o periodo), com custo.
@@ -205,6 +266,7 @@ export async function adminUsoController(req: Request, res: Response) {
     porDiaModelo,
     porRamal,
     porFonte,
+    chamados, // 1 linha por chamado criado (cliente, assunto, custo)
   });
 }
 
@@ -286,6 +348,12 @@ th.sortable{cursor:pointer;user-select:none}th.sortable:hover{color:var(--text)}
 tbody tr:hover{background:var(--accent-soft)}
 .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;background:var(--accent-soft);color:var(--accent)}
 .badge.resumo{background:rgba(224,169,59,.14);color:var(--gold)}
+.badge.erro{background:rgba(229,72,77,.16);color:var(--danger);margin-left:2px}
+.er-msg{font-family:Consolas,"Courier New",monospace;font-size:12px;word-break:break-word}
+.er-det{margin-top:4px}
+.er-det summary{cursor:pointer;color:var(--muted);font-size:11.5px}
+.er-det pre{margin-top:6px;padding:8px;background:var(--card-2);border:1px solid var(--border);border-radius:8px;
+  font-size:11px;line-height:1.45;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .right{text-align:right}
 .note{font-size:12.5px;color:var(--muted);background:var(--accent-soft);border:1px solid var(--border);border-radius:9px;padding:9px 12px;margin-bottom:14px}
 .rank{list-style:none}
@@ -386,6 +454,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   <div class="seg" id="nav-view" style="margin:0 0 16px">
     <button data-v="custos" class="on"><i data-lucide="wallet"></i> Custos</button>
     <button data-v="feedback"><i data-lucide="message-square"></i> Feedback da IA</button>
+    <button data-v="erros"><i data-lucide="triangle-alert"></i> Erros do app <span id="nav-erros-n" class="badge erro hidden">0</span></button>
   </div>
 
   <div id="view-custos">
@@ -461,6 +530,27 @@ body.win-max .titlebar .ic-restore{display:inline}
     <div class="panel" style="margin:0"><h3><i data-lucide="flame"></i> Dias mais caros</h3><ul class="rank" id="ranking"><li class="muted">—</li></ul></div>
   </div>
 
+  <div class="grid2">
+    <div class="panel" style="margin:0">
+      <h3><i data-lucide="building-2"></i> Custo por cliente — no período</h3>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Cliente</th><th class="right">Chamados</th><th class="right">Custo R$</th><th class="right">Média R$</th></tr></thead>
+          <tbody id="tbody-cliente"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel" style="margin:0">
+      <h3><i data-lucide="tag"></i> Custo por assunto — no período</h3>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Assunto</th><th class="right">Chamados</th><th class="right">Custo R$</th><th class="right">Média R$</th></tr></thead>
+          <tbody id="tbody-assunto"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <div class="panel">
     <h3><i data-lucide="clock"></i> Uso por usuário — hoje</h3>
     <div style="overflow:auto">
@@ -518,6 +608,25 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
   </div><!-- /view-feedback -->
 
+  <div id="view-erros" class="hidden">
+  <div class="panel">
+    <h3><i data-lucide="triangle-alert"></i> Erros do app (últimos 300)</h3>
+    <div class="note">O app desktop reporta aqui o que quebra na máquina do usuário — mensagem, versão e contexto. Nunca envia transcrição, resumo nem conteúdo de e-mail.</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+      <button class="mini-btn" id="er-csv" title="Baixar em CSV (abre no Excel)"><i data-lucide="file-text"></i> Exportar CSV</button>
+      <button class="mini-btn" id="er-limpar" title="Apaga a lista depois de tratar os erros"><i data-lucide="trash-2"></i> Limpar lista</button>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);cursor:pointer" title="Agrupa ocorrências iguais em vez de listar uma a uma"><input type="checkbox" id="er-agrupar" checked> Agrupar iguais</label>
+    </div>
+    <div id="er-stats" class="muted" style="margin-bottom:12px">Carregando…</div>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr><th>Quando</th><th class="right">Vezes</th><th>Usuário</th><th>Versão</th><th>Origem</th><th>Contexto</th><th>Erro</th></tr></thead>
+        <tbody id="tbody-erros"><tr><td colspan="7" class="muted">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  </div><!-- /view-erros -->
+
   <!-- Novidades do painel de custos (changelog proprio; aparece ao acessar) -->
   <div id="nov-overlay" class="nov-ov hidden">
     <div class="nov-card">
@@ -540,8 +649,16 @@ function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{l
 setTheme((function(){try{return localStorage.getItem(THEME_KEY)||"dark"}catch(e){return "dark"}})());
 document.getElementById("tema").onclick=function(){setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");if(DADOS)render()};
 
-// Abas: Custos x Feedback da IA
-(function(){var nav=document.getElementById("nav-view");if(!nav)return;var btns=nav.querySelectorAll("button");for(var i=0;i<btns.length;i++){btns[i].onclick=function(){var v=this.getAttribute("data-v");for(var j=0;j<btns.length;j++)btns[j].classList.toggle("on",btns[j]===this);document.getElementById("view-custos").classList.toggle("hidden",v!=="custos");document.getElementById("view-feedback").classList.toggle("hidden",v!=="feedback");if(v==="feedback")carregarFeedback();};}})();
+// Abas: Custos x Feedback da IA x Erros do app
+var VIEWS=["custos","feedback","erros"];
+(function(){var nav=document.getElementById("nav-view");if(!nav)return;var btns=nav.querySelectorAll("button");
+  for(var i=0;i<btns.length;i++){btns[i].onclick=function(){
+    var v=this.getAttribute("data-v");
+    for(var j=0;j<btns.length;j++)btns[j].classList.toggle("on",btns[j]===this);
+    for(var k=0;k<VIEWS.length;k++){var el=document.getElementById("view-"+VIEWS[k]);if(el)el.classList.toggle("hidden",VIEWS[k]!==v);}
+    if(v==="feedback")carregarFeedback();
+    if(v==="erros")carregarErros();
+  };}})();
 
 var fmtBRL=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:2});
 var fmtBRL4=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:4});
@@ -565,6 +682,25 @@ function addDias(s,n){var d=new Date(s+"T00:00:00Z");d.setUTCDate(d.getUTCDate()
 function diffDias(a,b){return Math.round((new Date(b+"T00:00:00Z")-new Date(a+"T00:00:00Z"))/86400000)}
 function primeiroDiaMes(){return hojeUTC().slice(0,8)+"01"}
 function ultimoDiaMes(){var d=new Date();return new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate()}
+// --- base da projecao: DIAS UTEIS, nao dias corridos ---------------------
+// O uso e de escritorio: sabado/domingo quase nao gastam. Dividir por dias
+// corridos derrubava a media e subestimava a projecao.
+function ehDiaUtil(s){var d=new Date(s+"T00:00:00Z").getUTCDay();return d>=1&&d<=5}
+function diasUteisNoMes(){
+  var base=primeiroDiaMes(),n=ultimoDiaMes(),c=0;
+  for(var i=0;i<n;i++)if(ehDiaUtil(addDias(base,i)))c++;
+  return c;
+}
+// Dias uteis ja decorridos, com o de HOJE valendo so a fracao ja vivida do dia
+// (senao, de manha, a media diaria sai artificialmente baixa). Piso de 1 para
+// nao explodir a projecao no comeco do mes, quando o denominador e minusculo.
+function diasUteisDecorridos(){
+  var hoje=hojeUTC(),base=primeiroDiaMes(),completos=0;
+  for(var d=base;d<hoje;d=addDias(d,1))if(ehDiaUtil(d))completos++;
+  var agora=new Date();
+  var fracao=ehDiaUtil(hoje)?(agora.getUTCHours()+agora.getUTCMinutes()/60)/24:0;
+  return Math.max(completos+fracao,1);
+}
 function minDia(){var xs=(DADOS&&DADOS.porDiaModelo||[]).map(function(x){return x.dia});return xs.length?xs.sort()[0]:hojeUTC()}
 function intervalo(){
   var ate=hojeUTC(),de;
@@ -609,12 +745,13 @@ async function carregar(){
   document.getElementById("atualizado").textContent="atualizado "+String(agora.getHours()).padStart(2,"0")+":"+String(agora.getMinutes()).padStart(2,"0");
   render();
   carregarFeedback();
+  carregarErros(); // mantem o contador de erros da aba sempre atual
   checarNovidadesPainel();
 }
 
 // ---- Novidades do painel de custos (changelog proprio, so deste painel) ----
 // Bump PAINEL_NOV_VER quando adicionar novidades -> reaparece 1x ao acessar.
-var PAINEL_NOV_VER="2026-07b";
+var PAINEL_NOV_VER="2026-07c";
 // ic = nome do icone no lucide (mesma biblioteca do app).
 var PAINEL_NOV=[
   {ic:"file-text",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
@@ -622,7 +759,10 @@ var PAINEL_NOV=[
   {ic:"calendar-days",tx:"Seção <b>Por mês</b>: comparativo mês a mês com variação % em relação ao mês anterior."},
   {ic:"message-square",tx:"Aba <b>Feedback da IA</b> com exportação em <b>CSV/JSON</b> e estatísticas (positivo/negativo, divergências, tags)."},
   {ic:"type",tx:"Correção de <b>acentos</b> nos arquivos exportados (abrem certinho no Excel, sem “Ã§”)."},
-  {ic:"palette",tx:"Painel com os <b>mesmos ícones do aplicativo</b> (Lucide), no lugar dos emojis."}
+  {ic:"palette",tx:"Painel com os <b>mesmos ícones do aplicativo</b> (Lucide), no lugar dos emojis."},
+  {ic:"building-2",tx:"Novas tabelas <b>Custo por cliente</b> e <b>Custo por assunto</b> (também nos relatórios). Conta a partir de agora — só os chamados criados daqui pra frente."},
+  {ic:"triangle-alert",tx:"Aba <b>Erros do app</b>: o que quebra na máquina do usuário aparece aqui, agrupado, sem depender de ninguém avisar."},
+  {ic:"trending-up",tx:"<b>Projeção do mês</b> agora usa <b>dias úteis</b> (e conta hoje pela fração já decorrida) em vez de dias corridos."}
 ];
 function renderNovidadesPainel(){
   var l=document.getElementById("nov-list");
@@ -737,6 +877,98 @@ function renderFeedback(itens){
   icones(); // avaliacoes e stats sao <i data-lucide> recem-injetados
 }
 
+// ---- Erros do app (telemetria do desktop) --------------------------------
+var ERROS=[];
+function chaveErro(e){return (e.mensagem||"")+"||"+(e.contexto||"")+"||"+(e.versao||"");}
+// Agrupa ocorrencias iguais (mesma mensagem+contexto+versao): 1 linha com o
+// numero de vezes e a ocorrencia mais recente. Sem isso, um erro em loop na
+// maquina de um usuario empurra todo o resto da lista pra fora da tela.
+function agruparErros(itens){
+  var m={},ordem=[];
+  itens.forEach(function(e){
+    var k=chaveErro(e),a=m[k];
+    if(!a){a=m[k]={ex:e,vezes:0,usuarios:{},ultimo:e.ts,primeiro:e.ts};ordem.push(k);}
+    a.vezes++;
+    if(e.usuario||e.ramal)a.usuarios[e.usuario||e.ramal]=1;
+    if(e.ts>a.ultimo)a.ultimo=e.ts;
+    if(e.ts<a.primeiro)a.primeiro=e.ts;
+  });
+  return ordem.map(function(k){return m[k];}).sort(function(a,b){return a.ultimo<b.ultimo?1:-1;});
+}
+async function carregarErros(){
+  var tb=document.getElementById("tbody-erros");
+  try{
+    var r=await fetch("/api/admin/erros",{headers:{Authorization:"Bearer "+senha()}});
+    if(!r.ok){ if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Falha ao carregar os erros.</td></tr>'; return; }
+    var d=await r.json();
+    ERROS=(d&&d.itens)||[];
+    renderErros();
+  }catch(e){ if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Falha de rede.</td></tr>'; }
+}
+function dataBR(ts){try{return new Date(ts).toLocaleString("pt-BR");}catch(e){return ts||"";}}
+function renderErros(){
+  var st=document.getElementById("er-stats"),tb=document.getElementById("tbody-erros");
+  var nav=document.getElementById("nav-erros-n");
+  // Badge na aba: so conta o que aconteceu nas ultimas 24h (o resto e historico).
+  var limite=new Date(Date.now()-24*3600*1000).toISOString();
+  var recentes=ERROS.filter(function(e){return (e.ts||"")>=limite;}).length;
+  if(nav){nav.textContent=recentes;nav.classList.toggle("hidden",recentes===0);}
+  if(!ERROS.length){
+    if(st)st.innerHTML="Nenhum erro reportado pelos apps.";
+    if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum erro reportado pelos apps.</td></tr>';
+    return;
+  }
+  var usuarios={},versoes={};
+  ERROS.forEach(function(e){if(e.usuario||e.ramal)usuarios[e.usuario||e.ramal]=1;if(e.versao)versoes[e.versao]=1;});
+  var grupos=agruparErros(ERROS);
+  if(st){st.innerHTML="<b>"+ERROS.length+"</b> ocorrências · <b>"+grupos.length+"</b> erros distintos · <b>"+recentes
+    +"</b> nas últimas 24h · usuários afetados: <b>"+Object.keys(usuarios).length+"</b> · versões: "+(Object.keys(versoes).join(", ")||"—");}
+  var agrupar=document.getElementById("er-agrupar");
+  var linhas;
+  if(!agrupar||agrupar.checked){
+    linhas=grupos.map(function(g){
+      var e=g.ex;
+      return "<tr><td>"+escFb(dataBR(g.ultimo))+"</td><td class='right'>"+g.vezes+"</td><td>"+escFb(Object.keys(g.usuarios).join(", ")||"—")
+        +"</td><td>"+escFb(e.versao||"—")+"</td><td>"+escFb(e.origem||"—")+"</td><td>"+escFb(e.contexto||"—")+"</td><td>"+celErro(e)+"</td></tr>";
+    });
+  }else{
+    linhas=ERROS.map(function(e){
+      return "<tr><td>"+escFb(dataBR(e.ts))+"</td><td class='right'>1</td><td>"+escFb(e.usuario||e.ramal||"—")
+        +"</td><td>"+escFb(e.versao||"—")+"</td><td>"+escFb(e.origem||"—")+"</td><td>"+escFb(e.contexto||"—")+"</td><td>"+celErro(e)+"</td></tr>";
+    });
+  }
+  if(tb)tb.innerHTML=linhas.join("");
+  icones();
+}
+function celErro(e){
+  var msg="<span class='er-msg'>"+escFb(e.mensagem||"")+"</span>";
+  if(!e.stack)return msg;
+  return msg+"<details class='er-det'><summary>stack</summary><pre>"+escFb(e.stack)+"</pre></details>";
+}
+function exportarErros(){
+  if(!ERROS.length){alert("Sem erros para exportar.");return;}
+  var cols=["Data","Origem","Tipo","Versao","Usuario","Ramal","Contexto","Plataforma","Mensagem","Stack"];
+  var L=[cols.join(";")];
+  ERROS.forEach(function(e){
+    L.push([dataBR(e.ts),e.origem||"",e.tipo||"",e.versao||"",e.usuario||"",e.ramal||"",e.contexto||"",
+      e.plataforma||"",e.mensagem||"",(e.stack||"").replace(/\\r?\\n/g," | ")].map(csvCampo).join(";"));
+  });
+  baixarArquivo("\\ufeff"+L.join("\\r\\n"),"text/csv;charset=utf-8","erros-app-"+hojeUTC()+".csv");
+}
+async function limparListaErros(){
+  if(!confirm("Apagar a lista de erros? Isso é permanente."))return;
+  try{
+    var r=await fetch("/api/admin/erros/limpar",{method:"POST",headers:{Authorization:"Bearer "+senha()}});
+    if(!r.ok){alert("Não foi possível limpar.");return;}
+    ERROS=[];renderErros();
+  }catch(e){alert("Falha de rede.");}
+}
+(function(){
+  var c=document.getElementById("er-csv"); if(c)c.onclick=exportarErros;
+  var l=document.getElementById("er-limpar"); if(l)l.onclick=limparListaErros;
+  var g=document.getElementById("er-agrupar"); if(g)g.onchange=renderErros;
+})();
+
 function render(){
   if(!DADOS)return;
   var iv=intervalo();
@@ -767,13 +999,16 @@ function render(){
   if(dgCred)dgCred.textContent=temSaldo?("US$ "+DADOS.deepgramSaldoUsd.toFixed(2).replace(".",",")):"—";
   if(dgSub)dgSub.innerHTML=fmtInt.format(Math.round((t.audioSec||0)/60))+" min · "+fmtBRL.format((t.deepgramUsd||0)*c)+" no período"+(temSaldo?"":" · saldo indisponível");
 
-  // Projecao do mes (#4)
+  // Projecao do mes (#4) — media por DIA UTIL decorrido x dias uteis do mes.
   var mesDe=primeiroDiaMes(),mesAte=hojeUTC();
   var custoMes=totais(noPeriodo(DADOS.porDiaModelo,mesDe,mesAte)).custoUsd*c;
-  var decorridos=diffDias(mesDe,mesAte)+1;
-  var proj=decorridos>0?custoMes/decorridos*ultimoDiaMes():0;
+  var uteisDec=diasUteisDecorridos(),uteisMes=diasUteisNoMes();
+  var proj=custoMes/uteisDec*uteisMes;
   document.getElementById("c-proj").textContent=fmtBRL.format(proj);
-  document.getElementById("c-proj-s").textContent="mês até agora: "+fmtBRL.format(custoMes);
+  var projS=document.getElementById("c-proj-s");
+  projS.textContent="mês até agora: "+fmtBRL.format(custoMes)+" · "+fmtBRL4.format(custoMes/uteisDec)+"/dia útil";
+  projS.title="Projeção = (gasto do mês ÷ "+uteisDec.toFixed(1)+" dias úteis decorridos) × "
+    +uteisMes+" dias úteis do mês. O dia de hoje entra pela fração já decorrida (UTC).";
 
   // Por ligacao (periodo)
   var custoLig=(t.transcUsd+t.resumoUsd)*c;
@@ -836,6 +1071,9 @@ function render(){
     else tbrh.innerHTML=ramaisHoje.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.tokens||0)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
   }
 
+  // Custo por cliente / por assunto (1 linha por chamado criado, ver custoChamados.ts)
+  renderChamados(noPeriodo(DADOS.chamados||[],iv.de,iv.ate),c);
+
   // #8 Ranking dias mais caros
   var top=dias.slice().sort(function(a,b){return b.custoUsd-a.custoUsd}).slice(0,7);
   var rk=document.getElementById("ranking");
@@ -851,6 +1089,33 @@ function render(){
   else{tb.innerHTML=linhas.map(function(l){var ehMin=/^deepgram/i.test(l.model);var ent=ehMin?(fmtInt.format(Math.round((l.audioSec||0)/60))+" min"):fmtInt.format(l.inputTokens);var sai=ehMin?"—":fmtInt.format(l.outputTokens);return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+ent+"</td><td class='right'>"+sai+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*c)+"</td></tr>"}).join("");}
 
   icones(); // KPIs/tabelas acabaram de reescrever HTML com <i data-lucide>
+}
+
+// Agrega os chamados criados por cliente e por assunto. So existe para chamados
+// criados DEPOIS deste recurso (forward-only) — antes disso nao havia como
+// ligar o custo da IA ao cliente.
+function agruparChamados(rows,campoNome,campoId){
+  var m={};
+  (rows||[]).forEach(function(r){
+    var nome=(r[campoNome]||"").trim()||("#"+(r[campoId]||"?"));
+    var a=m[nome]||(m[nome]={nome:nome,qtd:0,usd:0});
+    a.qtd++;a.usd+=r.custoUsd||0;
+  });
+  return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){return b.usd-a.usd;});
+}
+function renderChamados(rows,c){
+  var tbc=document.getElementById("tbody-cliente"),tba=document.getElementById("tbody-assunto");
+  function pintar(tb,lista,rotuloVazio){
+    if(!tb)return;
+    if(!lista.length){tb.innerHTML='<tr><td colspan="4" class="muted">'+rotuloVazio+'</td></tr>';return;}
+    tb.innerHTML=lista.slice(0,25).map(function(x){
+      return "<tr><td>"+escFb(x.nome)+"</td><td class='right'>"+fmtInt.format(x.qtd)+"</td><td class='right'>"
+        +fmtBRL.format(x.usd*c)+"</td><td class='right'>"+fmtBRL4.format(x.qtd?x.usd*c/x.qtd:0)+"</td></tr>";
+    }).join("");
+  }
+  var vazio="Nenhum chamado criado no período (só conta a partir de agora).";
+  pintar(tbc,agruparChamados(rows,"cliente","clienteId"),vazio);
+  pintar(tba,agruparChamados(rows,"assunto","assuntoId"),vazio);
 }
 
 function baseOpt(muted,grid,money){return {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}}
@@ -930,6 +1195,19 @@ function montarSecoes(de,ate,incluir3dias,incluirMes){
   var totF=0;fLista.forEach(function(f){totF+=(fAgg[f[1]]&&fAgg[f[1]].usd)||0;});
   fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;lf.push([Sc(f[0]),Nc(a.itens,0),Nc(a.usd,6),Nc(a.usd*c,4),Sc(p+"%")]);});
   secoes.push({nome:"Por fonte",linhas:lf});
+
+  // Custo por cliente / assunto: so tem linha para chamados criados apos o
+  // recurso existir, entao a secao so entra quando ha dado no periodo.
+  var chamadosP=noPeriodo(DADOS.chamados||[],de,ate);
+  if(chamadosP.length){
+    [["Por cliente","cliente","clienteId"],["Por assunto","assunto","assuntoId"]].forEach(function(cfg){
+      var l=[[Sc(cfg[1]),Sc("chamados"),Sc("custo_usd"),Sc("custo_brl"),Sc("custo_medio_brl")]];
+      agruparChamados(chamadosP,cfg[1],cfg[2]).forEach(function(x){
+        l.push([Sc(x.nome),Nc(x.qtd,0),Nc(x.usd,6),Nc(x.usd*c,4),Nc(x.qtd?x.usd*c/x.qtd:0,4)]);
+      });
+      secoes.push({nome:cfg[0],linhas:l});
+    });
+  }
 
   var lm=[[Sc("modelo"),Sc("operacao"),Sc("tokens_entrada"),Sc("tokens_saida"),Sc("chamadas"),Sc("custo_usd"),Sc("custo_brl")]];
   var moAgg={};rowsP.forEach(function(r){var k=r.model+"||"+r.op;var a=moAgg[k]||(moAgg[k]={model:r.model,op:r.op,i:0,o:0,calls:0,usd:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;a.usd+=r.custoUsd;});

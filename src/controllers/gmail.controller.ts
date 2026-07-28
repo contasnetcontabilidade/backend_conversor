@@ -26,6 +26,7 @@ import {
   setPerfilToken,
 } from "../services/store";
 import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
+import { registrarCustoChamado } from "../services/custoChamados";
 import {
   buscarTipos,
   criarChamado,
@@ -239,6 +240,9 @@ export async function gmailPreviewController(req: Request, res: Response) {
       usuario,
       fonte: "email",
       qtdMensagens,
+      // Mesma chave da idempotencia (thread > mensagem): amarra o custo desta
+      // IA ao chamado que sair dela.
+      itemId: chave,
     }));
   } catch (error) {
     iaOk = false;
@@ -287,7 +291,10 @@ export async function gmailPreviewController(req: Request, res: Response) {
       : { fonte: "ausente" };
 
   // Cliente: pela mencao (CNPJ/nome) que a IA captou; senao manual no modal.
-  const porMencao = await resolverClientePorMencao(resumo.cliente_mencionado);
+  const porMencao = await resolverClientePorMencao(
+    resumo.cliente_mencionado,
+    resumo.cliente_alternativas,
+  );
   const cliente = porMencao
     ? { status: "encontrado" as const, cliente: porMencao, via: "ia_mencao" }
     : { status: "nao_encontrado" as const };
@@ -467,6 +474,18 @@ export async function gmailCriarController(req: Request, res: Response) {
       "gmail",
     ).catch(() => undefined);
     await liberarCriacao(chave, "gmail").catch(() => undefined);
+    // Custo de IA deste e-mail -> cliente/assunto (painel de custos).
+    await registrarCustoChamado({
+      itemId: chave,
+      fonte: "email",
+      clienteId: String(chamadoBody.cliente_id ?? ""),
+      cliente: getOptionalString(body, "cliente_nome"),
+      assuntoId: String(chamadoBody.tipo_apontamento_id ?? ""),
+      assunto: getOptionalString(body, "assunto_nome"),
+      ramal: getOptionalString(body, "ramal"),
+      usuario: getOptionalString(body, "usuario"),
+      protocolo,
+    }).catch(() => undefined);
   }
   await removerMarcadorPosCriar(chave, threadId);
   console.log(

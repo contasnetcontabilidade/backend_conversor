@@ -195,6 +195,50 @@ async function suiteGet(path: string): Promise<unknown> {
   return isRecord(resp.body) && "data" in resp.body ? resp.body.data : resp.body;
 }
 
+// GET de LISTA COMPLETA, varrendo a paginacao do Suite.
+//
+// Por que existe: `/tipos-chamado` devolve 50 itens por pagina e o escritorio
+// tem 300+. Como a lista de assuntos vai inteira para a IA escolher UM, o corte
+// em 50 fazia a IA devolver assunto VAZIO (ou o "menos errado") sempre que o
+// assunto certo estava fora dos 50 — foi exatamente o que o feedback real de
+// 2026-07-24..27 mostrou (6 de 8 correcoes de assunto eram itens ausentes).
+//
+// A varredura e defensiva porque nao sabemos qual nome de parametro a API
+// aceita: manda page + per_page + limit e PARA quando uma pagina nao traz
+// nenhum id novo (API que ignora paginacao repete a 1a pagina e sai no 2o giro).
+const PAGINAS_MAX = 12;
+async function suiteGetTodos(path: string): Promise<Record<string, unknown>[]> {
+  const todos: Record<string, unknown>[] = [];
+  const vistos = new Set<string>();
+  const sep = path.includes("?") ? "&" : "?";
+
+  for (let page = 1; page <= PAGINAS_MAX; page += 1) {
+    const data = await suiteGet(
+      `${path}${sep}page=${page}&per_page=200&limit=200`,
+    ).catch(() => null);
+    if (!data) break;
+
+    const lista = asList(data);
+    if (!lista.length) break;
+
+    let novos = 0;
+    for (const item of lista) {
+      const chave = pickId(item) || JSON.stringify(item);
+      if (vistos.has(chave)) continue;
+      vistos.add(chave);
+      todos.push(item);
+      novos += 1;
+    }
+    if (!novos) break; // pagina repetida: a API nao pagina por "page"
+    if (lista.length < 50) break; // pagina curta = ultima
+  }
+
+  // Se a varredura falhar por completo, cai para o GET simples (1a pagina) —
+  // melhor uma lista curta do que nenhuma.
+  if (!todos.length) return asList(await suiteGet(path).catch(() => null));
+  return todos;
+}
+
 // Normaliza "data" para uma lista, tolerando varios formatos de paginacao.
 function asList(data: unknown): Record<string, unknown>[] {
   if (Array.isArray(data)) return data.filter(isRecord);
@@ -447,8 +491,40 @@ export async function resolverClienteInterno(): Promise<ClienteResolvido> {
 // Fallback de cliente EXTERNO quando o telefone nao resolveu: usa o nome/CNPJ
 // que a IA captou na conversa. So aceita quando ha UM unico match forte
 // (evita associar a ligacao ao cliente errado).
+// Busca por nome e decide se da para cravar o cliente:
+// - 1 resultado  -> e ele;
+// - varios       -> so aceita se UM bater EXATAMENTE com o nome buscado
+//                   (ignorando acentos/caixa). Senao devolve null e quem revisa
+//                   escolhe — melhor vazio do que cliente errado no chamado.
+async function tentarPorNome(nome: string): Promise<ClienteResolvido | null> {
+  const alvo = nome.trim();
+  if (alvo.length < 3) return null;
+  const achados = await buscarClientes({ q: alvo });
+  if (!achados.length) return null;
+
+  const escolhido =
+    achados.length === 1
+      ? achados[0]
+      : (() => {
+          const exatos = achados.filter(
+            (c) => norm(c.razao_social) === norm(alvo),
+          );
+          return exatos.length === 1 ? exatos[0] : null;
+        })();
+
+  if (!escolhido) return null;
+  return {
+    id: escolhido.id,
+    razao_social: escolhido.razao_social,
+    cnpj: escolhido.cnpj,
+  };
+}
+
 export async function resolverClientePorMencao(
   mencao: { nome?: string; cnpj?: string } | undefined,
+  // Nomes alternativos do MESMO cliente (nome fantasia, razao social completa),
+  // na ordem sugerida pela IA. Sao tentados quando o principal nao resolve.
+  alternativas: string[] = [],
 ): Promise<ClienteResolvido | null> {
   if (!mencao) return null;
   const cnpj = (mencao.cnpj || "").replace(/\D+/g, "");
@@ -463,16 +539,16 @@ export async function resolverClientePorMencao(
         };
       }
     }
-    const nome = (mencao.nome || "").trim();
-    if (nome.length >= 3) {
-      const porNome = await buscarClientes({ q: nome });
-      if (porNome.length === 1) {
-        return {
-          id: porNome[0].id,
-          razao_social: porNome[0].razao_social,
-          cnpj: porNome[0].cnpj,
-        };
-      }
+    const nomes = [mencao.nome || "", ...alternativas]
+      .map((n) => n.trim())
+      .filter(Boolean);
+    const jaTentados = new Set<string>();
+    for (const nome of nomes) {
+      const chave = norm(nome);
+      if (jaTentados.has(chave)) continue;
+      jaTentados.add(chave);
+      const achado = await tentarPorNome(nome);
+      if (achado) return achado;
     }
   } catch {
     // qualquer erro -> nao resolve (usuario escolhe no modal)
@@ -500,8 +576,9 @@ function norm(s: string | undefined): string {
 
 export async function buscarTipos(q?: string): Promise<ItemLista[]> {
   const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
-  const data = await suiteGet(`/tipos-chamado?ativo=1${query}`);
-  return asList(data).map((t) => ({
+  // Lista COMPLETA (300+): e ela que a IA recebe para escolher o assunto.
+  const lista = await suiteGetTodos(`/tipos-chamado?ativo=1${query}`);
+  return lista.map((t) => ({
     id: pickId(t) || "",
     nome: pickStr(t, ["nome", "name", "descricao"]) || "",
     extra: isRecord(t.categoria)
@@ -511,8 +588,9 @@ export async function buscarTipos(q?: string): Promise<ItemLista[]> {
 }
 
 export async function buscarSetores(): Promise<ItemLista[]> {
-  const data = await suiteGet("/setores");
-  return asList(data).map((s) => ({
+  // Tambem paginado: um setor fora dos 50 primeiros sumia do dropdown.
+  const data = await suiteGetTodos("/setores");
+  return data.map((s) => ({
     id: pickId(s) || "",
     nome: pickStr(s, ["descricao", "nome", "name"]) || "",
   }));
@@ -528,8 +606,9 @@ export async function buscarOrigens(): Promise<ItemLista[]> {
 
 export async function buscarUsuarios(q?: string): Promise<ItemLista[]> {
   const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
-  const data = await suiteGet(`/usuarios?ativo=1${query}`);
-  return asList(data).map((u) => ({
+  // Idem: o executor certo podia estar fora da 1a pagina.
+  const data = await suiteGetTodos(`/usuarios?ativo=1${query}`);
+  return data.map((u) => ({
     id: pickId(u) || "",
     nome: pickStr(u, ["nome", "name"]) || "",
     extra: pickStr(u, ["email", "funcao"]),

@@ -21,7 +21,10 @@ import {
   adminPageController,
   adminUsoController,
   adminFeedbackController,
+  adminErrosController,
+  adminErrosLimparController,
   feedbackController,
+  erroController,
 } from "../controllers/admin.controller";
 import {
   suiteClientesController,
@@ -105,6 +108,10 @@ apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
 apiRouter.get("/admin", adminPageController);
 apiRouter.get("/admin/uso", asyncHandler(adminUsoController));
 apiRouter.get("/admin/feedback", asyncHandler(adminFeedbackController));
+apiRouter.get("/admin/erros", asyncHandler(adminErrosController));
+apiRouter.post("/admin/erros/limpar", asyncHandler(adminErrosLimparController));
 
 // Feedback do resumo da IA (enviado pelo app; passa pelo x-app-token normal).
 apiRouter.post("/feedback", asyncHandler(feedbackController));
+// Erro do app desktop (telemetria; mesmo caminho de auth do feedback).
+apiRouter.post("/erros", asyncHandler(erroController));

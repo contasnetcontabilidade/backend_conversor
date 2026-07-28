@@ -12,6 +12,8 @@ type IdentidadeUso = {
   // keyterms para melhorar a grafia de nomes proprios. Escala sozinho: gente
   // nova aparece nos participantes da propria ligacao, sem cadastro manual.
   nomesConhecidos?: string[];
+  // Id do atendimento, para o custo por cliente/assunto (ver custoChamados.ts).
+  itemId?: string;
 };
 
 // Termos-chave FIXOS (nome do escritorio, jargao) — mantidos no arquivo
@@ -266,6 +268,7 @@ export async function transcreverAudioDeepgram(
       ramal: identidade.ramal,
       usuario: identidade.usuario,
       fonte: identidade.fonte,
+      itemId: identidade.itemId,
     }).catch(() => undefined);
   }
 

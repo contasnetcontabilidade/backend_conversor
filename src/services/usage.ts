@@ -26,6 +26,11 @@ type Metric = "in" | "out" | "calls" | "sec";
 
 const KEY_DIAS = "uso:dias";
 const KEY_RAMAIS = "uso:ramais"; // HASH ramal -> nome do usuario
+// Uso acumulado de UM item (ligacao/e-mail). E o que permite dizer, na hora em
+// que o chamado e criado, quanto custou aquele atendimento — e daí atribuir o
+// custo a cliente/assunto. Soma transcricao + resumo do mesmo id.
+const keyItem = (id: string) => `uso:item:${id}`;
+const ITEM_TTL_SEG = 45 * 24 * 3600; // o chamado nasce em minutos; 45d e folga
 const keyDia = (dia: string) => `uso:d:${dia}`;
 const keyDiaUser = (dia: string) => `uso:du:${dia}`; // detalhe por ramal
 const keyDiaFonte = (dia: string) => `uso:df:${dia}`; // detalhe por fonte
@@ -61,6 +66,9 @@ export async function recordUsage(params: {
   ramal?: string;
   usuario?: string;
   fonte?: Fonte;
+  // Id do atendimento (conversationSpaceId da ligacao / messageId do e-mail).
+  // Opcional: quando vem, o custo fica rastreavel ate o chamado criado.
+  itemId?: string;
 }): Promise<void> {
   const r = getRedis();
   if (!r) return;
@@ -105,6 +113,17 @@ export async function recordUsage(params: {
       if (sec)
         ops.push(r.hincrby(kf, fieldFonte(fonte, model, params.op, "sec"), sec));
     }
+    const itemId = String(params.itemId || "").trim();
+    if (itemId) {
+      const ki = keyItem(itemId);
+      ops.push(
+        r.hincrby(ki, field(model, params.op, "in"), inTok),
+        r.hincrby(ki, field(model, params.op, "out"), outTok),
+        r.hincrby(ki, field(model, params.op, "calls"), 1),
+      );
+      if (sec) ops.push(r.hincrby(ki, field(model, params.op, "sec"), sec));
+      ops.push(r.expire(ki, ITEM_TTL_SEG));
+    }
     await Promise.all(ops);
   } catch (error) {
     console.warn("[usage] falha ao registrar uso:", getErrorMessage(error));
@@ -118,6 +137,46 @@ export interface UsoLinha {
   outputTokens: number;
   calls: number;
   audioSec: number;
+}
+
+// Uso acumulado de um atendimento (todas as chamadas de IA daquele id).
+// Devolve lista vazia se o item nao tem registro (ex.: preview veio do cache,
+// ou o uso foi gravado antes deste recurso existir).
+export async function getUsoDoItem(itemId: string): Promise<UsoLinha[]> {
+  const r = getRedis();
+  const id = String(itemId || "").trim();
+  if (!r || !id) return [];
+  try {
+    const hash =
+      (await r.hgetall<Record<string, string | number>>(keyItem(id))) || {};
+    const m = new Map<string, UsoLinha>();
+    for (const [rawField, rawValue] of Object.entries(hash)) {
+      const parts = rawField.split("::");
+      if (parts.length !== 3) continue;
+      const [model, op, metric] = parts;
+      const value = Number(rawValue) || 0;
+      const chave = `${model}::${op}`;
+      const linha =
+        m.get(chave) ||
+        ({
+          model,
+          op: op as Operacao,
+          inputTokens: 0,
+          outputTokens: 0,
+          calls: 0,
+          audioSec: 0,
+        } as UsoLinha);
+      if (metric === "in") linha.inputTokens += value;
+      else if (metric === "out") linha.outputTokens += value;
+      else if (metric === "calls") linha.calls += value;
+      else if (metric === "sec") linha.audioSec += value;
+      m.set(chave, linha);
+    }
+    return Array.from(m.values());
+  } catch (error) {
+    console.warn("[usage] falha ao ler uso do item:", getErrorMessage(error));
+    return [];
+  }
 }
 
 export interface UsoPorDia {
