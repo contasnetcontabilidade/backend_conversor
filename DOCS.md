@@ -59,7 +59,7 @@ O desktop também tem uma aba "Transcrever & Resumir" para arquivos avulsos (`.w
 
 ### Fluxo de administração — custos de IA
 
-`GET /admin` serve um painel (HTML com gráficos Chart.js) que consulta `GET /admin/uso` para mostrar quanto foi gasto em tokens do Gemini, convertido para BRL. O painel oferece:
+`GET /admin` serve um painel (HTML com gráficos Chart.js e ícones **Lucide** — a mesma biblioteca do app desktop, via `<i data-lucide="nome">` + `lucide.createIcons()`) que consulta `GET /admin/uso` para mostrar quanto foi gasto em tokens do Gemini, convertido para BRL. O painel oferece:
 
 - **Filtro por período** (7/30 dias, mês atual, tudo, ou intervalo personalizado) — todas as views recalculam.
 - **Custo por dia (R$)**, **transcrição vs. resumo** (rosca), **custo por modelo** e **tendência do custo médio por ligação**.

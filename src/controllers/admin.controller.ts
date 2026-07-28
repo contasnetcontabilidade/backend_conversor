@@ -220,6 +220,9 @@ const PAGINA_ADMIN = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Painel de Custos IA · Contas</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<!-- Mesma biblioteca de icones do app (renderer): Lucide. Usa <i data-lucide="nome">,
+     que o lucide.createIcons() troca por um <svg class="lucide lucide-nome">. -->
+<script src="https://unpkg.com/lucide@latest"></script>
 <style>
 :root{--brand:#0b3d66;--brand-2:#12578f;--accent:#1fa971;--accent-soft:rgba(31,169,113,.15);
 --gold:#e0a93b;--danger:#e5484d;--radius:14px;--radius-sm:10px}
@@ -230,7 +233,9 @@ html[data-theme=light]{--bg:#f5f7fa;--bg-grad:none;--card:#fff;--card-2:#f2f6fb;
 body{font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;background:var(--bg);background-image:var(--bg-grad);color:var(--text);min-height:100vh}
 .wrap{max-width:1200px;margin:0 auto;padding:20px 20px 60px}
 .topbar{display:flex;align-items:center;gap:16px;margin-bottom:22px}
-.brand{display:flex;align-items:center;gap:12px}
+/* Escopado na topbar: solto, o ".brand" pegava tambem os cards ".card brand"
+   e deixava rotulo/valor/subtitulo lado a lado. */
+.topbar .brand{display:flex;align-items:center;gap:12px}
 .logo{width:42px;height:42px;border-radius:11px;background:linear-gradient(135deg,var(--brand) 0%,var(--brand-2) 55%,var(--accent) 130%);display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px;box-shadow:0 6px 16px rgba(11,61,102,.35)}
 .name b{display:block;font-size:15px}.name span{font-size:12px;color:var(--muted)}
 .spacer{flex:1}
@@ -295,6 +300,31 @@ tbody tr:hover{background:var(--accent-soft)}
 .login-err{color:var(--danger);font-size:13px;margin-top:10px;min-height:18px}
 .hidden{display:none!important}
 .muted{color:var(--muted)}
+/* ---- Icones (Lucide) ----------------------------------------------------
+   O lucide troca o <i data-lucide> por um <svg class="lucide lucide-nome">,
+   entao os seletores tem que ser por "svg" (o "i" some). Sem dimensionar, o
+   icone vem no padrao 24px e estoura os botoes. */
+svg.lucide{width:16px;height:16px;flex:0 0 auto;vertical-align:-.16em}
+.icon-btn{display:inline-grid;place-items:center}
+.icon-btn svg.lucide{width:18px;height:18px}
+html[data-theme=dark] #tema .lucide-moon{display:none}
+html[data-theme=light] #tema .lucide-sun{display:none}
+.seg button{display:inline-flex;align-items:center;gap:6px}
+.seg button svg.lucide{width:15px;height:15px}
+.mini-btn{display:inline-flex;align-items:center;gap:6px}
+.mini-btn svg.lucide{width:15px;height:15px}
+.card .k{display:flex;align-items:center;gap:6px}
+.card .k svg.lucide{width:14px;height:14px}
+.panel h3{display:flex;align-items:center;gap:8px}
+.panel h3 svg.lucide{width:15px;height:15px;color:var(--accent)}
+.delta svg.lucide{width:13px;height:13px;vertical-align:-.12em}
+td svg.lucide,#fb-stats svg.lucide{width:15px;height:15px}
+.av-up{color:var(--accent)}.av-down{color:var(--danger)}
+.nov-it .em svg.lucide{width:18px;height:18px;color:var(--accent)}
+.nov-h b{display:inline-flex;align-items:center;gap:8px}
+.nov-h b svg.lucide{color:var(--gold)}
+.login-card h2{display:flex;align-items:center;justify-content:center;gap:8px}
+.login-card h2 svg.lucide{width:18px;height:18px;color:var(--muted)}
 .titlebar{display:none}
 body.electron{padding-top:40px}
 body.electron .titlebar{position:fixed;top:0;left:0;right:0;height:40px;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:0 6px 0 14px;background:var(--card);border-bottom:1px solid var(--border);-webkit-app-region:drag}
@@ -333,7 +363,7 @@ body.win-max .titlebar .ic-restore{display:inline}
 <div id="login">
   <div class="login-card">
     <div class="logo" style="margin:0 auto 16px">CC</div>
-    <h2>Painel de Custos</h2>
+    <h2><i data-lucide="lock"></i> Painel de Custos</h2>
     <p>Acesso restrito. Informe a senha de administrador.</p>
     <input id="senha" type="password" placeholder="Senha" autofocus />
     <button id="entrar">Entrar</button>
@@ -346,16 +376,16 @@ body.win-max .titlebar .ic-restore{display:inline}
     <div class="brand"><div class="logo">CC</div><div class="name"><b>Contas Contabilidade</b><span>Custos de IA</span></div></div>
     <div class="spacer"></div>
     <span class="pill" id="atualizado">—</span>
-    <button class="icon-btn" id="tema" title="Alternar tema">☀️</button>
-    <button class="icon-btn" id="refresh" title="Atualizar">↻</button>
+    <button class="icon-btn" id="tema" title="Alternar tema"><i data-lucide="sun"></i><i data-lucide="moon"></i></button>
+    <button class="icon-btn" id="refresh" title="Atualizar"><i data-lucide="refresh-cw"></i></button>
   </div>
 
   <h1>Custos de Inteligência Artificial</h1>
   <div class="sub" id="status">Consumo de tokens do Gemini (transcrição + resumo) e custo estimado.</div>
 
   <div class="seg" id="nav-view" style="margin:0 0 16px">
-    <button data-v="custos" class="on">📊 Custos</button>
-    <button data-v="feedback">💬 Feedback da IA</button>
+    <button data-v="custos" class="on"><i data-lucide="wallet"></i> Custos</button>
+    <button data-v="feedback"><i data-lucide="message-square"></i> Feedback da IA</button>
   </div>
 
   <div id="view-custos">
@@ -370,45 +400,45 @@ body.win-max .titlebar .ic-restore{display:inline}
     <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
     <div class="spacer"></div>
     <label>Câmbio R$</label> <input type="number" step="0.01" min="0" class="cambio" id="cambio" title="Câmbio USD→BRL (editável)" />
-    <button class="mini-btn" id="csv-completo" title="CSV completo (todo o histórico, todas as seções)">⬇ CSV completo</button>
-    <button class="mini-btn" id="csv-periodo" title="CSV do período selecionado">⬇ CSV período</button>
-    <button class="mini-btn" id="xls-completo" title="Excel com abas (todo o histórico)">⬇ Excel completo</button>
-    <button class="mini-btn" id="xls-periodo" title="Excel com abas (período selecionado)">⬇ Excel período</button>
-    <button class="mini-btn" id="painel-nov" title="Novidades do painel de custos">✨ Novidades</button>
+    <button class="mini-btn" id="csv-completo" title="CSV completo (todo o histórico, todas as seções)"><i data-lucide="file-text"></i> CSV completo</button>
+    <button class="mini-btn" id="csv-periodo" title="CSV do período selecionado"><i data-lucide="file-text"></i> CSV período</button>
+    <button class="mini-btn" id="xls-completo" title="Excel com abas (todo o histórico)"><i data-lucide="file-spreadsheet"></i> Excel completo</button>
+    <button class="mini-btn" id="xls-periodo" title="Excel com abas (período selecionado)"><i data-lucide="file-spreadsheet"></i> Excel período</button>
+    <button class="mini-btn" id="painel-nov" title="Novidades do painel de custos"><i data-lucide="sparkles"></i> Novidades</button>
   </div>
 
   <div class="cards">
-    <div class="card accent"><div class="k">Custo total (R$)</div><div class="v" id="c-brl">—</div><div class="s" id="c-brl-s"></div></div>
-    <div class="card brand"><div class="k">Custo total (US$)</div><div class="v" id="c-usd">—</div><div class="s">preços de referência</div></div>
-    <div class="card gold"><div class="k">Projeção do mês (R$)</div><div class="v" id="c-proj">—</div><div class="s" id="c-proj-s">no ritmo atual</div></div>
-    <div class="card"><div class="k">Tokens (período)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
-    <div class="card"><div class="k">Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
-    <div class="card teal"><div class="k">🎙️ Deepgram</div><div class="v" id="dg-cred">—</div><div class="s" id="dg-cred-s">créditos restantes</div></div>
+    <div class="card accent"><div class="k"><i data-lucide="wallet"></i> Custo total (R$)</div><div class="v" id="c-brl">—</div><div class="s" id="c-brl-s"></div></div>
+    <div class="card brand"><div class="k"><i data-lucide="dollar-sign"></i> Custo total (US$)</div><div class="v" id="c-usd">—</div><div class="s">preços de referência</div></div>
+    <div class="card gold"><div class="k"><i data-lucide="trending-up"></i> Projeção do mês (R$)</div><div class="v" id="c-proj">—</div><div class="s" id="c-proj-s">no ritmo atual</div></div>
+    <div class="card"><div class="k"><i data-lucide="hash"></i> Tokens (período)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
+    <div class="card"><div class="k"><i data-lucide="zap"></i> Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
+    <div class="card teal"><div class="k"><i data-lucide="mic"></i> Deepgram</div><div class="v" id="dg-cred">—</div><div class="s" id="dg-cred-s">créditos restantes</div></div>
   </div>
 
   <div class="panel">
-    <h3>Por ligação (transcrição + resumo) — no período</h3>
+    <h3><i data-lucide="phone-call"></i> Por ligação (transcrição + resumo) — no período</h3>
     <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
-      <div class="card brand"><div class="k">Ligações resumidas</div><div class="v" id="l-count">—</div><div class="s">com resumo da IA</div></div>
-      <div class="card accent"><div class="k">Custo total das ligações</div><div class="v" id="l-total">—</div><div class="s" id="l-total-s"></div></div>
-      <div class="card gold"><div class="k">Custo médio por ligação</div><div class="v" id="l-avg">—</div><div class="s" id="l-avg-s">R$</div></div>
+      <div class="card brand"><div class="k"><i data-lucide="phone-call"></i> Ligações resumidas</div><div class="v" id="l-count">—</div><div class="s">com resumo da IA</div></div>
+      <div class="card accent"><div class="k"><i data-lucide="wallet"></i> Custo total das ligações</div><div class="v" id="l-total">—</div><div class="s" id="l-total-s"></div></div>
+      <div class="card gold"><div class="k"><i data-lucide="divide"></i> Custo médio por ligação</div><div class="v" id="l-avg">—</div><div class="s" id="l-avg-s">R$</div></div>
     </div>
   </div>
 
   <div class="grid2">
-    <div class="panel" style="margin:0"><h3>Custo por dia (R$)</h3><div class="chart-box"><canvas id="chartCustoDia"></canvas></div></div>
-    <div class="panel" style="margin:0"><h3>Transcrição vs. resumo (R$)</h3><div class="chart-box"><canvas id="chartOp"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3><i data-lucide="calendar-days"></i> Custo por dia (R$)</h3><div class="chart-box"><canvas id="chartCustoDia"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3><i data-lucide="mic"></i> Transcrição vs. resumo (R$)</h3><div class="chart-box"><canvas id="chartOp"></canvas></div></div>
   </div>
 
   <div class="grid2">
-    <div class="panel" style="margin:0"><h3>Custo por modelo (R$)</h3><div class="chart-box"><canvas id="chartModelo"></canvas></div></div>
-    <div class="panel" style="margin:0"><h3>Tendência do custo médio por ligação (R$)</h3><div class="chart-box"><canvas id="chartTend"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3><i data-lucide="cpu"></i> Custo por modelo (R$)</h3><div class="chart-box"><canvas id="chartModelo"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3><i data-lucide="trending-up"></i> Tendência do custo médio por ligação (R$)</h3><div class="chart-box"><canvas id="chartTend"></canvas></div></div>
   </div>
 
   <div class="grid2">
-    <div class="panel" style="margin:0"><h3>Custo por fonte (R$)</h3><div class="chart-box"><canvas id="chartFonte"></canvas></div></div>
+    <div class="panel" style="margin:0"><h3><i data-lucide="layers"></i> Custo por fonte (R$)</h3><div class="chart-box"><canvas id="chartFonte"></canvas></div></div>
     <div class="panel" style="margin:0">
-      <h3>Por fonte — no período</h3>
+      <h3><i data-lucide="layers"></i> Por fonte — no período</h3>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>Fonte</th><th class="right">Itens</th><th class="right">Custo R$</th><th class="right">%</th></tr></thead>
@@ -420,7 +450,7 @@ body.win-max .titlebar .ic-restore{display:inline}
 
   <div class="grid2">
     <div class="panel" style="margin:0">
-      <h3>Gasto por ramal / usuário — no período</h3>
+      <h3><i data-lucide="users"></i> Gasto por ramal / usuário — no período</h3>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Ligações</th><th class="right">Custo R$</th></tr></thead>
@@ -428,11 +458,11 @@ body.win-max .titlebar .ic-restore{display:inline}
         </table>
       </div>
     </div>
-    <div class="panel" style="margin:0"><h3>Dias mais caros</h3><ul class="rank" id="ranking"><li class="muted">—</li></ul></div>
+    <div class="panel" style="margin:0"><h3><i data-lucide="flame"></i> Dias mais caros</h3><ul class="rank" id="ranking"><li class="muted">—</li></ul></div>
   </div>
 
   <div class="panel">
-    <h3>Uso por usuário — hoje</h3>
+    <h3><i data-lucide="clock"></i> Uso por usuário — hoje</h3>
     <div style="overflow:auto">
       <table>
         <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Chamadas</th><th class="right">Tokens</th><th class="right">Min (Deepgram)</th><th class="right">Custo R$</th></tr></thead>
@@ -442,7 +472,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <div class="panel">
-    <h3>Custo por dia</h3>
+    <h3><i data-lucide="table"></i> Custo por dia</h3>
     <div style="overflow:auto">
       <table>
         <thead><tr>
@@ -459,7 +489,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <div class="panel">
-    <h3>Detalhe por modelo e operação (todo o período)</h3>
+    <h3><i data-lucide="list"></i> Detalhe por modelo e operação (todo o período)</h3>
     <div style="overflow:auto">
       <table>
         <thead><tr><th>Modelo</th><th>Operação</th><th class="right">Tokens entrada</th><th class="right">Tokens saída</th><th class="right">Chamadas</th><th class="right">Custo US$</th><th class="right">Custo R$</th></tr></thead>
@@ -472,10 +502,10 @@ body.win-max .titlebar .ic-restore{display:inline}
 
   <div id="view-feedback" class="hidden">
   <div class="panel">
-    <h3>Feedback da IA</h3>
+    <h3><i data-lucide="message-square"></i> Feedback da IA</h3>
     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-      <button class="mini-btn" id="fb-csv" title="Baixar em CSV (abre no Excel)">⬇ Exportar CSV</button>
-      <button class="mini-btn" id="fb-json" title="Baixar em JSON (dados brutos)">⬇ Exportar JSON</button>
+      <button class="mini-btn" id="fb-csv" title="Baixar em CSV (abre no Excel)"><i data-lucide="file-text"></i> Exportar CSV</button>
+      <button class="mini-btn" id="fb-json" title="Baixar em JSON (dados brutos)"><i data-lucide="file-json"></i> Exportar JSON</button>
       <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);cursor:pointer" title="Mostra e exporta só o feedback do prompt em uso (ignora o dos prompts antigos)"><input type="checkbox" id="fb-so-atual" checked> Só do prompt atual</label>
     </div>
     <div id="fb-stats" class="muted" style="margin-bottom:12px">Carregando…</div>
@@ -491,7 +521,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   <!-- Novidades do painel de custos (changelog proprio; aparece ao acessar) -->
   <div id="nov-overlay" class="nov-ov hidden">
     <div class="nov-card">
-      <div class="nov-h"><b>✨ Novidades do painel</b><button id="nov-x" title="Fechar">✕</button></div>
+      <div class="nov-h"><b><i data-lucide="sparkles"></i> Novidades do painel</b><button id="nov-x" title="Fechar"><i data-lucide="x"></i></button></div>
       <div id="nov-list" class="nov-l"></div>
       <div class="nov-f"><button class="mini-btn" id="nov-ok">Entendi</button></div>
     </div>
@@ -499,8 +529,14 @@ body.win-max .titlebar .ic-restore{display:inline}
 </div>
 
 <script>
+// Desenha/redesenha os <i data-lucide> que ainda nao viraram <svg>. Precisa ser
+// chamado depois de todo innerHTML que injeta icone (tabelas, novidades, KPIs).
+function icones(){try{if(window.lucide&&lucide.createIcons)lucide.createIcons();}catch(e){}}
+
 var THEME_KEY="painel-tema";
-function setTheme(t){document.documentElement.setAttribute("data-theme",t);document.getElementById("tema").textContent=t==="dark"?"☀️":"🌙";try{localStorage.setItem(THEME_KEY,t)}catch(e){}}
+// O icone do botao (sol/lua) e trocado por CSS a partir do data-theme — nao
+// mexer no conteudo aqui, senao apaga os <svg> ja renderizados pelo lucide.
+function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{localStorage.setItem(THEME_KEY,t)}catch(e){}}
 setTheme((function(){try{return localStorage.getItem(THEME_KEY)||"dark"}catch(e){return "dark"}})());
 document.getElementById("tema").onclick=function(){setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");if(DADOS)render()};
 
@@ -578,17 +614,20 @@ async function carregar(){
 
 // ---- Novidades do painel de custos (changelog proprio, so deste painel) ----
 // Bump PAINEL_NOV_VER quando adicionar novidades -> reaparece 1x ao acessar.
-var PAINEL_NOV_VER="2026-07";
+var PAINEL_NOV_VER="2026-07b";
+// ic = nome do icone no lucide (mesma biblioteca do app).
 var PAINEL_NOV=[
-  {ic:"📄",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
-  {ic:"📊",tx:"Exportação em <b>Excel com abas</b> (uma aba por seção), com números de verdade — dá pra somar e ordenar."},
-  {ic:"📆",tx:"Seção <b>Por mês</b>: comparativo mês a mês com variação % em relação ao mês anterior."},
-  {ic:"💬",tx:"Aba <b>Feedback da IA</b> com exportação em <b>CSV/JSON</b> e estatísticas (👍/👎, divergências, tags)."},
-  {ic:"🔤",tx:"Correção de <b>acentos</b> nos arquivos exportados (abrem certinho no Excel, sem “Ã§”)."}
+  {ic:"file-text",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
+  {ic:"file-spreadsheet",tx:"Exportação em <b>Excel com abas</b> (uma aba por seção), com números de verdade — dá pra somar e ordenar."},
+  {ic:"calendar-days",tx:"Seção <b>Por mês</b>: comparativo mês a mês com variação % em relação ao mês anterior."},
+  {ic:"message-square",tx:"Aba <b>Feedback da IA</b> com exportação em <b>CSV/JSON</b> e estatísticas (positivo/negativo, divergências, tags)."},
+  {ic:"type",tx:"Correção de <b>acentos</b> nos arquivos exportados (abrem certinho no Excel, sem “Ã§”)."},
+  {ic:"palette",tx:"Painel com os <b>mesmos ícones do aplicativo</b> (Lucide), no lugar dos emojis."}
 ];
 function renderNovidadesPainel(){
   var l=document.getElementById("nov-list");
-  if(l)l.innerHTML=PAINEL_NOV.map(function(n){return '<div class="nov-it"><span class="em">'+n.ic+'</span><span class="tx">'+n.tx+'</span></div>';}).join("");
+  if(l)l.innerHTML=PAINEL_NOV.map(function(n){return '<div class="nov-it"><span class="em"><i data-lucide="'+n.ic+'"></i></span><span class="tx">'+n.tx+'</span></div>';}).join("");
+  icones();
 }
 function abrirNovidadesPainel(){renderNovidadesPainel();var o=document.getElementById("nov-overlay");if(o)o.classList.remove("hidden");}
 function fecharNovidadesPainel(){var o=document.getElementById("nov-overlay");if(o)o.classList.add("hidden");}
@@ -678,10 +717,12 @@ function renderFeedback(itens){
   var pct=function(n,d){return d>0?Math.round(n/d*100)+"%":"—";};
   var topTags=Object.keys(tagCount).sort(function(a,b){return tagCount[b]-tagCount[a];}).slice(0,4)
     .map(function(t){return escFb(t)+" ("+tagCount[t]+")";}).join(", ")||"—";
-  if(st){st.innerHTML=verInfo+"<br><b>"+itens.length+"</b> exibidos · 👍 <b>"+up+"</b> · 👎 <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
+  if(st){st.innerHTML=verInfo+"<br><b>"+itens.length+"</b> exibidos · <span class='av-up'><i data-lucide='thumbs-up'></i></span> <b>"+up+"</b> · <span class='av-down'><i data-lucide='thumbs-down'></i></span> <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
   if(tb){tb.innerHTML=itens.map(function(f){
     var data="";try{data=new Date(f.ts).toLocaleString("pt-BR");}catch(e){data=escFb(f.ts);}
-    var aval=f.rating==="up"?"👍":(f.rating==="down"?"👎":(f.tipo==="implicito"?"(implícito)":"—"));
+    var aval=f.rating==="up"?"<span class='av-up'><i data-lucide='thumbs-up'></i></span>"
+      :(f.rating==="down"?"<span class='av-down'><i data-lucide='thumbs-down'></i></span>"
+      :(f.tipo==="implicito"?"(implícito)":"—"));
     var pv=f.promptVersion||"—";
     var pvCell=(f.promptVersion&&f.promptVersion!==PROMPT_VERSION_ATUAL)?'<span title="prompt antigo" style="color:var(--muted)">'+escFb(pv)+'</span>':escFb(pv);
     var dv=f.divergencias||{};var divs=[];
@@ -693,6 +734,7 @@ function renderFeedback(itens){
     (f.tags||[]).forEach(function(t){divs.push(escFb(t));});
     return "<tr><td>"+escFb(data)+"</td><td>"+escFb(f.usuario||f.ramal||"—")+"</td><td>"+escFb(f.origem||"—")+"</td><td>"+pvCell+"</td><td>"+aval+"</td><td>"+(divs.join("; ")||"—")+"</td><td>"+escFb(f.comentario||"")+"</td></tr>";
   }).join("");}
+  icones(); // avaliacoes e stats sao <i data-lucide> recem-injetados
 }
 
 function render(){
@@ -716,7 +758,7 @@ function render(){
   var custoAtual=t.custoUsd*c;
   var brlS="câmbio R$ "+Number(c).toFixed(2);
   if(custoAnt>0){var delta=(custoAtual-custoAnt)/custoAnt*100;var up=delta>=0;
-    brlS+=' · <span class="delta '+(up?"up":"down")+'">'+(up?"▲":"▼")+" "+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
+    brlS+=' · <span class="delta '+(up?"up":"down")+'"><i data-lucide="'+(up?"trending-up":"trending-down")+'"></i> '+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
   document.getElementById("c-brl-s").innerHTML=brlS;
 
   // Card do Deepgram: créditos restantes (destaque) + uso do período (sub).
@@ -807,6 +849,8 @@ function render(){
   var linhas=DADOS.linhas||[];
   if(!linhas.length){tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum uso registrado ainda.</td></tr>';}
   else{tb.innerHTML=linhas.map(function(l){var ehMin=/^deepgram/i.test(l.model);var ent=ehMin?(fmtInt.format(Math.round((l.audioSec||0)/60))+" min"):fmtInt.format(l.inputTokens);var sai=ehMin?"—":fmtInt.format(l.outputTokens);return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+ent+"</td><td class='right'>"+sai+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*c)+"</td></tr>"}).join("");}
+
+  icones(); // KPIs/tabelas acabaram de reescrever HTML com <i data-lucide>
 }
 
 function baseOpt(muted,grid,money){return {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}}
@@ -991,6 +1035,7 @@ document.getElementById("refresh").onclick=carregar;
   if(window.winCtl.onEstado)window.winCtl.onEstado(setMax);
 })();
 
+icones(); // primeira passada: icones estaticos (topbar, abas, cards, botoes)
 if(senha())carregar();
 </script>
 </body>
