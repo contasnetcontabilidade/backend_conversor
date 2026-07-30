@@ -35,6 +35,11 @@ export interface FeedbackEntry {
   // implicito
   divergencias?: {
     clienteMudou?: boolean;
+    // Separa os dois casos que o "clienteMudou" sozinho confunde:
+    // - tinha sugestao e o usuario TROCOU -> a IA/resolver errou de verdade;
+    // - nao veio sugestao nenhuma          -> so nao achou (nao e erro de prompt).
+    clienteTinhaSugestao?: boolean;
+    clienteVia?: string; // "telefone" | "ia_mencao" | "interno" | ""
     setorMudou?: boolean;
     executorMudou?: boolean;
     assuntoSugerido?: string; // categoria (nao sensivel)

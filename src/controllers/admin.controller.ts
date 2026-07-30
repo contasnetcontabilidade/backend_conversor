@@ -54,6 +54,8 @@ export async function feedbackController(req: Request, res: Response) {
     comentario: str(b.comentario).slice(0, 1000) || undefined,
     divergencias: {
       clienteMudou: bool(dv.clienteMudou),
+      clienteTinhaSugestao: bool(dv.clienteTinhaSugestao),
+      clienteVia: str(dv.clienteVia).slice(0, 20),
       setorMudou: bool(dv.setorMudou),
       executorMudou: bool(dv.executorMudou),
       assuntoSugerido: str(dv.assuntoSugerido).slice(0, 120),
@@ -818,7 +820,8 @@ function exportarFeedback(fmt){
   }
   // CSV com ";" e BOM: e o que o Excel pt-BR abre certinho (acentos inclusive).
   var cols=["Data","PromptVersao","Tipo","Origem","Usuario","Ramal","Modelo","Avaliacao","Tags","Comentario",
-    "DescricaoEditada","IA_OK","ClienteMudou","AssuntoMudou","AssuntoSugerido","AssuntoFinal",
+    "DescricaoEditada","IA_OK","ClienteMudou","ClienteTinhaSugestao","ClienteVia",
+    "AssuntoMudou","AssuntoSugerido","AssuntoFinal",
     "SetorMudou","ExecutorMudou","Id"];
   var linhas=[cols.join(";")];
   itens.forEach(function(f){
@@ -827,7 +830,8 @@ function exportarFeedback(fmt){
     linhas.push([data,f.promptVersion||"",f.tipo||"",f.origem||"",f.usuario||"",f.ramal||"",f.modelo||"",
       f.rating||"",(f.tags||[]).join(", "),f.comentario||"",
       f.descEditada?"sim":"nao",f.iaOk===false?"nao":"sim",
-      dv.clienteMudou?"sim":"nao",dv.assuntoMudou?"sim":"nao",
+      dv.clienteMudou?"sim":"nao",dv.clienteTinhaSugestao?"sim":"nao",dv.clienteVia||"",
+      dv.assuntoMudou?"sim":"nao",
       dv.assuntoSugerido||"",dv.assuntoFinal||"",
       dv.setorMudou?"sim":"nao",dv.executorMudou?"sim":"nao",f.id||""
     ].map(csvCampo).join(";"));
@@ -847,17 +851,27 @@ function renderFeedback(itens){
   var verInfo="Prompt atual: <b>"+escFb(PROMPT_VERSION_ATUAL)+"</b> · <b>"+doAtual+"</b> de "+FEEDBACK.length+" feedbacks são deste prompt";
   if(!itens.length){ if(st)st.innerHTML=verInfo+" · sem itens para exibir."; if(tb)tb.innerHTML='<tr><td colspan="7" class="muted">Sem feedback para o filtro atual.</td></tr>'; return; }
   var up=0,down=0,editada=0,implic=0,dvC=0,dvA=0,dvS=0,dvE=0,tagCount={};
+  // Cliente tem DOIS modos de falha que nao devem ser somados no mesmo numero:
+  // errou (tinha sugestao e o usuario trocou) x nao achou (nao veio sugestao).
+  var cliComSug=0,cliErrou=0,cliSemSug=0;
   itens.forEach(function(f){
     if(f.rating==="up")up++; if(f.rating==="down")down++;
     if(f.descEditada)editada++;
     if(f.tipo==="implicito"){implic++;var dv=f.divergencias||{};
-      if(dv.clienteMudou)dvC++; if(dv.assuntoMudou)dvA++; if(dv.setorMudou)dvS++; if(dv.executorMudou)dvE++;}
+      if(dv.clienteMudou)dvC++; if(dv.assuntoMudou)dvA++; if(dv.setorMudou)dvS++; if(dv.executorMudou)dvE++;
+      // Campo novo (2026-07-30): feedback antigo nao tem, entao so conta quem tem.
+      if(dv.clienteTinhaSugestao===true){cliComSug++;if(dv.clienteMudou)cliErrou++;}
+      else if(dv.clienteTinhaSugestao===false)cliSemSug++;}
     (f.tags||[]).forEach(function(t){tagCount[t]=(tagCount[t]||0)+1;});
   });
   var pct=function(n,d){return d>0?Math.round(n/d*100)+"%":"—";};
   var topTags=Object.keys(tagCount).sort(function(a,b){return tagCount[b]-tagCount[a];}).slice(0,4)
     .map(function(t){return escFb(t)+" ("+tagCount[t]+")";}).join(", ")||"—";
-  if(st){st.innerHTML=verInfo+"<br><b>"+itens.length+"</b> exibidos · <span class='av-up'><i data-lucide='thumbs-up'></i></span> <b>"+up+"</b> · <span class='av-down'><i data-lucide='thumbs-down'></i></span> <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
+  var detalheCliente=(cliComSug+cliSemSug)>0
+    ? " <span class='muted'>(destes: errou "+pct(cliErrou,cliComSug)+" dos "+cliComSug
+      +" com sugestão · sem sugestão em "+cliSemSug+")</span>"
+    : "";
+  if(st){st.innerHTML=verInfo+"<br><b>"+itens.length+"</b> exibidos · <span class='av-up'><i data-lucide='thumbs-up'></i></span> <b>"+up+"</b> · <span class='av-down'><i data-lucide='thumbs-down'></i></span> <b>"+down+"</b> · descrição editada em <b>"+pct(editada,itens.length)+"</b> · divergência (dos "+implic+" implícitos): cliente "+pct(dvC,implic)+detalheCliente+", assunto "+pct(dvA,implic)+", setor "+pct(dvS,implic)+", executor "+pct(dvE,implic)+" · tags: "+topTags;}
   if(tb){tb.innerHTML=itens.map(function(f){
     var data="";try{data=new Date(f.ts).toLocaleString("pt-BR");}catch(e){data=escFb(f.ts);}
     var aval=f.rating==="up"?"<span class='av-up'><i data-lucide='thumbs-up'></i></span>"
@@ -867,7 +881,9 @@ function renderFeedback(itens){
     var pvCell=(f.promptVersion&&f.promptVersion!==PROMPT_VERSION_ATUAL)?'<span title="prompt antigo" style="color:var(--muted)">'+escFb(pv)+'</span>':escFb(pv);
     var dv=f.divergencias||{};var divs=[];
     if(dv.assuntoMudou)divs.push("assunto: "+escFb(dv.assuntoSugerido||"?")+" → "+escFb(dv.assuntoFinal||"?"));
-    if(dv.clienteMudou)divs.push("cliente trocado");
+    if(dv.clienteMudou)divs.push(dv.clienteTinhaSugestao===false
+      ? "cliente: <b>não sugerido</b> (usuário escolheu)"
+      : "cliente trocado"+(dv.clienteVia?" (veio de "+escFb(dv.clienteVia)+")":""));
     if(dv.setorMudou)divs.push("setor trocado");
     if(dv.executorMudou)divs.push("executor trocado");
     if(f.descEditada)divs.push("descrição editada");

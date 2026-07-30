@@ -18,7 +18,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-07-28";
+export const PROMPT_VERSION = "2026-07-30";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -328,18 +328,30 @@ MAIS ATUAL no resumo, mas registre as pendencias que continuam em aberto.\n`
   const prompt = `${contexto}${blocoConversa}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
+*** NAO REPITA A MESMA INFORMACAO ***
+"resumo", "pontos_principais" e "providencias_sugeridas" NAO sao lidos separadamente: eles sao
+colados NUM UNICO TEXTO na descricao do chamado, um logo abaixo do outro. Quem abre o chamado le
+os tres de uma vez. Entao cada informacao aparece UMA VEZ SO, no campo mais adequado — repetir o
+mesmo fato em dois campos deixa o chamado arrastado e e o que mais incomoda quem revisa.
+
 Campos obrigatorios:
 - titulo: string (assunto curto do chamado, ate ~80 caracteres)
-- resumo: string (resumo executivo do atendimento, 2 a 5 frases: o que o cliente pediu/relatou e o desfecho/pendencia)
-- pontos_principais: string[] (os principais topicos/fatos tratados, curtos e objetivos)
-- providencias_sugeridas: string[] (acoes CONCRETAS a executar como proximo passo).
+- resumo: string (2 a 4 frases): o que foi pedido/relatado e o desfecho/pendencia.
+  Comece pelo FATO, sem preambulo — nada de "O cliente entrou em contato para...", "Trata-se de
+  um e-mail em que...", "Neste atendimento o cliente...". Prefira "Solicitou a segunda via da
+  guia de novembro; enviada no mesmo dia." a uma frase de abertura que nao informa nada.
+- pontos_principais: string[] — SO o que NAO cabe no resumo: dados objetivos que valem ficar
+  destacados (numeros, valores, competencias, prazos, documentos, matriculas, nomes de arquivos).
+  Se o resumo ja disse tudo, devolva array VAZIO. NAO reescreva o resumo em topicos.
+- providencias_sugeridas: string[] — SO acoes FUTURAS, o que ainda precisa ser feito.
+  Nao transforme em "providencia" um fato ja narrado no resumo apenas reformulando a frase.
   Sugira uma acao SEMPRE que o conteudo indicar algo que mereca ser tratado, MESMO que
   o cliente nao tenha pedido explicitamente (ex.: alerta/notificacao de sistema sobre
   pendencias ou tarefas vencidas -> "Verificar e tratar as pendencias/tarefas vencidas
   no sistema mencionado"; aviso de prazo/documento -> "Conferir o prazo e retornar ao
   cliente"). Seja concreto e curto, baseando-se SOMENTE no que aparece no conteudo (nao
-  invente dados). Deixe o array VAZIO apenas quando realmente nao houver nada a fazer
-  (ex.: um simples agradecimento ou confirmacao, sem qualquer acao pertinente).
+  invente dados). Deixe o array VAZIO quando o pedido ja foi atendido dentro do proprio
+  atendimento ou quando nao houver nada a fazer (ex.: agradecimento, confirmacao).
 - cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique QUEM E ATENDIDO — a empresa
   (ou a pessoa fisica) do outro lado do atendimento. Ordem de prioridade: (1) o CNPJ/CPF, se aparecer;
   (2) a ASSINATURA ${fontePalavra}; (3) quando houver e-mail do remetente, o DOMINIO dele
