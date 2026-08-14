@@ -120,10 +120,10 @@ export async function getEmailByToken(token: string) {
 // Mapa messageId -> conta (e-mail). Guardado no preview para o criar saber de qual
 // conta remover o marcador depois. TTL de 6h (preview e criar sao quase imediatos).
 export async function salvarContaDoEmail(messageId: string, email: string) {
-  await setValue(`gmail:acct:${messageId}`, email, 6 * 3600);
+  await salvarContaDoItem(messageId, email, "gmail");
 }
 export async function getContaDoEmail(messageId: string) {
-  return getValue(`gmail:acct:${messageId}`);
+  return getContaDoItem(messageId, "gmail");
 }
 
 export async function saveChannelId(id: string) {
@@ -323,4 +323,153 @@ export async function drainEvents(): Promise<CallEndedEvent[]> {
   const drained = memEvents.slice().reverse();
   memEvents = [];
   return drained;
+}
+
+// ---------------------------------------------------------------------------
+// Google Chat: escopos, cache generico, marca de "chamado gerado" e primitivas
+// atomicas usadas pela fila por espaco (chatRateLimit.ts).
+// ---------------------------------------------------------------------------
+
+// ---- Escopos OAuth concedidos por conta Google ----
+// Gravado no exchange/refresh do token (fonte da verdade) e, para contas antigas
+// conectadas antes do Chat existir, preenchido pelo tokeninfo. Sem isto o app so
+// descobriria que falta escopo levando 403 do Google no meio da tela.
+export async function saveGoogleScopes(
+  email: string,
+  scopes: string,
+  ttlSeg = 30 * 24 * 3600,
+) {
+  await setValue(`google:scopes:${email}`, scopes, ttlSeg);
+}
+export async function getGoogleScopes(email: string) {
+  return getValue(`google:scopes:${email}`);
+}
+export async function limparGoogleScopes(email: string) {
+  await delValue(`google:scopes:${email}`);
+}
+
+// ---- Cache JSON generico (usado pelo chatApi: espacos, membros, paginas) ----
+export async function cacheGet<T>(key: string): Promise<T | null> {
+  const raw = (await getValue(key)) as unknown;
+  if (raw === null || raw === undefined) return null;
+  // O cliente do Upstash ja devolve objeto quando o valor e JSON.
+  if (typeof raw === "object") return raw as T;
+  try {
+    return JSON.parse(raw as string) as T;
+  } catch {
+    return null;
+  }
+}
+export async function cacheSet(key: string, valor: unknown, ttlSeg: number) {
+  if (ttlSeg <= 0) return; // TTL 0 = cache desligado (ex.: CHAT_MSG_CACHE_TTL_SEG=0)
+  await setValue(key, JSON.stringify(valor), ttlSeg);
+}
+export async function cacheDel(key: string) {
+  await delValue(key);
+}
+
+// ---- Mapa item -> conta (e-mail), com namespace ----
+// Guardado no preview para o "criar" saber de qual conta veio o item.
+export async function salvarContaDoItem(
+  chave: string,
+  email: string,
+  ns = "gmail",
+) {
+  await setValue(`${ns}:acct:${chave}`, email, 6 * 3600);
+}
+export async function getContaDoItem(chave: string, ns = "gmail") {
+  return getValue(`${ns}:acct:${chave}`);
+}
+
+// ---- Selecao de mensagens do preview (para o "criar" marcar como feitas) ----
+export async function salvarSelecaoChat(chave: string, messageIds: string[]) {
+  await setValue(`chat:sel:${chave}`, JSON.stringify(messageIds), 6 * 3600);
+}
+export async function getSelecaoChat(chave: string): Promise<string[]> {
+  const lista = await cacheGet<string[]>(`chat:sel:${chave}`);
+  return Array.isArray(lista) ? lista : [];
+}
+
+// ---- Marca "chamado ja gerado" por mensagem do Chat ----
+// Substitui o "remover marcador" do Gmail (a Chat API nao tem write de leitura).
+// HASH messageId -> protocolo, por espaco. Vantagem sobre o localStorage do
+// e-mail: e COMPARTILHADO — se um colega ja abriu chamado daquelas mensagens,
+// todo mundo ve o "check".
+const CHAT_FEITO_TTL_SEG =
+  (Number(process.env.CHAT_FEITO_TTL_DIAS) || 90) * 24 * 3600;
+
+export async function marcarChatFeito(
+  spaceId: string,
+  messageIds: string[],
+  protocolo: string,
+): Promise<void> {
+  if (!spaceId || !messageIds?.length) return;
+  const key = `chat:feito:${spaceId}`;
+  const campos: Record<string, string> = {};
+  for (const id of messageIds) if (id) campos[id] = protocolo || "1";
+  if (!Object.keys(campos).length) return;
+  const r = getRedis();
+  if (r) {
+    await r.hset(key, campos);
+    await r.expire(key, CHAT_FEITO_TTL_SEG);
+    return;
+  }
+  const atual = (await cacheGet<Record<string, string>>(key)) || {};
+  await cacheSet(key, { ...atual, ...campos }, CHAT_FEITO_TTL_SEG);
+}
+
+export async function getChatFeitos(
+  spaceId: string,
+): Promise<Record<string, string>> {
+  if (!spaceId) return {};
+  const key = `chat:feito:${spaceId}`;
+  const r = getRedis();
+  if (r) {
+    const mapa = await r.hgetall<Record<string, string>>(key);
+    return mapa || {};
+  }
+  return (await cacheGet<Record<string, string>>(key)) || {};
+}
+
+// ---- Primitivas atomicas para a fila por espaco (chatRateLimit.ts) ----
+// Precisam ser ATOMICAS e COMPARTILHADAS: na Vercel cada instancia serverless
+// enxerga so a si mesma, entao contador em memoria de processo nao limita nada.
+export async function incrComTtl(key: string, ttlSeg: number): Promise<number> {
+  const r = getRedis();
+  if (r) {
+    const n = await r.incr(key);
+    if (n === 1) await r.expire(key, ttlSeg);
+    return n;
+  }
+  const n = Number(memGet(key) || 0) + 1;
+  mem.set(key, String(n));
+  if (n === 1) memExpiry.set(key, Date.now() + ttlSeg * 1000);
+  return n;
+}
+
+// SET NX: true se ESTE chamador criou a chave (ganhou o lock).
+export async function setSeNaoExiste(
+  key: string,
+  valor: string,
+  ttlSeg: number,
+): Promise<boolean> {
+  const r = getRedis();
+  if (r) {
+    const res = await r.set(key, valor, { nx: true, ex: ttlSeg });
+    return res === "OK";
+  }
+  if (memGet(key)) return false;
+  mem.set(key, valor);
+  memExpiry.set(key, Date.now() + ttlSeg * 1000);
+  return true;
+}
+
+export async function delValue(key: string): Promise<void> {
+  const r = getRedis();
+  if (r) {
+    await r.del(key);
+    return;
+  }
+  mem.delete(key);
+  memExpiry.delete(key);
 }
