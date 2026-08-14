@@ -44,12 +44,13 @@ export const CHAT_SCOPES = [
 // Escopo usado como sentinela de "esta conta ja autorizou o Chat".
 const CHAT_SCOPE_SENTINELA = "https://www.googleapis.com/auth/chat.messages.readonly";
 
-// Padrao DESLIGADO de proposito. Pedir um escopo cuja API ainda nao foi
-// habilitada no Google Cloud faz o Google recusar a autorizacao INTEIRA — quem
-// reconectasse perderia tambem o Gmail. Só ligar (CHAT_SCOPES_ENABLED=1) depois
-// de habilitar a Chat API e cadastrar os escopos na tela de consentimento.
+// Padrao LIGADO. Pre-requisito: a Chat API habilitada no Google Cloud e os
+// escopos cadastrados na tela de consentimento — sem isso o Google recusa a
+// autorizacao INTEIRA, e quem reconectar perde tambem o Gmail.
+// CHAT_SCOPES_ENABLED=0 e o rollback de 1 variavel: volta a pedir so o Gmail,
+// as rotas /api/chat/* respondem CHAT_SCOPE_MISSING e a aba se auto-desabilita.
 export function chatHabilitado(): boolean {
-  return String(process.env.CHAT_SCOPES_ENABLED ?? "0").trim() === "1";
+  return String(process.env.CHAT_SCOPES_ENABLED ?? "1").trim() !== "0";
 }
 
 export function escoposSolicitados(comChat = chatHabilitado()): string[] {
