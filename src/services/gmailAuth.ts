@@ -260,7 +260,9 @@ export async function getEscoposConcedidos(email: string): Promise<string[]> {
       await saveGoogleScopes(email, bruto, 24 * 3600).catch(() => undefined);
     }
   }
-  return String(bruto || "").split(/s+/).filter(Boolean);
+  return String(bruto || "")
+    .split(/\s+/)
+    .filter(Boolean);
 }
 
 export async function temEscopoChat(email: string): Promise<boolean> {
