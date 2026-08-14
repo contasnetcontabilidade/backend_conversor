@@ -294,7 +294,13 @@ async function detalharEspaco(
     const nomes = Object.values(await resolverNomes(email, ids)).filter(Boolean);
     if (nomes.length) espaco.nome = nomes.slice(0, 3).join(", ");
   }
-  await cacheSet(chaveCache, espaco, 24 * 3600).catch(() => undefined);
+  // Se o nome nao pode ser resolvido, cacheia por pouco tempo: assim a conversa
+  // ganha o nome certo logo depois de o admin liberar o diretorio, em vez de
+  // ficar 24h presa em "Mensagem direta".
+  const resolvido = !/^(Conversa|Mensagem direta)$/.test(espaco.nome);
+  await cacheSet(chaveCache, espaco, resolvido ? 24 * 3600 : 3600).catch(
+    () => undefined,
+  );
   return espaco;
 }
 
@@ -366,6 +372,12 @@ export async function listarEspacos(
 const PEOPLE_API = "https://people.googleapis.com/v1";
 const NOME_TTL_SEG = 7 * 24 * 3600; // nome de pessoa muda raramente
 const PEOPLE_LOTE = 200; // teto do batchGet
+// Cache NEGATIVO: quando o perfil de alguem nao esta visivel, a People API
+// responde 200 com um objeto vazio. Sem marcar isso, toda pagina de mensagens
+// refaria a mesma consulta inutil. Curto de proposito: assim que o admin ligar o
+// compartilhamento de contatos, os nomes aparecem sozinhos em ate 1 hora.
+const NOME_VAZIO_TTL_SEG = 3600;
+const SEM_NOME = " "; // marcador interno, nunca exibido
 
 // Ids dos membros de um espaco (so os ids; nomes vem da People API).
 async function membrosDoEspaco(
@@ -402,6 +414,7 @@ export async function resolverNomes(
 
   for (const id of unicos) {
     const nome = await cacheGet<string>(`chat:nome:${id}`).catch(() => null);
+    if (nome === SEM_NOME) continue; // ja se sabe que o perfil nao esta visivel
     if (nome) mapa[id] = nome;
     else faltando.push(id);
   }
@@ -418,10 +431,9 @@ export async function resolverNomes(
       url.searchParams.append("resourceNames", id.replace(/^users\//, "people/"));
     }
     url.searchParams.set("personFields", "names,emailAddresses");
-    // Sem DOMAIN_PROFILE os colegas do Workspace nao sao encontrados — e sao
-    // justamente eles que aparecem no Chat interno.
-    url.searchParams.append("sources", "READ_SOURCE_TYPE_PROFILE");
-    url.searchParams.append("sources", "READ_SOURCE_TYPE_DOMAIN_PROFILE");
+    // Sem passar "sources": o padrao ja devolve o perfil do dominio (que e o
+    // caso dos colegas no Chat interno). Nao existe READ_SOURCE_TYPE_DOMAIN_PROFILE
+    // — passar esse valor faz a chamada inteira falhar com 400.
 
     try {
       const resp = await fetch(url.toString(), {
@@ -448,9 +460,16 @@ export async function resolverNomes(
           String(r.person?.emailAddresses?.[0]?.value || "")
             .split("@")[0]
             .trim();
-        if (pid && nome) {
+        if (!pid) continue;
+        if (nome) {
           mapa[pid] = nome;
           await cacheSet(`chat:nome:${pid}`, nome, NOME_TTL_SEG).catch(
+            () => undefined,
+          );
+        } else {
+          // 200 com pessoa vazia = perfil nao visivel para esta conta. Acontece
+          // quando o admin nao ligou o compartilhamento de contatos do dominio.
+          await cacheSet(`chat:nome:${pid}`, SEM_NOME, NOME_VAZIO_TTL_SEG).catch(
             () => undefined,
           );
         }
