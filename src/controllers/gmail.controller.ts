@@ -4,7 +4,9 @@ import { AppError, getErrorMessage } from "../lib/errors";
 import {
   buildAuthorizeUrl,
   exchangeCodeForTokens,
+  temEscopoChat,
 } from "../services/gmailAuth";
+import { garantirSecaoChamado } from "../services/chatApi";
 import {
   garantirMarcador,
   listarEmailsMarcados,
@@ -16,15 +18,13 @@ import {
 import {
   getChamadoCriado,
   getContaDoEmail,
-  getEmailByToken,
-  getGmailAccess,
-  getGmailRefresh,
   liberarCriacao,
   reservarCriacao,
   salvarChamadoCriado,
   salvarContaDoEmail,
   setPerfilToken,
 } from "../services/store";
+import { resolverContaGoogle } from "../services/googleConta";
 import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
 import { registrarCustoChamado } from "../services/custoChamados";
 import {
@@ -72,9 +72,13 @@ function campoId(
 // OAuth (por usuario) — o app abre estas paginas numa janela e captura o token
 // ---------------------------------------------------------------------------
 
-export async function gmailOAuthStartController(_req: Request, res: Response) {
+export async function gmailOAuthStartController(req: Request, res: Response) {
   const state = (process.env.GMAIL_OAUTH_STATE || randomUUID()).trim();
-  res.redirect(buildAuthorizeUrl(state));
+  // ?chat=1 forca os escopos do Google Chat no consentimento (e o que o botao
+  // "Reconectar conta Google" da aba Chat usa); ?chat=0 pede so o Gmail.
+  const chatParam = typeof req.query.chat === "string" ? req.query.chat.trim() : "";
+  const comChat = chatParam ? chatParam !== "0" : undefined;
+  res.redirect(buildAuthorizeUrl(state, { comChat }));
 }
 
 export async function gmailOAuthCallbackController(req: Request, res: Response) {
@@ -97,6 +101,12 @@ export async function gmailOAuthCallbackController(req: Request, res: Response) 
   const { email } = await exchangeCodeForTokens(code);
   // Cria o marcador "Chamado" na conta assim que ela conecta (best-effort).
   await garantirMarcador(email).catch(() => undefined);
+  // Mesma ideia no Google Chat: cria a SECAO "Chamado" na barra lateral, para o
+  // usuario so precisar arrastar as conversas para la. So tenta se a conta
+  // realmente autorizou o Chat — senao seria um 403 garantido a cada login.
+  if (await temEscopoChat(email).catch(() => false)) {
+    await garantirSecaoChamado(email).catch(() => undefined);
+  }
   const profileToken = randomUUID();
   await setPerfilToken(profileToken, email);
   // Redireciona para uma pagina que o app captura (token + e-mail na URL).
@@ -124,32 +134,6 @@ export async function gmailOAuthDoneController(req: Request, res: Response) {
 // GET /gmail/emails?profileToken= — lista os e-mails marcados
 // ---------------------------------------------------------------------------
 
-// Resolve a conta Google do usuario: 1) pelo profileToken (opaco); 2) fallback
-// pelo e-mail enviado pelo app, se essa conta tiver tokens salvos (esta conectada).
-async function resolverContaGmail(
-  profileToken?: string,
-  emailParam?: string,
-): Promise<string> {
-  let email = profileToken
-    ? await getEmailByToken(profileToken).catch(() => null)
-    : null;
-  if (!email && emailParam) {
-    const e = String(emailParam).trim().toLowerCase();
-    const conectada =
-      (await getGmailRefresh(e).catch(() => null)) ||
-      (await getGmailAccess(e).catch(() => null));
-    if (e && conectada) email = e;
-  }
-  if (!email) {
-    throw new AppError({
-      statusCode: 401,
-      code: "GMAIL_PERFIL_NAO_CONECTADO",
-      message: "Conta Google nao conectada. Conecte em Configurar Perfil.",
-    });
-  }
-  return email;
-}
-
 export async function gmailEmailsController(req: Request, res: Response) {
   const profileToken =
     typeof req.query.profileToken === "string"
@@ -157,7 +141,7 @@ export async function gmailEmailsController(req: Request, res: Response) {
       : "";
   const emailParam =
     typeof req.query.email === "string" ? req.query.email.trim() : "";
-  const email = await resolverContaGmail(profileToken, emailParam);
+  const email = await resolverContaGoogle(profileToken, emailParam);
   const emails = await listarEmailsMarcados(email);
   res.status(200).json({ ok: true, data: { conta: email, emails } });
 }
@@ -188,7 +172,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
     });
   }
   const emailParam = getOptionalString(body, "email");
-  const email = await resolverContaGmail(profileToken || "", emailParam);
+  const email = await resolverContaGoogle(profileToken || "", emailParam);
 
   // Chave para idempotencia/marcador/conta: threadId (conversa inteira) quando
   // houver; senao o messageId (e-mail unico). Guarda a conta para o "criar".

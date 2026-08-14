@@ -43,6 +43,13 @@ import {
   gmailOAuthStartController,
   gmailPreviewController,
 } from "../controllers/gmail.controller";
+import {
+  chatCriarController,
+  chatMessagesController,
+  chatPreviewController,
+  chatSpacesController,
+  chatStatusController,
+} from "../controllers/chat.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { appAuth } from "../middlewares/appAuth";
 import { asyncHandler } from "../utils/http";
@@ -103,6 +110,15 @@ apiRouter.get("/gmail/oauth/done", asyncHandler(gmailOAuthDoneController));
 apiRouter.get("/gmail/emails", asyncHandler(gmailEmailsController));
 apiRouter.post("/gmail/chamado/preview", asyncHandler(gmailPreviewController));
 apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
+
+// --- Integracao Google Chat (chamados a partir de conversas do Chat) ---
+// Usa o MESMO OAuth do Gmail (a conta Google e a mesma); o que muda sao os
+// escopos de Chat, pedidos no mesmo consentimento.
+apiRouter.get("/chat/status", asyncHandler(chatStatusController));
+apiRouter.get("/chat/spaces", asyncHandler(chatSpacesController));
+apiRouter.get("/chat/messages", asyncHandler(chatMessagesController));
+apiRouter.post("/chat/chamado/preview", asyncHandler(chatPreviewController));
+apiRouter.post("/chat/chamado/criar", asyncHandler(chatCriarController));
 
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);
