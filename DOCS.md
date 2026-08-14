@@ -509,3 +509,69 @@ Códigos que o **desktop** entende e traduz para o usuário: `CHAMADO_EM_CRIACAO
 ---
 
 *Este documento reflete o código em `src/`. Ao mudar rotas, resolvers ou variáveis de ambiente, atualize as seções 4, 6 e 7 e o `.env.example`.*
+
+---
+
+## Integração Google Chat (chamados a partir de conversas do Chat)
+
+Espelha a integração do Gmail: mesma conta Google, mesmo cliente OAuth, mesmo modal
+de revisão no app. O que muda são os escopos e a fonte do conteúdo.
+
+### Como o usuário usa
+
+1. No **Google Chat**, ele move a conversa para a seção **Chamado** (três pontinhos →
+   *Mover para a seção*). A seção é criada automaticamente pelo app no login.
+2. Na aba **Chat** do app, a conversa aparece. Ele abre, marca as mensagens por
+   checkbox (clique, Shift+clique para intervalo, "Marcar tudo", "Marcar período")
+   e clica em **Gerar chamado**.
+3. Daí em diante o fluxo é idêntico ao do e-mail: IA resume → modal de revisão →
+   `POST /chamados` no Suite360.
+
+A seção do Chat é o análogo exato do marcador `Chamado` do Gmail — inclusive na
+implementação (`garantirSecaoChamado` espelha `garantirMarcador`).
+
+### Arquivos
+
+| Arquivo | Papel |
+|---|---|
+| `src/services/chatApi.ts` | Cliente REST do Google Chat: seção, espaços, mensagens, membros, texto para a IA, chave de idempotência |
+| `src/services/chatRateLimit.ts` | Fila por espaço (token bucket no Redis) + single-flight |
+| `src/controllers/chat.controller.ts` | `/status`, `/spaces`, `/messages`, `/chamado/preview`, `/chamado/criar` |
+| `src/services/googleConta.ts` | `resolverContaGoogle`, compartilhado com o Gmail |
+| `src/services/gmailAuth.ts` | `CHAT_SCOPES`, `temEscopoChat`, persistência dos escopos concedidos |
+
+### Endpoints
+
+| Método | Rota | O que faz |
+|---|---|---|
+| GET | `/api/chat/status` | A conta já autorizou o Chat? Devolve também `pageSize` e a URL de reconexão |
+| GET | `/api/chat/spaces?fonte=secao\|todas` | Conversas da seção `Chamado` (padrão) ou todas |
+| GET | `/api/chat/messages?spaceId=&pageSize=&pageToken=&desde=` | Uma página de mensagens (mais recentes primeiro) + marca `feito` |
+| POST | `/api/chat/chamado/preview` | Lê a seleção, resume com a IA e devolve **o mesmo shape** do preview de e-mail |
+| POST | `/api/chat/chamado/criar` | Cria no Suite360, com idempotência e marca de "chamado gerado" |
+
+### Decisões que valem saber
+
+- **Auth de usuário (3LO), sem bot.** Para leitura, o Google não exige criar um Chat
+  app nem preencher a aba "Configuration" — basta habilitar a API e ter o OAuth client.
+  Com auth de usuário o critério de acesso é a participação do próprio usuário no espaço.
+- **`chat.messages.readonly` é escopo RESTRITO**, mas a tela de consentimento do projeto
+  é **Interna**, o que dispensa verificação do Google e avaliação CASA. Mesmo caminho do
+  `gmail.modify`, que também é restrito e já roda em produção.
+- **Re-consentimento**: ao ligar a integração, toda conta já conectada precisa reconectar
+  uma vez. O Gmail continua funcionando enquanto isso. O app detecta pelo
+  `/api/chat/status` e mostra a tela de reconexão.
+- **A conversa ENTRA na descrição do chamado** (ao contrário do e-mail, onde o corpo é
+  descartado). O motivo está no comentário de `montarDescricaoChat` em `suite360.ts`.
+- **Cota**: a do projeto (3.000 chamadas/min) sobra folgada; a real é **15 leituras/s por
+  espaço**, compartilhada com outros apps. Três camadas protegem: cache de página
+  (coalesce vários atendentes na mesma conversa), fila no Redis (`comVagaNoEspaco`,
+  teto 12, espera até 4s) e backoff em 429.
+- **Não existe "mensagem favoritada" na API do Chat** — não há filtro equivalente a
+  estrela. Por isso a seleção é por checkbox.
+
+### Variáveis de ambiente
+
+Todas documentadas no `.env.example`, seção "Integracao Google Chat". As principais:
+`CHAT_SCOPES_ENABLED` (rollback de 1 variável), `CHAT_SECAO`, `CHAT_PAGE_SIZE`,
+`CHAT_RPS_ESPACO`, `CHAT_MSG_CACHE_TTL_SEG`, `SUITE360_ORIGEM_CHAT_ID`.
