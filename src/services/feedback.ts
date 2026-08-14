@@ -22,7 +22,7 @@ let mem: string[] = [];
 export interface FeedbackEntry {
   ts: string;
   tipo: "explicito" | "implicito";
-  origem: string; // "ligacao" | "email" | "resumo"
+  origem: string; // "ligacao" | "email" | "resumo" | "chat"
   id: string; // conversationSpaceId / messageId / "" (gravador)
   promptVersion?: string; // versao do prompt vigente quando o feedback foi dado
   modelo?: string;

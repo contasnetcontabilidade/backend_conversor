@@ -848,6 +848,28 @@ export async function resolverOrigemEmail(): Promise<RefResolvida> {
   return resolverOrigem();
 }
 
+// Origem para chamados do GOOGLE CHAT. Cadeia de fallback deliberada:
+// Chat -> mensageria (WhatsApp) -> E-mail -> Telefone. Nunca devolve vazio, e o
+// dropdown "Origem" do modal permite corrigir em 1 clique — ou seja, faltar a
+// origem "Chat" cadastrada no Suite nunca bloqueia a criacao do chamado.
+export async function resolverOrigemChat(): Promise<RefResolvida> {
+  const envVal = envId("SUITE360_ORIGEM_CHAT_ID");
+  if (envVal) return { id: envVal, fonte: "env" };
+  try {
+    let r = await lookupPrimeiro("/origens-chamado", (o) =>
+      /chat|hangout/i.test(pickStr(o, ["descricao", "nome", "name"]) || ""),
+    );
+    if (r.id) return { ...r, fonte: "lookup" };
+    r = await lookupPrimeiro("/origens-chamado", (o) =>
+      /whats|mensage/i.test(pickStr(o, ["descricao", "nome", "name"]) || ""),
+    );
+    if (r.id) return { ...r, fonte: "lookup" };
+  } catch {
+    // ignora e cai no fallback
+  }
+  return resolverOrigemEmail();
+}
+
 export async function resolverSetor(): Promise<RefResolvida> {
   const envVal = envId("SUITE360_SETOR_ID");
   if (envVal) return { id: envVal, fonte: "env" };
@@ -994,6 +1016,68 @@ ${linhas(d.pontosPrincipais)}
 
 Providencias sugeridas:
 ${linhas(d.providencias)}`;
+}
+
+const CHAT_DESC_MAX_CHARS = Number(process.env.CHAT_DESC_MAX_CHARS) || 4000;
+
+export interface DadosDescricaoChat {
+  razaoSocial?: string;
+  cnpj?: string;
+  espaco?: string; // nome da conversa/espaco no Google Chat
+  participantes?: string; // "Fulano, Beltrano"
+  periodo?: string; // "14/08/2026 09:12 — 09:41"
+  qtdMensagens?: number;
+  atendente?: string;
+  idChat?: string; // chave da selecao
+  resumo?: string;
+  pontosPrincipais?: string[];
+  providencias?: string[];
+  conversa?: string; // mensagens selecionadas, ja concatenadas
+}
+
+// Descricao do chamado vindo do Google Chat.
+//
+// Diferenca proposital em relacao ao e-mail: aqui a CONVERSA ENTRA na descricao.
+// No e-mail o corpo e excluido porque e ruido — HTML, assinatura, disclaimer,
+// historico citado. Mensagem de chat e texto curto e limpo, e como nao existe
+// assunto nem remetente identificavel, sem o literal a descricao ficaria apenas
+// com o resumo da IA: se ela errar, o chamado perde o registro do que foi pedido
+// e nao ha a que recorrer. Alem disso, colar as mensagens e exatamente o que o
+// usuario fazia a mao — a funcionalidade nao pode entregar menos que isso.
+export function montarDescricaoChat(d: DadosDescricaoChat): string {
+  const cliente =
+    [d.razaoSocial, d.cnpj].filter(Boolean).join(" - ") || "(nao identificado)";
+  const bruta = (d.conversa || "").trim();
+  const conversa = !bruta
+    ? "-"
+    : bruta.length > CHAT_DESC_MAX_CHARS
+      ? bruta.slice(0, CHAT_DESC_MAX_CHARS) +
+        "\n… (conversa truncada — ver no Google Chat)"
+      : bruta;
+
+  return `Atendimento por Google Chat registrado automaticamente.
+
+Cliente:
+${cliente}
+
+Dados da conversa:
+- Conversa: ${d.espaco || "-"}
+- Participantes: ${d.participantes || "-"}
+- Periodo: ${d.periodo || "-"}
+- Mensagens selecionadas: ${d.qtdMensagens ?? "-"}
+- Responsavel: ${d.atendente || "-"}
+
+Resumo:
+${d.resumo || "-"}
+
+Pontos principais:
+${linhas(d.pontosPrincipais)}
+
+Providencias sugeridas:
+${linhas(d.providencias)}
+
+Conversa:
+${conversa}`;
 }
 
 // ---------------------------------------------------------------------------

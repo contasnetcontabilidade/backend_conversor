@@ -18,7 +18,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-07-30";
+export const PROMPT_VERSION = "2026-08-14";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -61,10 +61,11 @@ export type ResumoInput = {
   // arquivo .srt do disco — usa este texto como conteudo.
   text?: string;
   // Origem do conteudo, ajusta o prompt. Padrao: "ligacao".
-  origem?: "ligacao" | "email";
-  // Fonte para o painel de custos separar ligacao x e-mail.
-  fonte?: "ligacao" | "email" | "resumo";
-  // Quantidade de mensagens quando o conteudo e uma conversa (thread de e-mail).
+  origem?: "ligacao" | "email" | "chat";
+  // Fonte para o painel de custos separar ligacao x e-mail x chat.
+  fonte?: "ligacao" | "email" | "resumo" | "chat";
+  // Quantidade de mensagens quando o conteudo e uma conversa (thread de e-mail
+  // ou mensagens selecionadas do Google Chat).
   // >1 ativa a instrucao para NAO perder nenhuma solicitacao de nenhuma mensagem.
   qtdMensagens?: number;
   // Id do atendimento (conversationSpaceId / messageId): amarra o custo desta
@@ -291,13 +292,17 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
       srtPath,
       resumo: {
         titulo:
-          origem === "email"
-            ? "E-mail sem conteudo"
-            : "Ligacao sem conteudo transcrito",
+          origem === "chat"
+            ? "Conversa de chat sem conteudo"
+            : origem === "email"
+              ? "E-mail sem conteudo"
+              : "Ligacao sem conteudo transcrito",
         resumo:
-          origem === "email"
-            ? "Conteudo do e-mail vazio."
-            : "Transcricao vazia ou inaudivel.",
+          origem === "chat"
+            ? "Nenhum texto util nas mensagens selecionadas."
+            : origem === "email"
+              ? "Conteudo do e-mail vazio."
+              : "Transcricao vazia ou inaudivel.",
         pontos_principais: [],
         providencias_sugeridas: [],
         cliente_mencionado: { nome: "", cnpj: "" },
@@ -309,13 +314,22 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
   }
 
   const qtdMsgs = Number(input.qtdMensagens) || 1;
-  const ehConversa = origem === "email" && qtdMsgs > 1;
-  const contexto = ehConversa
+  const ehChat = origem === "chat";
+  // Chat e e-mail compartilham o formato de conversa (varias mensagens com
+  // separador); a instrucao de "nao perca nenhum pedido" vale para os dois.
+  const ehConversa = (origem === "email" || ehChat) && qtdMsgs > 1;
+  const contexto = ehChat
+    ? `Voce registra chamados de atendimento de um escritorio de contabilidade a partir de MENSAGENS DO GOOGLE CHAT selecionadas manualmente por um COLABORADOR do escritorio (${qtdMsgs} mensagem(ns), em ordem cronologica, separadas por linhas como \"--- Mensagem 1/${qtdMsgs} — de Fulano em DATA ---\").`
+    : ehConversa
     ? `Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de uma CONVERSA por e-mail (thread) com ${qtdMsgs} mensagens, recebida de um cliente. As mensagens vem em ordem cronologica, separadas por linhas como "--- Mensagem 1/${qtdMsgs} — de Fulano ---".`
     : origem === "email"
       ? "Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de um E-MAIL recebido de um cliente."
       : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
-  const fontePalavra = origem === "email" ? "no e-mail" : "na ligacao";
+  const fontePalavra = ehChat
+    ? "na conversa"
+    : origem === "email"
+      ? "no e-mail"
+      : "na ligacao";
   // Instrucao extra para conversas: cobrir TODAS as mensagens, sem perder pedidos.
   const blocoConversa = ehConversa
     ? `\nIMPORTANTE (conversa com varias mensagens): leia TODAS as ${qtdMsgs} mensagens e
@@ -325,7 +339,28 @@ anteriores (respostas que copiam o e-mail original) contam UMA vez so: nao dupli
 mudaram ao longo da conversa (ex.: pedido corrigido ou ja resolvido depois), reflita o estado
 MAIS ATUAL no resumo, mas registre as pendencias que continuam em aberto.\n`
     : "";
-  const prompt = `${contexto}${blocoConversa}
+  // O Chat e ferramenta INTERNA: sem estas regras o modelo trata o colega que
+  // repassou a demanda como se fosse o cliente — o mesmo erro que ja aconteceu
+  // com e-mail encaminhado e motivou a regra (a) do cliente_mencionado.
+  const blocoChat = ehChat
+    ? `
+PARTICULARIDADES DO GOOGLE CHAT — siga a risca:
+1) QUEM FALA: o Chat e a ferramenta INTERNA do escritorio. Na maioria das vezes TODOS os
+   remetentes sao COLEGAS de ${NOME_ESCRITORIO} (dominios ${DOMINIOS_ESCRITORIO}) repassando ou
+   discutindo a demanda de um cliente. Portanto o remetente NAO e o cliente por padrao: o
+   cliente e a empresa CITADA no texto (nome, CNPJ, "o cliente X pediu", print ou trecho
+   colado). So trate um remetente como cliente se ele for claramente externo E estiver
+   pedindo o servico. Se nenhuma empresa for citada com seguranca, devolva cliente_mencionado
+   vazio — e melhor vazio do que o nome de um colega.
+2) FORMATO: mensagens de chat sao CURTAS, fragmentadas e escritas com pressa; uma frase pode
+   continuar na mensagem seguinte. Junte os fragmentos numa UNICA narrativa coerente. Ignore
+   saudacoes, "ok", "blz", "obrigado", emojis, "bom dia" e ruido — nada disso vira ponto nem
+   providencia. Erros de digitacao e abreviacoes sao normais: interprete, nao transcreva.
+3) NAO EXISTE ASSUNTO/TITULO: derive o "titulo" inteiramente do conteudo das mensagens.
+4) Mensagens de APP/BOT (alertas de sistema) sao CONTEXTO, nao pedido do cliente.
+`
+    : "";
+  const prompt = `${contexto}${blocoConversa}${blocoChat}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
 *** NAO REPITA A MESMA INFORMACAO ***
@@ -441,7 +476,11 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
       const response = await getGeminiClient().models.generateContent({
         model: modelUsado,
         contents: `${prompt}${blocoAssuntos}\n\n${
-          origem === "email" ? "E-MAIL" : "TRANSCRICAO"
+          origem === "chat"
+            ? "CONVERSA (GOOGLE CHAT)"
+            : origem === "email"
+              ? "E-MAIL"
+              : "TRANSCRICAO"
         }:\n${transcricao}`,
         config: {
           thinkingConfig:
