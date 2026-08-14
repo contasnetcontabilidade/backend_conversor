@@ -290,8 +290,8 @@ async function detalharEspaco(
     espaco.tipo !== "SPACE" &&
     /^(Conversa|Mensagem direta)$/.test(espaco.nome)
   ) {
-    const membros = await mapaMembros(email, spaceId).catch(() => ({}));
-    const nomes = Object.values(membros).filter(Boolean);
+    const ids = await membrosDoEspaco(email, spaceId).catch(() => [] as string[]);
+    const nomes = Object.values(await resolverNomes(email, ids)).filter(Boolean);
     if (nomes.length) espaco.nome = nomes.slice(0, 3).join(", ");
   }
   await cacheSet(chaveCache, espaco, 24 * 3600).catch(() => undefined);
@@ -351,35 +351,114 @@ export async function listarEspacos(
 }
 
 // ---------------------------------------------------------------------------
-// Membros — resolve o NOME de quem enviou
+// Nomes das pessoas — via People API
 // ---------------------------------------------------------------------------
+//
+// A Chat API NAO devolve o nome de ninguem quando a autenticacao e de usuario:
+// tanto message.sender quanto membership.member vem so como { name, type }, ou
+// seja, "users/107151570842704851146". A doc do Google e explicita sobre isso e
+// aponta a People API como a forma de resolver: users/123 no Chat corresponde a
+// people/123 na People API.
+//
+// Sem esta etapa o chamado sairia com "Participante 1146" no lugar do nome do
+// colega — inutil para quem for ler o chamado depois.
 
-// message.sender.displayName vem vazio em varios casos. Uma unica chamada de
-// membros resolve a pagina inteira de mensagens: e isto que evita o N+1 (nada de
-// um GET por remetente). Cacheado por espaco.
-export async function mapaMembros(
+const PEOPLE_API = "https://people.googleapis.com/v1";
+const NOME_TTL_SEG = 7 * 24 * 3600; // nome de pessoa muda raramente
+const PEOPLE_LOTE = 200; // teto do batchGet
+
+// Ids dos membros de um espaco (so os ids; nomes vem da People API).
+async function membrosDoEspaco(
   email: string,
   spaceId: string,
-): Promise<Record<string, string>> {
+): Promise<string[]> {
   const chaveCache = `chat:membros:${spaceId}`;
-  const cacheado = await cacheGet<Record<string, string>>(chaveCache).catch(
-    () => null,
-  );
-  if (cacheado) return cacheado;
+  const cacheado = await cacheGet<string[]>(chaveCache).catch(() => null);
+  if (Array.isArray(cacheado)) return cacheado;
 
   const data = await chatGet(email, `/${spaceId}/members`, {
     pageSize: 1000,
     showGroups: "false",
   });
-  const membros: Array<{ member?: { name?: string; displayName?: string } }> =
+  const membros: Array<{ member?: { name?: string; type?: string } }> =
     Array.isArray(data?.memberships) ? data.memberships : [];
+  const ids = membros
+    .filter((m) => String(m?.member?.type || "") !== "BOT")
+    .map((m) => String(m?.member?.name || ""))
+    .filter(Boolean);
+  await cacheSet(chaveCache, ids, CACHE_TTL_SEG).catch(() => undefined);
+  return ids;
+}
+
+// userId ("users/123") -> nome. Cache por PESSOA, nao por espaco: a mesma pessoa
+// aparece em varias conversas, entao o cache aquece rapido e o custo tende a zero.
+export async function resolverNomes(
+  email: string,
+  userIds: string[],
+): Promise<Record<string, string>> {
+  const unicos = [...new Set(userIds.filter(Boolean))];
   const mapa: Record<string, string> = {};
-  for (const m of membros) {
-    const id = String(m?.member?.name || "");
-    const nome = String(m?.member?.displayName || "").trim();
-    if (id && nome) mapa[id] = nome;
+  const faltando: string[] = [];
+
+  for (const id of unicos) {
+    const nome = await cacheGet<string>(`chat:nome:${id}`).catch(() => null);
+    if (nome) mapa[id] = nome;
+    else faltando.push(id);
   }
-  await cacheSet(chaveCache, mapa, CACHE_TTL_SEG).catch(() => undefined);
+  if (!faltando.length) return mapa;
+
+  const token = await getValidAccessToken(email).catch(() => "");
+  if (!token) return mapa;
+
+  for (let i = 0; i < faltando.length; i += PEOPLE_LOTE) {
+    const lote = faltando.slice(i, i + PEOPLE_LOTE);
+    const url = new URL(`${PEOPLE_API}/people:batchGet`);
+    for (const id of lote) {
+      // users/123 (Chat) -> people/123 (People API)
+      url.searchParams.append("resourceNames", id.replace(/^users\//, "people/"));
+    }
+    url.searchParams.set("personFields", "names,emailAddresses");
+    // Sem DOMAIN_PROFILE os colegas do Workspace nao sao encontrados — e sao
+    // justamente eles que aparecem no Chat interno.
+    url.searchParams.append("sources", "READ_SOURCE_TYPE_PROFILE");
+    url.searchParams.append("sources", "READ_SOURCE_TYPE_DOMAIN_PROFILE");
+
+    try {
+      const resp = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      });
+      if (!resp.ok) continue; // best-effort: cai no fallback de nome
+      const data = (await resp.json()) as {
+        responses?: Array<{
+          requestedResourceName?: string;
+          person?: {
+            names?: Array<{ displayName?: string }>;
+            emailAddresses?: Array<{ value?: string }>;
+          };
+        }>;
+      };
+      for (const r of data.responses || []) {
+        const pid = String(r.requestedResourceName || "").replace(
+          /^people\//,
+          "users/",
+        );
+        const nome =
+          String(r.person?.names?.[0]?.displayName || "").trim() ||
+          // Sem nome no perfil, o e-mail ainda identifica melhor que um id.
+          String(r.person?.emailAddresses?.[0]?.value || "")
+            .split("@")[0]
+            .trim();
+        if (pid && nome) {
+          mapa[pid] = nome;
+          await cacheSet(`chat:nome:${pid}`, nome, NOME_TTL_SEG).catch(
+            () => undefined,
+          );
+        }
+      }
+    } catch {
+      // best-effort: sem nome, o fallback assume
+    }
+  }
   return mapa;
 }
 
@@ -481,7 +560,12 @@ export async function listarMensagens(
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const brutas: any[] = Array.isArray(data?.messages) ? data.messages : [];
-    const membros = await mapaMembros(email, spaceId).catch(() => ({}));
+    // UMA resolucao de nomes por pagina, com os remetentes que realmente
+    // aparecem nela — nada de uma chamada por mensagem.
+    const remetentes = brutas
+      .map((m) => String(m?.sender?.name || ""))
+      .filter(Boolean);
+    const membros = await resolverNomes(email, remetentes).catch(() => ({}));
     const mensagens = brutas
       .map((m) => normalizarMensagem(m, spaceId, membros))
       .filter((m): m is MensagemChat => m !== null);
@@ -502,7 +586,12 @@ export async function obterMensagens(
   spaceId: string,
   messageIds: string[],
 ): Promise<MensagemChat[]> {
-  const membros = await mapaMembros(email, spaceId).catch(() => ({}));
+  // Nomes dos participantes do espaco: cobre as mensagens que precisarem ser
+  // buscadas avulsas (as que ja vieram do cache trazem o nome resolvido).
+  const idsMembros = await membrosDoEspaco(email, spaceId).catch(
+    () => [] as string[],
+  );
+  const membros = await resolverNomes(email, idsMembros).catch(() => ({}));
   const encontradas: MensagemChat[] = [];
   const faltando: string[] = [];
 

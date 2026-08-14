@@ -37,8 +37,13 @@ export const CHAT_SCOPES = [
   "https://www.googleapis.com/auth/chat.messages.readonly",
   // memberships: resolve o NOME de quem enviou (sender.displayName vem vazio as vezes).
   "https://www.googleapis.com/auth/chat.memberships.readonly",
-  // sections: cria/le a secao "Chamado" — o analogo do marcador do Gmail.
+  // sections: le a secao "Chamado" — o analogo do marcador do Gmail.
   "https://www.googleapis.com/auth/chat.users.sections",
+  // A Chat API NAO devolve o nome de quem enviou (com auth de usuario o objeto
+  // User vem so com id e tipo). A propria doc do Google manda resolver pela
+  // People API: users/123 no Chat = people/123 na People API. Sem isto o chamado
+  // sairia com "Participante 1146" no lugar do nome do colega.
+  "https://www.googleapis.com/auth/directory.readonly",
 ];
 
 // Escopo usado como sentinela de "esta conta ja autorizou o Chat".
