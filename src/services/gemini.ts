@@ -18,7 +18,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-08-14";
+export const PROMPT_VERSION = "2026-08-18";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -402,10 +402,18 @@ Campos obrigatorios:
   c) Nao confunda com terceiros citados (banco, prefeitura, orgao, fornecedor, sistema): cliente e quem
      PEDE o servico ao escritorio.
   d) Escreva o nome como aparece, sem abreviar nem "corrigir" — a busca no sistema e por texto.
-  NAO invente: se nao der para identificar com seguranca, use "" nos dois campos.
-- cliente_alternativas: string[] (0 a 3 itens). Outros nomes plausiveis para o mesmo cliente, do mais
-  para o menos provavel (ex.: nome fantasia, razao social completa, nome sem "Ltda/ME", nome da pessoa
-  que assina). Servem de plano B para localizar o cadastro. Array vazio se nao houver duvida.
+  e) DOMINIO GENERICO NAO E BECO SEM SAIDA. Muito cliente escreve de gmail/hotmail. Nesse caso use,
+     nesta ordem: o NOME DE EXIBICAO do remetente (ex.: "Maria - Transportes Luz" -> "Transportes Luz"),
+     a assinatura, e a empresa citada no corpo. So desista se nada disso existir.
+  NAO invente um cliente em cliente_mencionado: sem seguranca, deixe "" nos dois campos — mas nesse caso
+  e OBRIGATORIO preencher cliente_alternativas com os melhores palpites (ver abaixo).
+- cliente_alternativas: string[] (0 a 3 itens). Tem DOIS usos:
+  1) variacoes do cliente ja identificado (nome fantasia, razao social completa, nome sem "Ltda/ME");
+  2) quando cliente_mencionado ficou VAZIO, os candidatos mais provaveis que voce conseguiu extrair —
+     nome de exibicao do remetente, empresa citada no corpo, nome de quem assina.
+  Preencher aqui NAO cria risco de errar: o sistema so aceita o candidato se ele casar de forma exata
+  e unica com um cadastro; palpite ruim simplesmente nao resolve e o usuario escolhe a mao — que e
+  exatamente o que ja acontece hoje quando o array vem vazio. Ou seja, deixar vazio nunca ajuda.
 - assunto_sugerido: string (o tipo/assunto do chamado em poucas palavras, ex.: "Guia do Simples",
   "Folha de pagamento", "Abertura de empresa"; "" se incerto).
 - assunto_escolhido: objeto { id: string, nome: string }. Com base no conteudo, escolha na
