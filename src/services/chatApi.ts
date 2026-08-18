@@ -257,7 +257,12 @@ export async function garantirSecaoChamado(email: string): Promise<string> {
     }
     if (id) await cacheSet(chaveCache, id, 24 * 3600).catch(() => undefined);
     return id;
-  } catch {
+  } catch (erro) {
+    // Devolver "" faz a aba dizer "nenhuma conversa na secao". Sem este log,
+    // um blip da API do Google era indistinguivel de secao realmente vazia.
+    console.warn(
+      `[chat] falha ao resolver a secao de ${email}: ${getErrorMessage(erro)}`,
+    );
     return "";
   }
 }
@@ -462,7 +467,14 @@ export async function resolverNomes(
       const resp = await fetch(url.toString(), {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       });
-      if (!resp.ok) continue; // best-effort: cai no fallback de nome
+      if (!resp.ok) {
+        // Sem log, um 403 de escopo virava "Participante 4821" GRAVADO na
+        // descricao do chamado, sem nada indicando a causa.
+        console.warn(
+          `[chat] People API HTTP ${resp.status} ao resolver ${lote.length} nome(s)`,
+        );
+        continue;
+      }
       const data = (await resp.json()) as {
         responses?: Array<{
           requestedResourceName?: string;
@@ -615,6 +627,14 @@ export async function listarMensagens(
       .map((m) => normalizarMensagem(m, spaceId, membros))
       .filter((m): m is MensagemChat => m !== null);
 
+    // Alimenta tambem o cache POR MENSAGEM: sem isto o preview refazia um GET
+    // individual de cada mensagem marcada (era o que saturava a fila do espaco
+    // e fazia mensagens sumirem da selecao).
+    for (const m of mensagens) {
+      await cacheSet(`chat:msg:${email}:${m.id}`, m, 600).catch(
+        () => undefined,
+      );
+    }
     const pagina: PaginaMensagens = {
       mensagens,
       proximaPagina: String(data?.nextPageToken || ""),
@@ -755,5 +775,8 @@ export function periodoLegivel(inicio: string, fim: string): string {
   if (!a) return "";
   if (!b || a === b) return a;
   const mesmoDia = a.slice(0, 10) === b.slice(0, 10);
-  return `${a} — ${mesmoDia ? b.slice(11) : b}`;
+  // pt-BR gera "14/08/2026, 09:41:22" — o slice(11) antigo deixava um espaco
+  // sobrando e a descricao do chamado saia com espaco duplo.
+  const soHora = b.split(", ")[1] || b.slice(11).trim();
+  return `${a} — ${mesmoDia ? soHora : b}`;
 }

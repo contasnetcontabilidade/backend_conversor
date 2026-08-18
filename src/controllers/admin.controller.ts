@@ -796,6 +796,15 @@ function intervaloChamados(iv){
 function noPeriodo(rows,de,ate){return (rows||[]).filter(function(r){return r.dia>=de&&r.dia<=ate})}
 
 // ---- agregacoes ----
+// Quantas LIGACOES foram resumidas no periodo. Tem que sair de porFonte: o
+// porDiaModelo nao carrega a fonte, entao contar op==="resumo" ali somava
+// e-mail e chat junto — o card mostrava 90 quando eram 40 ligacoes, e o custo
+// medio por ligacao saia diluido, contradizendo a tabela "Por fonte" ao lado.
+function ligacoesNoPeriodo(de,ate){
+  return noPeriodo(DADOS&&DADOS.porFonte||[],de,ate)
+    .filter(function(r){return r.fonte==="ligacao"&&r.op==="resumo"})
+    .reduce(function(a,r){return a+(r.calls||0)},0);
+}
 function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0,audioSec:0,deepgramUsd:0};
   rows.forEach(function(r){t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;t.audioSec+=r.audioSec||0;
     if(/^deepgram/i.test(r.model||""))t.deepgramUsd+=r.custoUsd;
@@ -811,11 +820,15 @@ function ramalAgg(rows){var m={};
   return Object.keys(m).map(function(k){return m[k]}).sort(function(a,b){return b.custoUsd-a.custoUsd});}
 
 async function carregar(){
-  var r;
+  var r,d;
   try{ r=await fetch("/api/admin/uso",{headers:{Authorization:"Bearer "+senha()}}); }
   catch(e){ document.getElementById("status").textContent="Falha de rede."; return; }
   if(r.status===401){ mostrarLogin("Senha incorreta."); return; }
-  var d=await r.json();
+  // Um 500 devolve HTML: com o r.json() fora do try o erro virava
+  // unhandledrejection e o painel ficava eternamente em "Carregando...".
+  if(!r.ok){ document.getElementById("status").textContent="Falha ao carregar (HTTP "+r.status+")."; return; }
+  try{ d=await r.json(); }
+  catch(e){ document.getElementById("status").textContent="Resposta invalida do servidor."; return; }
   DADOS=d;
   document.getElementById("login").classList.add("hidden");
   document.getElementById("app").classList.remove("hidden");
@@ -1069,6 +1082,7 @@ function render(){
   var iv=intervalo();
   var rowsP=noPeriodo(DADOS.porDiaModelo,iv.de,iv.ate);
   var t=totais(rowsP);
+  t.ligacoes=ligacoesNoPeriodo(iv.de,iv.ate);
   var c=cot();
 
   // KPIs
@@ -1309,6 +1323,7 @@ function montarSecoes(de,ate,incluir3dias,incluirMes){
   var c=cot();
   var rowsP=noPeriodo(DADOS.porDiaModelo,de,ate);
   var t=totais(rowsP);
+  t.ligacoes=ligacoesNoPeriodo(de,ate);
   var dias=porDiaAgg(rowsP);
   var ramais=ramalAgg(noPeriodo(DADOS.porRamal,de,ate));
   var fonteRows=noPeriodo(DADOS.porFonte,de,ate);

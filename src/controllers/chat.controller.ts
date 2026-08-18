@@ -25,7 +25,6 @@ import {
   marcarChatFeito,
   reservarCriacao,
   salvarChamadoCriado,
-  salvarContaDoItem,
   salvarSelecaoChat,
 } from "../services/store";
 import {
@@ -267,8 +266,8 @@ export async function chatPreviewController(req: Request, res: Response) {
 
   const email = await resolverContaGoogle(profileToken || "", emailParam);
   const chave = chaveDaSelecao(spaceId, messageIds);
-  // O "criar" precisa saber de qual conta veio e quais mensagens marcar depois.
-  await salvarContaDoItem(chave, email, NS).catch(() => undefined);
+  // (o "criar" recupera a selecao por chat:sel; a conta nao e consultada la,
+  // entao gravar chat:acct era escrita morta e foi removida)
   // Guardado DEPOIS da leitura, com os ids efetivamente lidos (ver abaixo).
 
   const { mensagens: msgs, falharam } = await obterMensagens(
