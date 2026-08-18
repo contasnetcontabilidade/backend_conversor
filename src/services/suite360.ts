@@ -1018,8 +1018,6 @@ Providencias sugeridas:
 ${linhas(d.providencias)}`;
 }
 
-const CHAT_DESC_MAX_CHARS = Number(process.env.CHAT_DESC_MAX_CHARS) || 4000;
-
 export interface DadosDescricaoChat {
   razaoSocial?: string;
   cnpj?: string;
@@ -1032,29 +1030,21 @@ export interface DadosDescricaoChat {
   resumo?: string;
   pontosPrincipais?: string[];
   providencias?: string[];
-  conversa?: string; // mensagens selecionadas, ja concatenadas
+  // Mantido para o chamador nao precisar mudar, mas IGNORADO no texto — ver o
+  // comentario abaixo.
+  conversa?: string;
 }
 
 // Descricao do chamado vindo do Google Chat.
 //
-// Diferenca proposital em relacao ao e-mail: aqui a CONVERSA ENTRA na descricao.
-// No e-mail o corpo e excluido porque e ruido — HTML, assinatura, disclaimer,
-// historico citado. Mensagem de chat e texto curto e limpo, e como nao existe
-// assunto nem remetente identificavel, sem o literal a descricao ficaria apenas
-// com o resumo da IA: se ela errar, o chamado perde o registro do que foi pedido
-// e nao ha a que recorrer. Alem disso, colar as mensagens e exatamente o que o
-// usuario fazia a mao — a funcionalidade nao pode entregar menos que isso.
+// A conversa NAO entra na descricao (mesma regra do e-mail): mensagem de chat e
+// cheia de "ok", "blz", combinacao de horario e ruido, entao colar tudo deixava o
+// chamado longo e dificil de ler, sem acrescentar informacao. Fica so o que a IA
+// destilou — resumo, pontos e providencias. O conteudo original continua no
+// proprio Google Chat, e o modal de revisao mostra as mensagens antes de criar.
 export function montarDescricaoChat(d: DadosDescricaoChat): string {
   const cliente =
     [d.razaoSocial, d.cnpj].filter(Boolean).join(" - ") || "(nao identificado)";
-  const bruta = (d.conversa || "").trim();
-  const conversa = !bruta
-    ? "-"
-    : bruta.length > CHAT_DESC_MAX_CHARS
-      ? bruta.slice(0, CHAT_DESC_MAX_CHARS) +
-        "\n… (conversa truncada — ver no Google Chat)"
-      : bruta;
-
   return `Atendimento por Google Chat registrado automaticamente.
 
 Cliente:
@@ -1074,10 +1064,7 @@ Pontos principais:
 ${linhas(d.pontosPrincipais)}
 
 Providencias sugeridas:
-${linhas(d.providencias)}
-
-Conversa:
-${conversa}`;
+${linhas(d.providencias)}`;
 }
 
 // ---------------------------------------------------------------------------
