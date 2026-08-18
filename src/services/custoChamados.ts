@@ -27,7 +27,12 @@ function getRedis(): Redis | null {
 }
 
 const KEY = "uso:chamados";
-const MAX = 3000; // ~1 ano de chamados neste volume
+// Teto da lista de chamados (rolling: entra um, sai o mais antigo).
+// Dimensionado contra o PIOR caso: ~4 mil chamados/mes no Suite360 inteiro.
+// Como o painel so olha 2 meses (ver LIMITE_MESES no admin.controller), o
+// necessario e ~8 mil — 10 mil deixa ~25% de folga. Custo: ~3 MB no Redis.
+// Se os chamados criados PELO APP passarem de ~5 mil/mes, revisar este numero.
+const MAX = 10000;
 let mem: string[] = [];
 
 export interface ChamadoCusto {

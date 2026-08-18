@@ -470,7 +470,7 @@ body.win-max .titlebar .ic-restore{display:inline}
       <button data-p="7d">7 dias</button>
       <button data-p="30d" class="on">30 dias</button>
       <button data-p="mes">Mês atual</button>
-      <button data-p="tudo">Tudo</button>
+      <button data-p="tudo" title="Máximo de 2 meses">2 meses</button>
       <button data-p="custom">Personalizado</button>
     </div>
     <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
@@ -742,6 +742,12 @@ function diasUteisDecorridos(){
   return Math.max(completos+fracao,1);
 }
 function minDia(){var xs=(DADOS&&DADOS.porDiaModelo||[]).map(function(x){return x.dia});return xs.length?xs.sort()[0]:hojeUTC()}
+// Janela maxima do painel. Existe por causa do custo por cliente/assunto, que
+// cruza com a lista de chamados — e essa lista guarda os ultimos MAX (10 mil).
+// Olhar alem do que a lista cobre mostraria gasto cheio com chamados faltando,
+// ou seja, numeros errados sem nenhum aviso. 2 meses cabem com folga.
+var LIMITE_MESES=2;
+function limiteMinimo(){var d=new Date(hojeUTC()+'T00:00:00Z');d.setUTCMonth(d.getUTCMonth()-LIMITE_MESES);return d.toISOString().slice(0,10);}
 function intervalo(){
   var ate=hojeUTC(),de;
   if(PERIODO.preset==="custom"){de=PERIODO.de||minDia();ate=PERIODO.ate||hojeUTC();}
@@ -750,6 +756,10 @@ function intervalo(){
   else if(PERIODO.preset==="mes")de=primeiroDiaMes();
   else de=minDia();
   if(de>ate){var t=de;de=ate;ate=t;}
+  // Trava dura: vale para TODOS os presets, inclusive o personalizado.
+  var min=limiteMinimo();
+  if(de<min)de=min;
+  if(ate<min)ate=min;
   return {de:de,ate:ate};
 }
 function noPeriodo(rows,de,ate){return (rows||[]).filter(function(r){return r.dia>=de&&r.dia<=ate})}
@@ -1332,7 +1342,13 @@ function xlsCompleto(){if(!DADOS){alert("Sem dados.");return;}var de=minDia(),at
 function xlsPeriodo(){if(!DADOS){alert("Sem dados.");return;}var iv=intervalo();baixar("relatorio_custos_"+iv.de+"_a_"+iv.ate+".xls",secoesParaXml(montarSecoes(iv.de,iv.ate,false,false),iv.de,iv.ate,"PERIODO "+iv.de+" a "+iv.ate),"application/vnd.ms-excel;charset=utf-8");}
 
 // ---- controles ----
-function selPeriodo(p){PERIODO.preset=p;
+function aplicarLimiteNosCampos(){
+  var min=limiteMinimo();
+  var a=document.getElementById('dt-de'),b=document.getElementById('dt-ate');
+  if(a){a.min=min;if(a.value&&a.value<min)a.value=min;}
+  if(b){b.min=min;if(b.value&&b.value<min)b.value=min;}
+}
+function selPeriodo(p){PERIODO.preset=p;aplicarLimiteNosCampos();
   var segs=document.querySelectorAll("#seg-periodo button");for(var i=0;i<segs.length;i++)segs[i].classList.toggle("on",segs[i].getAttribute("data-p")===p);
   document.getElementById("custom-range").classList.toggle("hidden",p!=="custom");
   render();}
