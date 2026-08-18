@@ -1150,7 +1150,10 @@ function render(){
   fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={custoUsd:0,itens:0});a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
   // Fontes do painel. Tabela unica: incluir uma fonte nova aqui ja reflete no
   // grafico, na tabela e no total — antes o Chat era gravado mas nao aparecia.
-  var FONTES=[["Ligações","ligacao",accent],["E-mails","email",gold],["Chat","chat","#7c5cff"],["Resumo (gravação)","resumo","#2f9e6b"]];
+  // Cores bem separadas no circulo cromatico: verde (ligacao), ambar (e-mail),
+  // roxo (chat) e magenta (resumo). O antigo #2f9e6b era quase o mesmo verde do
+  // --accent das ligacoes e as duas fatias se confundiam no grafico.
+  var FONTES=[["Ligações","ligacao",accent],["E-mails","email",gold],["Chat","chat","#7c5cff"],["Resumo (gravação)","resumo","#e0509a"]];
   var fLinhas=FONTES.map(function(f){var a=fAgg[f[1]]||{custoUsd:0,itens:0};return {nome:f[0],itens:a.itens||0,usd:a.custoUsd||0,cor:f[2]};});
   var totF=fLinhas.reduce(function(x,y){return x+y.usd},0);
   chart("chartFonte",{type:"doughnut",data:{labels:fLinhas.map(function(x){return x.nome}),datasets:[{data:fLinhas.map(function(x){return +(x.usd*c).toFixed(4)}),backgroundColor:fLinhas.map(function(x){return x.cor}),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
