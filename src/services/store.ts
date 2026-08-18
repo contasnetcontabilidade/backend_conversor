@@ -352,12 +352,16 @@ export async function limparGoogleScopes(email: string) {
 export async function cacheGet<T>(key: string): Promise<T | null> {
   const raw = (await getValue(key)) as unknown;
   if (raw === null || raw === undefined) return null;
-  // O cliente do Upstash ja devolve objeto quando o valor e JSON.
+  // O cliente do Upstash JA desserializa o JSON na leitura. Para objeto/array
+  // isso resolve aqui. Para STRING nao: cacheSet gravou '"abc"', o Upstash
+  // devolve 'abc' (ja sem aspas), e um segundo JSON.parse lancaria — por isso o
+  // catch devolve o valor cru em vez de null. Sem isto, TODO cache de string
+  // (chat:secao, chat:nome) errava sempre e ninguem percebia.
   if (typeof raw === "object") return raw as T;
   try {
     return JSON.parse(raw as string) as T;
   } catch {
-    return null;
+    return raw as T;
   }
 }
 export async function cacheSet(key: string, valor: unknown, ttlSeg: number) {
