@@ -1055,12 +1055,12 @@ function render(){
   var fonteRows=noPeriodo(DADOS.porFonte,iv.de,iv.ate);
   var fAgg={};
   fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={custoUsd:0,itens:0});a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
-  var ligUsd=(fAgg["ligacao"]&&fAgg["ligacao"].custoUsd)||0;
-  var emUsd=(fAgg["email"]&&fAgg["email"].custoUsd)||0;
-  var resUsd=(fAgg["resumo"]&&fAgg["resumo"].custoUsd)||0;
-  chart("chartFonte",{type:"doughnut",data:{labels:["Ligações","E-mails","Resumo (gravação)"],datasets:[{data:[+(ligUsd*c).toFixed(4),+(emUsd*c).toFixed(4),+(resUsd*c).toFixed(4)],backgroundColor:[accent,gold,"#2f9e6b"],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
-  var totF=ligUsd+emUsd+resUsd;
-  var fLinhas=[{nome:"Ligações",itens:(fAgg["ligacao"]&&fAgg["ligacao"].itens)||0,usd:ligUsd},{nome:"E-mails",itens:(fAgg["email"]&&fAgg["email"].itens)||0,usd:emUsd},{nome:"Resumo (gravação)",itens:(fAgg["resumo"]&&fAgg["resumo"].itens)||0,usd:resUsd}];
+  // Fontes do painel. Tabela unica: incluir uma fonte nova aqui ja reflete no
+  // grafico, na tabela e no total — antes o Chat era gravado mas nao aparecia.
+  var FONTES=[["Ligações","ligacao",accent],["E-mails","email",gold],["Chat","chat","#7c5cff"],["Resumo (gravação)","resumo","#2f9e6b"]];
+  var fLinhas=FONTES.map(function(f){var a=fAgg[f[1]]||{custoUsd:0,itens:0};return {nome:f[0],itens:a.itens||0,usd:a.custoUsd||0,cor:f[2]};});
+  var totF=fLinhas.reduce(function(x,y){return x+y.usd},0);
+  chart("chartFonte",{type:"doughnut",data:{labels:fLinhas.map(function(x){return x.nome}),datasets:[{data:fLinhas.map(function(x){return +(x.usd*c).toFixed(4)}),backgroundColor:fLinhas.map(function(x){return x.cor}),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
   var tbf=document.getElementById("tbody-fonte");
   if(tbf){
     if(totF<=0.0000001){tbf.innerHTML='<tr><td colspan="4" class="muted">Sem consumo marcado por fonte no período.</td></tr>';}
@@ -1207,7 +1207,7 @@ function montarSecoes(de,ate,incluir3dias,incluirMes){
 
   var lf=[[Sc("fonte"),Sc("itens"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct")]];
   var fAgg={};fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={usd:0,itens:0});a.usd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
-  var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Resumo (gravacao)","resumo"]];
+  var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Chat","chat"],["Resumo (gravacao)","resumo"]];
   var totF=0;fLista.forEach(function(f){totF+=(fAgg[f[1]]&&fAgg[f[1]].usd)||0;});
   fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;lf.push([Sc(f[0]),Nc(a.itens,0),Nc(a.usd,6),Nc(a.usd*c,4),Sc(p+"%")]);});
   secoes.push({nome:"Por fonte",linhas:lf});
