@@ -564,6 +564,9 @@ export interface ItemLista {
   id: string;
   nome: string;
   extra?: string;
+  // So os usuarios trazem setor (para o modal filtrar o executor pelo setor).
+  setorId?: string;
+  setorNome?: string;
 }
 
 function norm(s: string | undefined): string {
@@ -612,6 +615,10 @@ export async function buscarUsuarios(q?: string): Promise<ItemLista[]> {
     id: pickId(u) || "",
     nome: pickStr(u, ["nome", "name"]) || "",
     extra: pickStr(u, ["email", "funcao"]),
+    // Setor do usuario: permite ao modal mostrar so quem e do setor escolhido.
+    // Os nomes variam conforme a versao do Suite, entao tentamos os plausiveis.
+    setorId: pickStr(u, ["setor_id", "setorId", "id_setor", "departamento_id"]) || "",
+    setorNome: pickStr(u, ["setor", "setor_nome", "departamento", "setor_descricao"]) || "",
   }));
 }
 
