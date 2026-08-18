@@ -452,12 +452,21 @@ export async function gmailCriarController(req: Request, res: Response) {
 
   const protocolo = resultado.protocolo || "";
   if (chave) {
+    // Se o registro de idempotencia falhar, NAO liberar a reserva: ela e a
+    // unica barreira que resta contra criar o mesmo chamado duas vezes. Deixar
+    // o TTL de 120s expirar sozinho e mais seguro que abrir a janela agora.
+    let registrou = true;
     await salvarChamadoCriado(
       chave,
       { id: resultado.id || "", protocolo },
       "gmail",
-    ).catch(() => undefined);
-    await liberarCriacao(chave, "gmail").catch(() => undefined);
+    ).catch((erro) => {
+      registrou = false;
+      console.error(
+        `[gmail:criar] req=${requestId} chave=${chave} protocolo=${protocolo} NAO registrou a idempotencia: ${getErrorMessage(erro)}`,
+      );
+    });
+    if (registrou) await liberarCriacao(chave, "gmail").catch(() => undefined);
     // Custo de IA deste e-mail -> cliente/assunto (painel de custos).
     await registrarCustoChamado({
       itemId: chave,

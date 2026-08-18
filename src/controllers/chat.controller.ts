@@ -269,9 +269,22 @@ export async function chatPreviewController(req: Request, res: Response) {
   const chave = chaveDaSelecao(spaceId, messageIds);
   // O "criar" precisa saber de qual conta veio e quais mensagens marcar depois.
   await salvarContaDoItem(chave, email, NS).catch(() => undefined);
-  await salvarSelecaoChat(chave, messageIds).catch(() => undefined);
+  // Guardado DEPOIS da leitura, com os ids efetivamente lidos (ver abaixo).
 
-  const msgs = await obterMensagens(email, spaceId, messageIds);
+  const { mensagens: msgs, falharam } = await obterMensagens(
+    email,
+    spaceId,
+    messageIds,
+  );
+  // Selecao PARCIAL e recusada: seguir com buraco geraria um chamado que parece
+  // completo e nao e — e as mensagens perdidas ficariam marcadas como feitas.
+  if (falharam.length) {
+    throw new AppError({
+      statusCode: 503,
+      code: "CHAT_MENSAGENS_PARCIAIS",
+      message: `Nao foi possivel ler ${falharam.length} das ${messageIds.length} mensagens marcadas. Tente de novo em instantes.`,
+    });
+  }
   if (!msgs.length) {
     throw new AppError({
       statusCode: 404,
@@ -280,6 +293,11 @@ export async function chatPreviewController(req: Request, res: Response) {
         "Nao foi possivel ler as mensagens selecionadas. Recarregue a conversa e tente de novo.",
     });
   }
+
+  await salvarSelecaoChat(
+    chave,
+    msgs.map((m) => m.id),
+  ).catch(() => undefined);
 
   const sel = montarTextoSelecionado(msgs);
   const participantes = sel.participantes.join(", ");
@@ -440,12 +458,15 @@ async function marcarFeitoPosCriar(
   messageIds: string[],
   protocolo: string,
 ): Promise<void> {
-  if (!chave || !spaceId) return;
+  if (!chave) return;
+  // A chave e "<spaceId-sem-prefixo>:<hash>", entao o espaco esta ali mesmo
+  // quando o app nao manda o campo (ex.: modal reaberto por outro caminho).
+  const espaco = spaceId || `spaces/${chave.split(":")[0]}`;
   let ids = messageIds;
   // O app pode nao reenviar a lista no "criar"; ela ficou salva no preview.
   if (!ids.length) ids = await getSelecaoChat(chave).catch(() => []);
   if (!ids.length) return;
-  await marcarChatFeito(spaceId, ids, protocolo).catch(() => undefined);
+  await marcarChatFeito(espaco, ids, protocolo).catch(() => undefined);
 }
 
 export async function chatCriarController(req: Request, res: Response) {
@@ -538,12 +559,21 @@ export async function chatCriarController(req: Request, res: Response) {
 
   const protocolo = resultado.protocolo || "";
   if (chave) {
+    // Se o registro de idempotencia falhar, NAO liberar a reserva: ela e a
+    // unica barreira que resta contra criar o mesmo chamado duas vezes. Deixar
+    // o TTL de 120s expirar sozinho e mais seguro que abrir a janela agora.
+    let registrou = true;
     await salvarChamadoCriado(
       chave,
       { id: resultado.id || "", protocolo },
       NS,
-    ).catch(() => undefined);
-    await liberarCriacao(chave, NS).catch(() => undefined);
+    ).catch((erro) => {
+      registrou = false;
+      console.error(
+        `[chat:criar] req=${requestId} chave=${chave} protocolo=${protocolo} NAO registrou a idempotencia: ${getErrorMessage(erro)}`,
+      );
+    });
+    if (registrou) await liberarCriacao(chave, NS).catch(() => undefined);
     await registrarCustoChamado({
       itemId: chave,
       fonte: "chat",

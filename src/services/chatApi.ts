@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { AppError } from "../lib/errors";
+import { AppError, getErrorMessage } from "../lib/errors";
 import { getValidAccessToken, invalidarEscopos } from "./gmailAuth";
 import { comSingleFlight, comVagaNoEspaco } from "./chatRateLimit";
 import { cacheGet, cacheSet } from "./store";
@@ -209,6 +209,28 @@ export interface PaginaMensagens {
 
 // Garante que a secao existe (cria se faltar). Best-effort: NUNCA lanca, igual
 // ao garantirMarcador do Gmail — falhar aqui nao pode impedir o login.
+// Varre TODAS as paginas de secoes ate achar a do nome pedido.
+async function procurarSecao(email: string, alvoMinusculo: string): Promise<string> {
+  let pageToken: string | undefined;
+  do {
+    const lista = await chatGet(email, "/users/me/sections", {
+      pageSize: 100,
+      pageToken,
+    });
+    const secoes: Array<{ name?: string; displayName?: string }> = Array.isArray(
+      lista?.sections,
+    )
+      ? lista.sections
+      : [];
+    const achada = secoes.find(
+      (s) => String(s.displayName || "").toLowerCase() === alvoMinusculo,
+    );
+    if (achada?.name) return String(achada.name);
+    pageToken = lista?.nextPageToken || undefined;
+  } while (pageToken);
+  return "";
+}
+
 export async function garantirSecaoChamado(email: string): Promise<string> {
   const chaveCache = `chat:secao:${email}`;
   try {
@@ -216,16 +238,10 @@ export async function garantirSecaoChamado(email: string): Promise<string> {
     if (cacheado) return cacheado;
 
     const alvo = nomeSecao().toLowerCase();
-    const lista = await chatGet(email, "/users/me/sections", { pageSize: 100 });
-    const secoes: Array<{ name?: string; displayName?: string }> = Array.isArray(
-      lista?.sections,
-    )
-      ? lista.sections
-      : [];
-    let id = String(
-      secoes.find((s) => String(s.displayName || "").toLowerCase() === alvo)
-        ?.name || "",
-    );
+    // Paginar de verdade: parar na primeira pagina fazia a secao "Chamado" nao
+    // ser encontrada em contas com muitas secoes — e, com autocriar ligado, o
+    // codigo criava uma SEGUNDA secao vazia e passava a listar dela.
+    let id = await procurarSecao(email, alvo);
 
     if (!id && autocriarSecao()) {
       try {
@@ -236,15 +252,7 @@ export async function garantirSecaoChamado(email: string): Promise<string> {
         id = String(criada?.name || "");
       } catch {
         // Corrida (outra janela criou ao mesmo tempo) ou limite: procura de novo.
-        const relista = await chatGet(email, "/users/me/sections", {
-          pageSize: 100,
-        });
-        const denovo: Array<{ name?: string; displayName?: string }> =
-          Array.isArray(relista?.sections) ? relista.sections : [];
-        id = String(
-          denovo.find((s) => String(s.displayName || "").toLowerCase() === alvo)
-            ?.name || "",
-        );
+        id = await procurarSecao(email, alvo);
       }
     }
     if (id) await cacheSet(chaveCache, id, 24 * 3600).catch(() => undefined);
@@ -278,7 +286,9 @@ async function detalharEspaco(
   email: string,
   spaceId: string,
 ): Promise<EspacoResumo> {
-  const chaveCache = `chat:space:${spaceId}`;
+  // A conta entra na chave: o conteudo cacheado carrega nomes ja resolvidos,
+  // e sem isolar uma conta serviria dado (e acesso) de outra.
+  const chaveCache = `chat:space:${email}:${spaceId}`;
   const cacheado = await cacheGet<EspacoResumo>(chaveCache).catch(() => null);
   if (cacheado) return cacheado;
 
@@ -311,11 +321,24 @@ export async function listarEspacosDaSecao(
 ): Promise<EspacoResumo[]> {
   const secaoId = await garantirSecaoChamado(email);
   if (!secaoId) return [];
-  const itens = await chatGet(email, `/${secaoId}/items`, { pageSize: 100 });
-  const lista: Array<{ space?: string }> = Array.isArray(itens?.sectionItems)
-    ? itens.sectionItems
-    : [];
-  const ids = lista.map((i) => String(i.space || "")).filter(Boolean);
+  // Percorre todas as paginas: acima de 100 conversas na secao, as demais
+  // simplesmente sumiam da aba (nao ha "carregar mais" neste caminho).
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  do {
+    const itens = await chatGet(email, `/${secaoId}/items`, {
+      pageSize: 100,
+      pageToken,
+    });
+    const lista: Array<{ space?: string }> = Array.isArray(itens?.sectionItems)
+      ? itens.sectionItems
+      : [];
+    for (const i of lista) {
+      const s = String(i.space || "");
+      if (s) ids.push(s);
+    }
+    pageToken = itens?.nextPageToken || undefined;
+  } while (pageToken);
   const espacos = await Promise.all(
     ids.map((id) => detalharEspaco(email, id).catch(() => null)),
   );
@@ -377,14 +400,14 @@ const PEOPLE_LOTE = 200; // teto do batchGet
 // refaria a mesma consulta inutil. Curto de proposito: assim que o admin ligar o
 // compartilhamento de contatos, os nomes aparecem sozinhos em ate 1 hora.
 const NOME_VAZIO_TTL_SEG = 3600;
-const SEM_NOME = " "; // marcador interno, nunca exibido
+const SEM_NOME = "__sem_nome__"; // marcador interno, nunca exibido
 
 // Ids dos membros de um espaco (so os ids; nomes vem da People API).
 async function membrosDoEspaco(
   email: string,
   spaceId: string,
 ): Promise<string[]> {
-  const chaveCache = `chat:membros:${spaceId}`;
+  const chaveCache = `chat:membros:${email}:${spaceId}`;
   const cacheado = await cacheGet<string[]>(chaveCache).catch(() => null);
   if (Array.isArray(cacheado)) return cacheado;
 
@@ -557,8 +580,11 @@ export async function listarMensagens(
   // Filtro nativo por data: e o que faz "selecionar por periodo" nao precisar
   // baixar a conversa inteira para depois descartar.
   const filtro = opts.desde ? `createTime > "${opts.desde}"` : undefined;
+  // Sem o e-mail na chave, a conta B recebia as mensagens cacheadas pela conta
+  // A — inclusive de espacos dos quais B nao participa, porque quem valida a
+  // participacao e o Google, e o cache passava por cima disso.
   const chaveCache =
-    `chat:pg:${spaceId}:${opts.pageToken || "_"}:${pageSize}:` +
+    `chat:pg:${email}:${spaceId}:${opts.pageToken || "_"}:${pageSize}:` +
     `${ordem}:${opts.desde || "_"}`;
 
   const cacheado = await cacheGet<PaginaMensagens>(chaveCache).catch(() => null);
@@ -604,7 +630,7 @@ export async function obterMensagens(
   email: string,
   spaceId: string,
   messageIds: string[],
-): Promise<MensagemChat[]> {
+): Promise<{ mensagens: MensagemChat[]; falharam: string[] }> {
   // Nomes dos participantes do espaco: cobre as mensagens que precisarem ser
   // buscadas avulsas (as que ja vieram do cache trazem o nome resolvido).
   const idsMembros = await membrosDoEspaco(email, spaceId).catch(
@@ -615,14 +641,18 @@ export async function obterMensagens(
   const faltando: string[] = [];
 
   for (const id of messageIds) {
-    const cacheada = await cacheGet<MensagemChat>(`chat:msg:${id}`).catch(
-      () => null,
-    );
+    const cacheada = await cacheGet<MensagemChat>(
+      `chat:msg:${email}:${id}`,
+    ).catch(() => null);
     if (cacheada) encontradas.push(cacheada);
     else faltando.push(id);
   }
 
   // Concorrencia limitada: 200 GETs de uma vez estourariam a cota do espaco.
+  // O id de cada falha e DEVOLVIDO: engolir aqui fazia a IA resumir a conversa
+  // com buracos e as mensagens perdidas ainda ganhavam o "check" de ja virou
+  // chamado — ninguem voltava nelas.
+  const falharam: string[] = [];
   const LOTE = 5;
   for (let i = 0; i < faltando.length; i += LOTE) {
     const lote = faltando.slice(i, i + LOTE);
@@ -630,19 +660,30 @@ export async function obterMensagens(
       lote.map((id) =>
         comVagaNoEspaco(spaceId, () => chatGet(email, `/${id}`))
           .then((bruta) => normalizarMensagem(bruta, spaceId, membros))
-          .catch(() => null),
+          .catch((erro) => {
+            console.warn(
+              `[chat] falha ao ler ${id}: ${getErrorMessage(erro)}`,
+            );
+            falharam.push(id);
+            return null;
+          }),
       ),
     );
     for (const m of vindas) {
       if (!m) continue;
       encontradas.push(m);
-      await cacheSet(`chat:msg:${m.id}`, m, 600).catch(() => undefined);
+      await cacheSet(`chat:msg:${email}:${m.id}`, m, 600).catch(
+        () => undefined,
+      );
     }
   }
 
   // Ordem CRONOLOGICA, nao a ordem em que o usuario clicou: o resumo da IA
   // depende de a conversa fazer sentido de cima para baixo.
-  return encontradas.sort((a, b) => a.hora.localeCompare(b.hora));
+  return {
+    mensagens: encontradas.sort((a, b) => a.hora.localeCompare(b.hora)),
+    falharam,
+  };
 }
 
 // ---------------------------------------------------------------------------
