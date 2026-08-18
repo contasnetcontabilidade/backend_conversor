@@ -276,7 +276,10 @@ export async function adminUsoController(req: Request, res: Response) {
     // atribuir o gasto. Contar aquilo como desperdicio seria mentira: na pratica
     // quase tudo virou chamado. O painel trata o periodo anterior como convertido.
     semChamadoDesde: String(process.env.SEM_CHAMADO_DESDE || "2026-08-19").trim(),
-    ramaisTeste: String(process.env.RAMAIS_TESTE || "")
+    // Padrao 258 (ramal do desenvolvedor). Vira variavel de ambiente quando
+    // houver mais de um ramal de teste — sem isto o gasto de desenvolvimento
+    // entrava na conta de "IA sem chamado" como se fosse uso real.
+    ramaisTeste: String(process.env.RAMAIS_TESTE || "258")
       .split(/[,;\s]+/)
       .map((r) => r.trim())
       .filter(Boolean),
