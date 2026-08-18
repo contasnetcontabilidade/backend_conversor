@@ -832,6 +832,7 @@ export async function suiteOrigensController(_req: Request, res: Response) {
 }
 
 export async function suiteUsuariosController(req: Request, res: Response) {
-  const itens = await buscarUsuarios(queryQ(req));
+  const setorId = typeof req.query.setorId === "string" ? req.query.setorId.trim() : "";
+  const itens = await buscarUsuarios(queryQ(req), setorId);
   res.status(200).json({ ok: true, data: { itens } });
 }

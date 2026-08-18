@@ -607,10 +607,18 @@ export async function buscarOrigens(): Promise<ItemLista[]> {
   }));
 }
 
-export async function buscarUsuarios(q?: string): Promise<ItemLista[]> {
+export async function buscarUsuarios(
+  q?: string,
+  setorId?: string,
+): Promise<ItemLista[]> {
   const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
+  // O Suite nao devolve o setor no objeto do usuario; tentamos filtrar na API.
+  // Se ela ignorar o parametro, o resultado vem igual e nada quebra.
+  const filtroSetor = setorId && setorId.trim()
+    ? `&setor_id=${encodeURIComponent(setorId.trim())}`
+    : "";
   // Idem: o executor certo podia estar fora da 1a pagina.
-  const data = await suiteGetTodos(`/usuarios?ativo=1${query}`);
+  const data = await suiteGetTodos(`/usuarios?ativo=1${query}${filtroSetor}`);
   return data.map((u) => ({
     id: pickId(u) || "",
     nome: pickStr(u, ["nome", "name"]) || "",
