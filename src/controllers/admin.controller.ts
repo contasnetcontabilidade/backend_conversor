@@ -477,7 +477,7 @@ body.win-max .titlebar .ic-restore{display:inline}
       <button data-p="7d">7 dias</button>
       <button data-p="30d" class="on">30 dias</button>
       <button data-p="mes">Mês atual</button>
-      <button data-p="tudo" title="Máximo de 2 meses">2 meses</button>
+      <button data-p="tudo">Tudo</button>
       <button data-p="custom">Personalizado</button>
     </div>
     <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
@@ -564,6 +564,7 @@ body.win-max .titlebar .ic-restore{display:inline}
       </div>
     </div>
   </div>
+  <div class="note" id="ch-aviso" style="margin:-6px 0 14px"></div>
 
   <div class="panel">
     <h3><i data-lucide="clock"></i> Uso por usuário — hoje</h3>
@@ -767,10 +768,14 @@ function diasUteisDecorridos(){
   return Math.max(completos+fracao,1);
 }
 function minDia(){var xs=(DADOS&&DADOS.porDiaModelo||[]).map(function(x){return x.dia});return xs.length?xs.sort()[0]:hojeUTC()}
-// Janela maxima do painel. Existe por causa do custo por cliente/assunto, que
-// cruza com a lista de chamados — e essa lista guarda os ultimos MAX (10 mil).
-// Olhar alem do que a lista cobre mostraria gasto cheio com chamados faltando,
-// ou seja, numeros errados sem nenhum aviso. 2 meses cabem com folga.
+// Janela maxima das metricas que CRUZAM com a lista de chamados (custo por
+// cliente, custo por assunto e IA sem chamado). A lista guarda os ultimos MAX
+// (10 mil) chamados; olhar alem disso mostraria gasto cheio com chamados
+// faltando — numeros errados sem aviso nenhum.
+//
+// NAO vale para o resto do painel: custo por dia, por ramal, por fonte e os
+// totais saem do historico de gasto, que nunca expira. Travar tudo jogaria
+// fora visibilidade que ja esta guardada e nao custa nada manter.
 var LIMITE_MESES=2;
 function limiteMinimo(){var d=new Date(hojeUTC()+'T00:00:00Z');d.setUTCMonth(d.getUTCMonth()-LIMITE_MESES);return d.toISOString().slice(0,10);}
 function intervalo(){
@@ -781,11 +786,14 @@ function intervalo(){
   else if(PERIODO.preset==="mes")de=primeiroDiaMes();
   else de=minDia();
   if(de>ate){var t=de;de=ate;ate=t;}
-  // Trava dura: vale para TODOS os presets, inclusive o personalizado.
-  var min=limiteMinimo();
-  if(de<min)de=min;
-  if(ate<min)ate=min;
   return {de:de,ate:ate};
+}
+// Recorta um intervalo para a janela coberta pela lista de chamados.
+// Devolve tambem se houve corte, para o painel poder avisar em vez de mentir.
+function intervaloChamados(iv){
+  var min=limiteMinimo();
+  var de=iv.de<min?min:iv.de;
+  return {de:de,ate:iv.ate,cortado:iv.de<min};
 }
 function noPeriodo(rows,de,ate){return (rows||[]).filter(function(r){return r.dia>=de&&r.dia<=ate})}
 
@@ -1163,8 +1171,9 @@ function render(){
   }
 
   // Custo por cliente / por assunto (1 linha por chamado criado, ver custoChamados.ts)
-  renderChamados(noPeriodo(DADOS.chamados||[],iv.de,iv.ate),c);
-  renderSemChamado(iv,c,muted,grid,gold);
+  var ivC=intervaloChamados(iv);
+  renderChamados(noPeriodo(DADOS.chamados||[],ivC.de,ivC.ate),c,ivC);
+  renderSemChamado(ivC,c,muted,grid,gold);
 
   // #8 Ranking dias mais caros
   // Antes mostrava so os 7 primeiros; agora a lista inteira, paginada.
@@ -1261,7 +1270,11 @@ function renderSemChamado(iv,c,muted,grid,gold){
   },'<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>');
 }
 
-function renderChamados(rows,c){
+function renderChamados(rows,c,ivC){
+  var av=document.getElementById('ch-aviso');
+  if(av)av.innerHTML=(ivC&&ivC.cortado)
+    ? 'Mostrando de <b>'+ivC.de+'</b> em diante: o histórico de chamados guarda os últimos '+fmtInt.format(10000)+'. O gasto acima cobre o período inteiro.'
+    : '';
   var tbc=document.getElementById("tbody-cliente"),tba=document.getElementById("tbody-assunto");
   // Antes cortava em 25 sem avisar; agora pagina a lista inteira.
   function pintar(chave,tb,lista,rotuloVazio){
@@ -1431,13 +1444,7 @@ function xlsCompleto(){if(!DADOS){alert("Sem dados.");return;}var de=minDia(),at
 function xlsPeriodo(){if(!DADOS){alert("Sem dados.");return;}var iv=intervalo();baixar("relatorio_custos_"+iv.de+"_a_"+iv.ate+".xls",secoesParaXml(montarSecoes(iv.de,iv.ate,false,false),iv.de,iv.ate,"PERIODO "+iv.de+" a "+iv.ate),"application/vnd.ms-excel;charset=utf-8");}
 
 // ---- controles ----
-function aplicarLimiteNosCampos(){
-  var min=limiteMinimo();
-  var a=document.getElementById('dt-de'),b=document.getElementById('dt-ate');
-  if(a){a.min=min;if(a.value&&a.value<min)a.value=min;}
-  if(b){b.min=min;if(b.value&&b.value<min)b.value=min;}
-}
-function selPeriodo(p){PERIODO.preset=p;aplicarLimiteNosCampos();
+function selPeriodo(p){PERIODO.preset=p;
   var segs=document.querySelectorAll("#seg-periodo button");for(var i=0;i<segs.length;i++)segs[i].classList.toggle("on",segs[i].getAttribute("data-p")===p);
   document.getElementById("custom-range").classList.toggle("hidden",p!=="custom");
   render();}
