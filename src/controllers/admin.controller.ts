@@ -361,6 +361,11 @@ tbody tr:hover{background:var(--accent-soft)}
 .rank{list-style:none}
 .rank li{display:flex;justify-content:space-between;gap:12px;padding:9px 4px;border-bottom:1px solid var(--border);font-size:13px}
 .rank li:last-child{border-bottom:none}
+.pag{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:8px 4px 2px;font-size:12px;color:var(--muted)}
+.pag:empty{display:none}
+.pag button{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:3px 10px;cursor:pointer;font-size:12px}
+.pag button:disabled{opacity:.4;cursor:default}
+.pag button:not(:disabled):hover{border-color:var(--accent)}
 .rank .d{color:var(--muted)}
 #login{position:fixed;inset:0;background:rgba(6,12,20,.85);display:flex;align-items:center;justify-content:center;z-index:50}
 .login-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:30px;width:360px;max-width:92vw;box-shadow:0 24px 60px rgba(0,0,0,.5);text-align:center}
@@ -673,6 +678,39 @@ function css(n){return getComputedStyle(document.documentElement).getPropertyVal
 var DADOS=null;          // ultimo payload da API
 var CAMBIO=null;         // override manual do cambio (null = usa o da API)
 var PERIODO={preset:"30d",de:null,ate:null};
+// ---- Paginacao das tabelas ----
+// Estado por tabela; sobrevive ao re-render, entao trocar de filtro nao joga
+// o usuario de volta para a pagina 1 sem necessidade.
+var PAG={};
+var PAG_TAM=10;
+// Renderiza UMA pagina e desenha o controle logo abaixo da tabela/lista.
+// Idempotente: pode ser chamada a cada render sem duplicar o controle.
+function paginar(chave,alvo,itens,render,vazioHtml){
+  if(!alvo)return;
+  var total=itens.length;
+  var pgs=Math.max(1,Math.ceil(total/PAG_TAM));
+  var p=Math.min(Math.max(PAG[chave]||1,1),pgs);
+  PAG[chave]=p;
+  if(!total){alvo.innerHTML=vazioHtml;}
+  else{var ini=(p-1)*PAG_TAM;alvo.innerHTML=itens.slice(ini,ini+PAG_TAM).map(render).join('');}
+  // O controle vai depois da TABELA, nao dentro do tbody (que so aceita <tr>).
+  var anexo=alvo.tagName==='TBODY'?(alvo.closest('table')||alvo):alvo;
+  var id='pag-'+chave;
+  var ctl=document.getElementById(id);
+  if(!ctl){ctl=document.createElement('div');ctl.className='pag';ctl.id=id;anexo.insertAdjacentElement('afterend',ctl);}
+  if(total<=PAG_TAM){ctl.innerHTML='';return;}
+  var a1=(p-1)*PAG_TAM+1,a2=Math.min(p*PAG_TAM,total);
+  ctl.innerHTML='<span>'+a1+'-'+a2+' de '+total+'</span>'+
+    '<button data-a="prev"'+(p<=1?' disabled':'')+'>&lsaquo;</button>'+
+    '<span>'+p+'/'+pgs+'</span>'+
+    '<button data-a="next"'+(p>=pgs?' disabled':'')+'>&rsaquo;</button>';
+  ctl.querySelector('[data-a="prev"]').onclick=function(){PAG[chave]=p-1;paginar(chave,alvo,itens,render,vazioHtml);};
+  ctl.querySelector('[data-a="next"]').onclick=function(){PAG[chave]=p+1;paginar(chave,alvo,itens,render,vazioHtml);};
+}
+// Ordenar muda a ordem da lista: voltar para a pagina 1 evita o usuario ficar
+// numa pagina do meio de uma lista que ja nao e a mesma.
+function resetPag(chave){PAG[chave]=1;}
+
 var ORD={col:"dia",dir:-1};
 var timerAuto=null;
 
@@ -1072,12 +1110,14 @@ function render(){
   var somaRamais=ramais.reduce(function(a,x){return a+x.custoUsd},0);
   var naoAtrib=t.custoUsd-somaRamais;
   var tbr=document.getElementById("tbody-ramal");
-  if(!ramais.length&&naoAtrib<=0.0000001){tbr.innerHTML='<tr><td colspan="4" class="muted">Sem consumo atribuído a ramal no período.</td></tr>';}
-  else{
-    var html=ramais.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
-    if(naoAtrib>0.0000001)html+="<tr><td class='muted'>—</td><td class='muted'>não atribuído</td><td class='right muted'>—</td><td class='right muted'>"+fmtBRL.format(naoAtrib*c)+"</td></tr>";
-    tbr.innerHTML=html;
-  }
+  // O "nao atribuido" entra como item da lista para paginar junto, em vez de
+  // ficar fora da paginacao e sumir da conta em listas grandes.
+  var listaRamal=ramais.slice();
+  if(naoAtrib>0.0000001)listaRamal.push({naoAtrib:true,custoUsd:naoAtrib});
+  paginar("ramal",tbr,listaRamal,function(x){
+    if(x.naoAtrib)return "<tr><td class='muted'>—</td><td class='muted'>não atribuído</td><td class='right muted'>—</td><td class='right muted'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>";
+    return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>";
+  },'<tr><td colspan="4" class="muted">Sem consumo atribuído a ramal no período.</td></tr>');
 
   // Uso por usuário HOJE (mesma fonte, filtrado ao dia atual em UTC).
   var ramaisHoje=ramalAgg(noPeriodo(DADOS.porRamal,hojeUTC(),hojeUTC()));
@@ -1091,9 +1131,12 @@ function render(){
   renderChamados(noPeriodo(DADOS.chamados||[],iv.de,iv.ate),c);
 
   // #8 Ranking dias mais caros
-  var top=dias.slice().sort(function(a,b){return b.custoUsd-a.custoUsd}).slice(0,7);
+  // Antes mostrava so os 7 primeiros; agora a lista inteira, paginada.
+  var top=dias.slice().sort(function(a,b){return b.custoUsd-a.custoUsd});
   var rk=document.getElementById("ranking");
-  rk.innerHTML=top.length?top.map(function(x){return "<li><span class='d'>"+x.dia+"</span><span>"+fmtBRL.format(x.custoUsd*c)+"</span></li>"}).join(""):'<li class="muted">Sem dados no período.</li>';
+  paginar("caros",rk,top,function(x){
+    return "<li><span class='d'>"+x.dia+"</span><span>"+fmtBRL.format(x.custoUsd*c)+"</span></li>";
+  },'<li class="muted">Sem dados no período.</li>');
 
   // #7 Tabela custo por dia (ordenavel)
   renderTabelaDia(dias,c);
@@ -1121,17 +1164,16 @@ function agruparChamados(rows,campoNome,campoId){
 }
 function renderChamados(rows,c){
   var tbc=document.getElementById("tbody-cliente"),tba=document.getElementById("tbody-assunto");
-  function pintar(tb,lista,rotuloVazio){
-    if(!tb)return;
-    if(!lista.length){tb.innerHTML='<tr><td colspan="4" class="muted">'+rotuloVazio+'</td></tr>';return;}
-    tb.innerHTML=lista.slice(0,25).map(function(x){
+  // Antes cortava em 25 sem avisar; agora pagina a lista inteira.
+  function pintar(chave,tb,lista,rotuloVazio){
+    paginar(chave,tb,lista,function(x){
       return "<tr><td>"+escFb(x.nome)+"</td><td class='right'>"+fmtInt.format(x.qtd)+"</td><td class='right'>"
         +fmtBRL.format(x.usd*c)+"</td><td class='right'>"+fmtBRL4.format(x.qtd?x.usd*c/x.qtd:0)+"</td></tr>";
-    }).join("");
+    },'<tr><td colspan="4" class="muted">'+rotuloVazio+'</td></tr>');
   }
   var vazio="Nenhum chamado criado no período (só conta a partir de agora).";
-  pintar(tbc,agruparChamados(rows,"cliente","clienteId"),vazio);
-  pintar(tba,agruparChamados(rows,"assunto","assuntoId"),vazio);
+  pintar("cliente",tbc,agruparChamados(rows,"cliente","clienteId"),vazio);
+  pintar("assunto",tba,agruparChamados(rows,"assunto","assuntoId"),vazio);
 }
 
 function baseOpt(muted,grid,money){return {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}}
@@ -1146,8 +1188,9 @@ function renderTabelaDia(dias,c){
     if(va<vb)return -1*ORD.dir;if(va>vb)return 1*ORD.dir;return 0;
   });
   var tb=document.getElementById("tbody-dia");
-  if(!arr.length){tb.innerHTML='<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>';return;}
-  tb.innerHTML=arr.map(function(x){return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
+  paginar("dia",tb,arr,function(x){
+    return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>";
+  },'<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>');
 }
 
 var charts={};
@@ -1308,7 +1351,7 @@ document.getElementById("nov-overlay").addEventListener("click",function(e){if(e
 // Auto-refresh do painel: SEMPRE ligado, a cada 1 min (obrigatorio; sem opcao de desligar).
 setInterval(function(){if(senha()&&!document.getElementById("app").classList.contains("hidden"))carregar();},60000);
 (function(){var ths=document.querySelectorAll("#tbody-dia");
-  var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}if(DADOS)render();};})();
+  var heads=document.querySelectorAll("th.sortable");for(var i=0;i<heads.length;i++)heads[i].onclick=function(){var col=this.getAttribute("data-col");if(ORD.col===col)ORD.dir*=-1;else{ORD.col=col;ORD.dir=col==="dia"?-1:-1;}resetPag("dia");if(DADOS)render();};})();
 
 function mostrarLogin(err){document.getElementById("app").classList.add("hidden");document.getElementById("login").classList.remove("hidden");document.getElementById("login-err").textContent=err||"";}
 function entrar(){var v=document.getElementById("senha").value||"";try{sessionStorage.setItem("admin-pwd",v)}catch(e){}carregar();}
