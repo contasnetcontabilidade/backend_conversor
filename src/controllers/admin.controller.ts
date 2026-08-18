@@ -590,6 +590,7 @@ body.win-max .titlebar .ic-restore{display:inline}
         <tbody id="tbody-semchamado"><tr><td colspan="6" class="muted">—</td></tr></tbody>
       </table>
     </div>
+    <div class="note" id="sc-aviso" style="margin-top:8px"></div>
   </div>
 
   <div class="panel">
@@ -1219,11 +1220,15 @@ function renderSemChamado(iv,c,muted,grid,gold){
     a.pct=a.gasto>0?Math.round(a.sem/a.gasto*100):0;
     return a;}).sort(function(a,b){return b.sem-a.sem});
 
-  // Cartoes: o percentual IGNORA os ramais de teste (era o pedido), mas o
-  // valor gasto neles continua visivel no cartao proprio.
+  // Chamados criados por versoes antigas do app vem SEM ramal. Eles existem e
+  // custaram, mas nao pertencem a nenhuma linha da tabela — por isso os
+  // cartoes somam por TOTAL, nao pela soma das linhas: senao o convertido
+  // daria zero e tudo apareceria como 100% sem chamado.
+  var convSemRamal=chamRows.filter(function(r){return !String(r.ramal||'')}).reduce(function(a,r){return a+(r.custoUsd||0)},0);
   var reais=lista.filter(function(x){return !x.teste});
   var gastoReal=reais.reduce(function(a,x){return a+x.gasto},0);
-  var semReal=reais.reduce(function(a,x){return a+x.sem},0);
+  var convReal=reais.reduce(function(a,x){return a+x.conv},0)+convSemRamal;
+  var semReal=Math.max(0,gastoReal-convReal);
   var gastoTeste=lista.filter(function(x){return x.teste}).reduce(function(a,x){return a+x.gasto},0);
   var pct=gastoReal>0?Math.round(semReal/gastoReal*100):0;
   document.getElementById('sc-pct').textContent=pct+'%';
@@ -1233,13 +1238,22 @@ function renderSemChamado(iv,c,muted,grid,gold){
   // Tendencia: por dia, quanto virou chamado x quanto nao virou (sem testes).
   var porDia={};
   gastoRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.g+=r.custoUsd||0;});
-  chamRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.cv+=r.custoUsd||0;});
+  // Sem ramal tambem conta aqui: o chamado existiu, so nao sabemos de quem foi.
+  chamRows.forEach(function(r){if(String(r.ramal||'')&&ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.cv+=r.custoUsd||0;});
   var dias=Object.keys(porDia).sort();
   chart('chartSemChamado',{type:'line',data:{labels:dias,datasets:[
     {label:'Virou chamado',data:dias.map(function(d){return +(Math.min(porDia[d].cv,porDia[d].g)*c).toFixed(4)}),borderColor:'#2f9e6b',backgroundColor:'#2f9e6b',tension:.3,pointRadius:2},
     {label:'Sem chamado',data:dias.map(function(d){return +(Math.max(0,porDia[d].g-porDia[d].cv)*c).toFixed(4)}),borderColor:gold,backgroundColor:gold,tension:.3,pointRadius:2}
   ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}});
 
+  // A tabela por ramal so consegue distribuir o que TEM ramal. Avisar e melhor
+  // do que deixar o usuario concluir que ninguem converteu nada.
+  var aviso=document.getElementById('sc-aviso');
+  if(aviso){
+    aviso.innerHTML=convSemRamal>0.0000001
+      ? '<b>'+fmtBRL.format(convSemRamal*c)+'</b> em chamados foram criados por uma versão do app que ainda não enviava o ramal. Eles entram no percentual acima, mas não aparecem distribuídos por ramal na tabela — por isso as linhas abaixo podem mostrar 100%.'
+      : '';
+  }
   var tb=document.getElementById('tbody-semchamado');
   paginar('semchamado',tb,lista,function(x){
     var rot=x.teste?" <span class='muted'>(teste)</span>":'';
