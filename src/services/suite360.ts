@@ -612,38 +612,19 @@ export async function buscarUsuarios(
   setorId?: string,
 ): Promise<ItemLista[]> {
   const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
-  // O Suite nao devolve o setor no objeto do usuario; tentamos filtrar na API.
-  // Se ela ignorar o parametro, o resultado vem igual e nada quebra.
+  // TESTADO EM 18/08/2026: a API do Suite NAO filtra usuario por setor —
+  // ignora setor_id, nao expoe o setor no objeto e nao tem /setores/{id}/usuarios.
+  // O parametro fica aqui, inofensivo, para funcionar sozinho no dia em que a
+  // API passar a suportar. Ate la o modal lista todos os usuarios.
   const filtroSetor = setorId && setorId.trim()
     ? `&setor_id=${encodeURIComponent(setorId.trim())}`
     : "";
   // Idem: o executor certo podia estar fora da 1a pagina.
-  // 1a tentativa: sub-recurso REST /setores/{id}/usuarios (se existir).
-  if (setorId && setorId.trim()) {
-    try {
-      const doSetor = await suiteGetTodos(
-        `/setores/${encodeURIComponent(setorId.trim())}/usuarios?ativo=1${query}`,
-      );
-      if (doSetor.length) {
-        return doSetor.map((u) => ({
-          id: pickId(u) || "",
-          nome: pickStr(u, ["nome", "name"]) || "",
-          extra: pickStr(u, ["email", "funcao"]),
-        }));
-      }
-    } catch {
-      // rota inexistente -> cai na lista completa abaixo
-    }
-  }
   const data = await suiteGetTodos(`/usuarios?ativo=1${query}${filtroSetor}`);
   return data.map((u) => ({
     id: pickId(u) || "",
     nome: pickStr(u, ["nome", "name"]) || "",
     extra: pickStr(u, ["email", "funcao"]),
-    // Setor do usuario: permite ao modal mostrar so quem e do setor escolhido.
-    // Os nomes variam conforme a versao do Suite, entao tentamos os plausiveis.
-    setorId: pickStr(u, ["setor_id", "setorId", "id_setor", "departamento_id"]) || "",
-    setorNome: pickStr(u, ["setor", "setor_nome", "departamento", "setor_descricao"]) || "",
   }));
 }
 
