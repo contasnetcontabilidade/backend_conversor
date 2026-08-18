@@ -578,7 +578,6 @@ body.win-max .titlebar .ic-restore{display:inline}
 
   <div class="panel">
     <h3><i data-lucide="ghost"></i> IA sem chamado — no período</h3>
-    <div class="note">Resumo gerado pela IA que não virou chamado. Parte disso é normal (engano, trote, cliente resolveu sozinho); o que importa é a <b>tendência</b>. Ramais de teste aparecem em linha separada e não entram no percentual.</div>
     <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
       <div class="card accent"><div class="k"><i data-lucide="percent"></i> Não virou chamado</div><div class="v" id="sc-pct">—</div><div class="s" id="sc-pct-s">do gasto de IA no período</div></div>
       <div class="card gold"><div class="k"><i data-lucide="wallet"></i> Valor sem chamado</div><div class="v" id="sc-val">—</div><div class="s" id="sc-val-s">R$</div></div>
@@ -591,7 +590,6 @@ body.win-max .titlebar .ic-restore{display:inline}
         <tbody id="tbody-semchamado"><tr><td colspan="6" class="muted">—</td></tr></tbody>
       </table>
     </div>
-    <div class="note" id="sc-aviso" style="margin-top:8px"></div>
   </div>
 
   <div class="panel">
@@ -1255,14 +1253,6 @@ function renderSemChamado(iv,c,muted,grid,gold){
     {label:'Sem chamado',data:dias.map(function(d){return +(Math.max(0,porDia[d].g-porDia[d].cv)*c).toFixed(4)}),borderColor:gold,backgroundColor:gold,tension:.3,pointRadius:2}
   ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}});
 
-  // A tabela por ramal so consegue distribuir o que TEM ramal. Avisar e melhor
-  // do que deixar o usuario concluir que ninguem converteu nada.
-  var aviso=document.getElementById('sc-aviso');
-  if(aviso){
-    aviso.innerHTML=convSemRamal>0.0000001
-      ? '<b>'+fmtBRL.format(convSemRamal*c)+'</b> em chamados foram criados por uma versão do app que ainda não enviava o ramal. Eles entram no percentual acima, mas não aparecem distribuídos por ramal na tabela — por isso as linhas abaixo podem mostrar 100%.'
-      : '';
-  }
   var tb=document.getElementById('tbody-semchamado');
   paginar('semchamado',tb,lista,function(x){
     var rot=x.teste?" <span class='muted'>(teste)</span>":'';
