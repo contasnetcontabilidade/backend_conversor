@@ -272,6 +272,10 @@ export async function adminUsoController(req: Request, res: Response) {
     // Ramais de teste (devs). NAO sao escondidos: o painel os mostra numa
     // linha propria, para o gasto continuar visivel sem contaminar o numero
     // de 'usuario gerou IA e desistiu'.
+    // Ate esta data o app NAO enviava o ramal no chamado, entao nao ha como
+    // atribuir o gasto. Contar aquilo como desperdicio seria mentira: na pratica
+    // quase tudo virou chamado. O painel trata o periodo anterior como convertido.
+    semChamadoDesde: String(process.env.SEM_CHAMADO_DESDE || "2026-08-19").trim(),
     ramaisTeste: String(process.env.RAMAIS_TESTE || "")
       .split(/[,;\s]+/)
       .map((r) => r.trim())
@@ -1235,6 +1239,12 @@ function renderSemChamado(iv,c,muted,grid,gold){
   function slot(r,u){var k=String(r||'');var a=m[k]||(m[k]={ramal:k,usuario:u||'',gasto:0,conv:0});if(!a.usuario&&u)a.usuario=u;return a;}
   gastoRows.forEach(function(r){slot(r.ramal,r.usuario).gasto+=r.custoUsd||0;});
   chamRows.forEach(function(r){slot(r.ramal,r.usuario).conv+=r.custoUsd||0;});
+  // Gasto ANTERIOR ao corte entra como convertido: naquele periodo o chamado
+  // era criado sem ramal, entao o cruzamento nao tem como casar.
+  var corte=(DADOS&&DADOS.semChamadoDesde)||"";
+  if(corte){
+    gastoRows.forEach(function(r){ if(r.dia<corte) slot(r.ramal,r.usuario).conv+=r.custoUsd||0; });
+  }
   var lista=Object.keys(m).map(function(k){var a=m[k];
     a.teste=ehTeste(a.ramal);
     // Clamp: o convertido pode passar o gasto do ramal quando o chamado foi
@@ -1261,7 +1271,7 @@ function renderSemChamado(iv,c,muted,grid,gold){
 
   // Tendencia: por dia, quanto virou chamado x quanto nao virou (sem testes).
   var porDia={};
-  gastoRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.g+=r.custoUsd||0;});
+  gastoRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.g+=r.custoUsd||0;if(corte&&r.dia<corte)d.cv+=r.custoUsd||0;});
   // Sem ramal tambem conta aqui: o chamado existiu, so nao sabemos de quem foi.
   chamRows.forEach(function(r){if(String(r.ramal||'')&&ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.cv+=r.custoUsd||0;});
   var dias=Object.keys(porDia).sort();
