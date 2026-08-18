@@ -618,6 +618,23 @@ export async function buscarUsuarios(
     ? `&setor_id=${encodeURIComponent(setorId.trim())}`
     : "";
   // Idem: o executor certo podia estar fora da 1a pagina.
+  // 1a tentativa: sub-recurso REST /setores/{id}/usuarios (se existir).
+  if (setorId && setorId.trim()) {
+    try {
+      const doSetor = await suiteGetTodos(
+        `/setores/${encodeURIComponent(setorId.trim())}/usuarios?ativo=1${query}`,
+      );
+      if (doSetor.length) {
+        return doSetor.map((u) => ({
+          id: pickId(u) || "",
+          nome: pickStr(u, ["nome", "name"]) || "",
+          extra: pickStr(u, ["email", "funcao"]),
+        }));
+      }
+    } catch {
+      // rota inexistente -> cai na lista completa abaixo
+    }
+  }
   const data = await suiteGetTodos(`/usuarios?ativo=1${query}${filtroSetor}`);
   return data.map((u) => ({
     id: pickId(u) || "",
