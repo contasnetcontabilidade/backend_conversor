@@ -269,6 +269,13 @@ export async function adminUsoController(req: Request, res: Response) {
     porRamal,
     porFonte,
     chamados, // 1 linha por chamado criado (cliente, assunto, custo)
+    // Ramais de teste (devs). NAO sao escondidos: o painel os mostra numa
+    // linha propria, para o gasto continuar visivel sem contaminar o numero
+    // de 'usuario gerou IA e desistiu'.
+    ramaisTeste: String(process.env.RAMAIS_TESTE || "")
+      .split(/[,;\s]+/)
+      .map((r) => r.trim())
+      .filter(Boolean),
   });
 }
 
@@ -564,6 +571,23 @@ body.win-max .titlebar .ic-restore{display:inline}
       <table>
         <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Chamadas</th><th class="right">Tokens</th><th class="right">Min (Deepgram)</th><th class="right">Custo R$</th></tr></thead>
         <tbody id="tbody-ramal-hoje"><tr><td colspan="6" class="muted">Carregando…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3><i data-lucide="ghost"></i> IA sem chamado — no período</h3>
+    <div class="note">Resumo gerado pela IA que não virou chamado. Parte disso é normal (engano, trote, cliente resolveu sozinho); o que importa é a <b>tendência</b>. Ramais de teste aparecem em linha separada e não entram no percentual.</div>
+    <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">
+      <div class="card accent"><div class="k"><i data-lucide="percent"></i> Não virou chamado</div><div class="v" id="sc-pct">—</div><div class="s" id="sc-pct-s">do gasto de IA no período</div></div>
+      <div class="card gold"><div class="k"><i data-lucide="wallet"></i> Valor sem chamado</div><div class="v" id="sc-val">—</div><div class="s" id="sc-val-s">R$</div></div>
+      <div class="card brand"><div class="k"><i data-lucide="flask-conical"></i> Testes (desenvolvimento)</div><div class="v" id="sc-teste">—</div><div class="s" id="sc-teste-s">fora do percentual</div></div>
+    </div>
+    <div class="chart-box" style="margin-top:14px"><canvas id="chartSemChamado"></canvas></div>
+    <div style="overflow:auto;margin-top:10px">
+      <table>
+        <thead><tr><th>Ramal</th><th>Usuário</th><th class="right">Gasto R$</th><th class="right">Virou chamado R$</th><th class="right">Sem chamado R$</th><th class="right">%</th></tr></thead>
+        <tbody id="tbody-semchamado"><tr><td colspan="6" class="muted">—</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1139,6 +1163,7 @@ function render(){
 
   // Custo por cliente / por assunto (1 linha por chamado criado, ver custoChamados.ts)
   renderChamados(noPeriodo(DADOS.chamados||[],iv.de,iv.ate),c);
+  renderSemChamado(iv,c,muted,grid,gold);
 
   // #8 Ranking dias mais caros
   // Antes mostrava so os 7 primeiros; agora a lista inteira, paginada.
@@ -1172,6 +1197,56 @@ function agruparChamados(rows,campoNome,campoId){
   });
   return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){return b.usd-a.usd;});
 }
+// ---- IA sem chamado ----
+// Conta por SUBTRACAO: gasto de IA do ramal - gasto que virou chamado.
+// Nao precisa de dado novo; os dois lados ja vem no payload do painel.
+function ehTeste(ramal){return ((DADOS&&DADOS.ramaisTeste)||[]).indexOf(String(ramal||''))>=0;}
+function renderSemChamado(iv,c,muted,grid,gold){
+  var gastoRows=noPeriodo(DADOS.porRamal||[],iv.de,iv.ate);
+  var chamRows=noPeriodo(DADOS.chamados||[],iv.de,iv.ate);
+
+  // Por ramal: gasto total x gasto que virou chamado.
+  var m={};
+  function slot(r,u){var k=String(r||'');var a=m[k]||(m[k]={ramal:k,usuario:u||'',gasto:0,conv:0});if(!a.usuario&&u)a.usuario=u;return a;}
+  gastoRows.forEach(function(r){slot(r.ramal,r.usuario).gasto+=r.custoUsd||0;});
+  chamRows.forEach(function(r){slot(r.ramal,r.usuario).conv+=r.custoUsd||0;});
+  var lista=Object.keys(m).map(function(k){var a=m[k];
+    a.teste=ehTeste(a.ramal);
+    // Clamp: o convertido pode passar o gasto do ramal quando o chamado foi
+    // criado por outra pessoa (transferencia). Negativo confundiria mais que
+    // ajudaria, entao o piso e zero.
+    a.sem=Math.max(0,a.gasto-a.conv);
+    a.pct=a.gasto>0?Math.round(a.sem/a.gasto*100):0;
+    return a;}).sort(function(a,b){return b.sem-a.sem});
+
+  // Cartoes: o percentual IGNORA os ramais de teste (era o pedido), mas o
+  // valor gasto neles continua visivel no cartao proprio.
+  var reais=lista.filter(function(x){return !x.teste});
+  var gastoReal=reais.reduce(function(a,x){return a+x.gasto},0);
+  var semReal=reais.reduce(function(a,x){return a+x.sem},0);
+  var gastoTeste=lista.filter(function(x){return x.teste}).reduce(function(a,x){return a+x.gasto},0);
+  var pct=gastoReal>0?Math.round(semReal/gastoReal*100):0;
+  document.getElementById('sc-pct').textContent=pct+'%';
+  document.getElementById('sc-val').textContent=fmtBRL.format(semReal*c);
+  document.getElementById('sc-teste').textContent=fmtBRL.format(gastoTeste*c);
+
+  // Tendencia: por dia, quanto virou chamado x quanto nao virou (sem testes).
+  var porDia={};
+  gastoRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.g+=r.custoUsd||0;});
+  chamRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.cv+=r.custoUsd||0;});
+  var dias=Object.keys(porDia).sort();
+  chart('chartSemChamado',{type:'line',data:{labels:dias,datasets:[
+    {label:'Virou chamado',data:dias.map(function(d){return +(Math.min(porDia[d].cv,porDia[d].g)*c).toFixed(4)}),borderColor:'#2f9e6b',backgroundColor:'#2f9e6b',tension:.3,pointRadius:2},
+    {label:'Sem chamado',data:dias.map(function(d){return +(Math.max(0,porDia[d].g-porDia[d].cv)*c).toFixed(4)}),borderColor:gold,backgroundColor:gold,tension:.3,pointRadius:2}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}});
+
+  var tb=document.getElementById('tbody-semchamado');
+  paginar('semchamado',tb,lista,function(x){
+    var rot=x.teste?" <span class='muted'>(teste)</span>":'';
+    return "<tr><td>"+(x.ramal||'—')+rot+"</td><td>"+(x.usuario||'—')+"</td><td class='right'>"+fmtBRL.format(x.gasto*c)+"</td><td class='right'>"+fmtBRL.format(x.conv*c)+"</td><td class='right'>"+fmtBRL.format(x.sem*c)+"</td><td class='right'>"+(x.teste?'—':x.pct+'%')+"</td></tr>";
+  },'<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>');
+}
+
 function renderChamados(rows,c){
   var tbc=document.getElementById("tbody-cliente"),tba=document.getElementById("tbody-assunto");
   // Antes cortava em 25 sem avisar; agora pagina a lista inteira.
