@@ -60,7 +60,7 @@ export type TranscricaoInput = {
   // Entram como dica no prompt para grafar corretamente — nunca sao forcados.
   nomesConhecidos?: string[];
   // Fonte para o painel de custos (transcricao normalmente e "ligacao").
-  fonte?: "ligacao" | "email" | "resumo";
+  fonte?: "ligacao" | "email" | "resumo" | "gravacao";
   // Id do atendimento (conversationSpaceId / messageId): amarra o custo desta
   // chamada de IA ao chamado que sair dela (custo por cliente/assunto).
   itemId?: string;
@@ -70,7 +70,7 @@ type IdentidadeUso = {
   ramal?: string;
   usuario?: string;
   nomesConhecidos?: string[];
-  fonte?: "ligacao" | "email" | "resumo";
+  fonte?: "ligacao" | "email" | "resumo" | "gravacao";
   itemId?: string;
 };
 

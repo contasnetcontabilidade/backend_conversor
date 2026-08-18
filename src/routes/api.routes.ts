@@ -44,6 +44,10 @@ import {
   gmailPreviewController,
 } from "../controllers/gmail.controller";
 import {
+  gravacaoCriarController,
+  gravacaoPreviewController,
+} from "../controllers/gravacao.controller";
+import {
   chatCriarController,
   chatMessagesController,
   chatPreviewController,
@@ -119,6 +123,16 @@ apiRouter.get("/chat/spaces", asyncHandler(chatSpacesController));
 apiRouter.get("/chat/messages", asyncHandler(chatMessagesController));
 apiRouter.post("/chat/chamado/preview", asyncHandler(chatPreviewController));
 apiRouter.post("/chat/chamado/criar", asyncHandler(chatCriarController));
+
+// --- Chamado a partir de uma GRAVACAO avulsa (aba Gravar & Resumir) ---
+// O preview recebe o audio, entao passa pelo mesmo middleware de upload do
+// /processar-upload. O criar e JSON comum.
+apiRouter.post(
+  "/gravacao/chamado/preview",
+  uploadAudioMiddleware,
+  asyncHandler(gravacaoPreviewController),
+);
+apiRouter.post("/gravacao/chamado/criar", asyncHandler(gravacaoCriarController));
 
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);

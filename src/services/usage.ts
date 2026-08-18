@@ -20,7 +20,7 @@ function getRedis(): Redis | null {
 }
 
 export type Operacao = "transcricao" | "resumo";
-export type Fonte = "ligacao" | "email" | "resumo" | "chat";
+export type Fonte = "ligacao" | "email" | "resumo" | "chat" | "gravacao";
 // "sec" = segundos de audio (provedores cobrados por minuto, ex.: Deepgram).
 type Metric = "in" | "out" | "calls" | "sec";
 

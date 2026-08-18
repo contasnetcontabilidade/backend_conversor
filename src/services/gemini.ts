@@ -63,7 +63,7 @@ export type ResumoInput = {
   // Origem do conteudo, ajusta o prompt. Padrao: "ligacao".
   origem?: "ligacao" | "email" | "chat";
   // Fonte para o painel de custos separar ligacao x e-mail x chat.
-  fonte?: "ligacao" | "email" | "resumo" | "chat";
+  fonte?: "ligacao" | "email" | "resumo" | "chat" | "gravacao";
   // Quantidade de mensagens quando o conteudo e uma conversa (thread de e-mail
   // ou mensagens selecionadas do Google Chat).
   // >1 ativa a instrucao para NAO perder nenhuma solicitacao de nenhuma mensagem.

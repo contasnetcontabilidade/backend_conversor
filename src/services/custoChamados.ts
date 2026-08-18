@@ -38,7 +38,7 @@ let mem: string[] = [];
 export interface ChamadoCusto {
   ts: string;
   dia: string; // YYYY-MM-DD (UTC), igual as chaves do painel
-  fonte: string; // "ligacao" | "email" | "chat"
+  fonte: string; // "ligacao" | "email" | "chat" | "gravacao"
   itemId: string;
   clienteId: string;
   cliente: string;

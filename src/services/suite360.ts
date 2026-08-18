@@ -994,6 +994,51 @@ Gravacao:
 ${d.gravacao || "-"}`;
 }
 
+export interface DadosDescricaoGravacao {
+  razaoSocial?: string;
+  cnpj?: string;
+  dataHora?: string; // quando a gravacao comecou
+  duracao?: string; // "03:12"
+  atendente?: string; // quem gravou
+  idGravacao?: string;
+  resumo?: string;
+  pontosPrincipais?: string[];
+  providencias?: string[];
+  transcricao?: string;
+}
+
+// Descricao do chamado vindo de uma GRAVACAO avulsa (aba Gravar & Resumir).
+//
+// Molde da ligacao, sem o bloco de telefonia e sem a linha "Gravacao:" (nao ha
+// gravacao no GoTo para apontar). A TRANSCRICAO ENTRA: diferente de e-mail e
+// chat, aqui ela e o unico registro do que foi dito — o audio fica so na maquina
+// de quem gravou e some ao fechar o app.
+export function montarDescricaoGravacao(d: DadosDescricaoGravacao): string {
+  const cliente =
+    [d.razaoSocial, d.cnpj].filter(Boolean).join(" - ") || "(nao identificado)";
+  return `Atendimento gravado registrado automaticamente.
+
+Cliente:
+${cliente}
+
+Dados da gravacao:
+- Data/hora: ${d.dataHora || "-"}
+- Duracao: ${d.duracao || "-"}
+- Responsavel: ${d.atendente || "-"}
+
+Resumo:
+${d.resumo || "-"}
+
+Pontos principais:
+${linhas(d.pontosPrincipais)}
+
+Providencias sugeridas:
+${linhas(d.providencias)}
+
+Transcricao:
+${d.transcricao || "-"}`;
+}
+
 export interface DadosDescricaoEmail {
   razaoSocial?: string;
   cnpj?: string;
