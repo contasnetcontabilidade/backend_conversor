@@ -30,8 +30,7 @@ const KEY = {
 let redis: Redis | null = null;
 function getRedis(): Redis | null {
   // Aceita tanto os nomes do Upstash quanto os da integracao KV da Vercel.
-  const url =
-    process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
   const token =
     process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
   if (!url || !token) return null;
@@ -170,7 +169,9 @@ export async function getChamadoCriado(
 }
 export async function salvarChamadoCriado(
   id: string,
-  dados: { id: string; protocolo: string },
+  // Alem de id/protocolo aceita extras (protocolos do lote, grupoId, avisos)
+  // para o caminho "ja existia" reexibir o que aconteceu na criacao original.
+  dados: { id: string; protocolo: string } & Record<string, unknown>,
   ns = "goto",
   ttlSeg = 30 * 24 * 3600, // 30 dias (producao). Dry-run passa um TTL curto.
 ) {
@@ -190,10 +191,24 @@ export interface PreviewCacheDados {
   resumo: unknown; // ResumoJson (evita dependencia circular com o controller)
   iaOk: boolean;
   gravacaoNota: string;
+  // Versao do prompt que gerou este resumo. Sem isso, depois de mudar o schema
+  // da IA o cache devolveria por 48h um resumo SEM os campos novos — e o
+  // sintoma seria "a IA parou de sugerir", sem erro nenhum para investigar.
+  promptVersion?: string;
+  // Versao da ESTRATEGIA de transcricao (quais trechos entram). Separada do
+  // prompt porque muda por motivo diferente: quando passamos a transcrever so o
+  // trecho principal, os previews de 48h atras continuariam devolvendo o texto
+  // concatenado com os cabecalhos "--- Trecho i/N ---".
+  estrategiaVersao?: string;
+  // Indice do trecho que foi transcrito — o player abre neste mesmo trecho,
+  // senao o audio ouvido nao bate com o texto do chamado.
+  trechoPrincipal?: number;
 }
 
 export async function getPreviewCache(
   conversationSpaceId: string,
+  promptVersion?: string,
+  estrategiaVersao?: string,
 ): Promise<PreviewCacheDados | null> {
   if (!conversationSpaceId) return null;
   const raw = (await getValue(
@@ -208,10 +223,16 @@ export async function getPreviewCache(
       return null;
     }
   }
-  if (obj && typeof (obj as PreviewCacheDados).transcript === "string") {
-    return obj as PreviewCacheDados;
+  if (!obj || typeof (obj as PreviewCacheDados).transcript !== "string") {
+    return null;
   }
-  return null;
+  const dados = obj as PreviewCacheDados;
+  // Prompt diferente do atual = cache miss (reprocessa com o schema novo).
+  if (promptVersion && dados.promptVersion !== promptVersion) return null;
+  // Idem para a estrategia de transcricao. Quem nao informa (gravacao avulsa)
+  // segue sem esta checagem.
+  if (estrategiaVersao && dados.estrategiaVersao !== estrategiaVersao) return null;
+  return dados;
 }
 export async function salvarPreviewCache(
   conversationSpaceId: string,
@@ -223,6 +244,36 @@ export async function salvarPreviewCache(
     JSON.stringify(dados),
     PREVIEW_CACHE_TTL_SEG,
   );
+}
+
+// Indice do trecho principal de uma ligacao. Guardado separado do cache do
+// preview porque o player consulta DEPOIS, e as vezes muito depois: o preview
+// expira em 48h e a pessoa ainda pode abrir o audio de uma ligacao antiga.
+const TRECHO_PRINCIPAL_TTL_SEG =
+  Number(process.env.TRECHO_PRINCIPAL_TTL_SEG) || 30 * 24 * 3600; // 30 dias
+
+export async function salvarTrechoPrincipal(
+  conversationSpaceId: string,
+  indice: number,
+) {
+  if (!conversationSpaceId || !Number.isInteger(indice) || indice < 0) return;
+  await setValue(
+    `goto:trechoprincipal:${conversationSpaceId}`,
+    String(indice),
+    TRECHO_PRINCIPAL_TTL_SEG,
+  );
+}
+
+export async function getTrechoPrincipal(
+  conversationSpaceId: string,
+): Promise<number | null> {
+  if (!conversationSpaceId) return null;
+  const raw = (await getValue(
+    `goto:trechoprincipal:${conversationSpaceId}`,
+  )) as unknown;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 // Lock atomico (SET NX) para impedir criacao concorrente do mesmo item.

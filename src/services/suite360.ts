@@ -1,5 +1,10 @@
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { isSuiteDev } from "../lib/suiteEnv";
+import {
+  ehCompetenciaValida,
+  ehDataISOValida,
+  ehDataPassada,
+} from "../utils/datas";
 
 // Cliente da API Publica v1 do Suite360/SuiteWeb.
 // Base: https://suiteweb.contasnet.com.br/api/public/v1
@@ -25,7 +30,10 @@ function baseUrl(): string {
       "",
     );
   }
-  return (process.env.SUITE360_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  return (process.env.SUITE360_BASE_URL || DEFAULT_BASE_URL).replace(
+    /\/+$/,
+    "",
+  );
 }
 
 function apiKey(): string {
@@ -49,8 +57,8 @@ export function isDryRun(): boolean {
   // Ligado por padrao. Só cria de verdade com SUITE360_DRY_RUN=0/false/no.
   // Em dev, SUITE360_DRY_RUN_DEV tem prioridade (cai no global se ausente).
   const raw = isSuiteDev()
-    ? process.env.SUITE360_DRY_RUN_DEV ?? process.env.SUITE360_DRY_RUN ?? "1"
-    : process.env.SUITE360_DRY_RUN ?? "1";
+    ? (process.env.SUITE360_DRY_RUN_DEV ?? process.env.SUITE360_DRY_RUN ?? "1")
+    : (process.env.SUITE360_DRY_RUN ?? "1");
   const v = raw.trim().toLowerCase();
   return !(v === "0" || v === "false" || v === "no" || v === "off");
 }
@@ -160,13 +168,41 @@ function suiteErrorFrom(resp: SuiteResponse): AppError {
         message: upstreamMsg || "Falha de validacao no Suite360.",
         details: { upstreamCode, details },
       });
-    case 429:
+    case 413:
+      // Diferente do PAYLOAD_TOO_LARGE que o errorHandler emite para o limite
+      // do express.json: aqui quem recusou foi o Suite, e a causa pratica e a
+      // transcricao inteira dentro da descricao.
+      return new AppError({
+        statusCode: 413,
+        code: "SUITE_PAYLOAD_TOO_LARGE",
+        message:
+          upstreamMsg ||
+          "Conteudo do chamado grande demais para o Suite360 (reduza a descricao).",
+        details: { upstreamCode },
+      });
+    case 429: {
+      // A API tem DOIS 429 diferentes: limite de requisicoes (tentar de novo
+      // resolve) e DEBOUNCE de corpo identico em menos de 500ms (tentar de novo
+      // e a PIOR acao — o primeiro pedido provavelmente ja criou o chamado).
+      const debounce = /debounce|duplic/i.test(
+        `${upstreamCode || ""} ${upstreamMsg || ""}`,
+      );
+      if (debounce) {
+        return new AppError({
+          statusCode: 429,
+          code: "SUITE_DEBOUNCE",
+          message:
+            "Pedido duplicado detectado (reenvio muito rapido). O chamado pode JA ter sido criado — confira no Suite antes de tentar de novo.",
+          details: { upstreamCode },
+        });
+      }
       return new AppError({
         statusCode: 429,
         code: "SUITE_RATE_LIMITED",
         message: upstreamMsg || "Limite de requisicoes do Suite360 atingido.",
         details: { upstreamCode, retryAfter: resp.retryAfter },
       });
+    }
     default:
       return new AppError({
         statusCode: 502,
@@ -192,7 +228,9 @@ async function suiteGet(path: string): Promise<unknown> {
     resp = await suiteRequest(path, { method: "GET" });
   }
   if (!isOk(resp)) throw suiteErrorFrom(resp);
-  return isRecord(resp.body) && "data" in resp.body ? resp.body.data : resp.body;
+  return isRecord(resp.body) && "data" in resp.body
+    ? resp.body.data
+    : resp.body;
 }
 
 // GET de LISTA COMPLETA, varrendo a paginacao do Suite.
@@ -565,16 +603,13 @@ export interface ItemLista {
   nome: string;
   extra?: string;
   // So os usuarios trazem setor (para o modal filtrar o executor pelo setor).
-  setorId?: string;
+  setorId?: string; // o primeiro (compat)
   setorNome?: string;
+  setorIds?: string[]; // TODOS os setores da pessoa
 }
 
 function norm(s: string | undefined): string {
-  return (s || "")
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .trim();
+  return (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
 }
 
 export async function buscarTipos(q?: string): Promise<ItemLista[]> {
@@ -607,25 +642,238 @@ export async function buscarOrigens(): Promise<ItemLista[]> {
   }));
 }
 
+// Extrai o setor do objeto de usuario, sondando os formatos plausiveis. Ate
+// 18/08/2026 a API nao expunha setor nenhum; a documentacao nova diz que expoe.
+// Sondar em vez de assumir e o que permite descobrir a verdade em runtime.
+function setorDoUsuario(u: Record<string, unknown>): {
+  id?: string;
+  nome?: string;
+  ids: string[]; // TODOS os setores (uma pessoa pode estar em mais de um)
+} {
+  const direto = pickStr(u, ["setor_id", "setorId", "departamento_id"]);
+  const nomeDireto = pickStr(u, ["setor_nome", "setorNome", "setor"]);
+  if (direto) return { id: direto, nome: nomeDireto, ids: [direto] };
+
+  if (isRecord(u.setor)) {
+    const id = pickId(u.setor);
+    return {
+      id,
+      nome: pickStr(u.setor, ["descricao", "nome", "name"]),
+      ids: id ? [id] : [],
+    };
+  }
+  if (Array.isArray(u.setores) && u.setores.length) {
+    // Le o array INTEIRO: lendo so o [0], quem esta em dois setores sumia da
+    // busca pelo segundo.
+    const todos = u.setores
+      .filter(isRecord)
+      .map((s) => ({
+        id: pickId(s as Record<string, unknown>) || "",
+        nome: pickStr(s as Record<string, unknown>, ["descricao", "nome", "name"]),
+      }))
+      .filter((s) => s.id);
+    if (todos.length) {
+      return { id: todos[0].id, nome: todos[0].nome, ids: todos.map((s) => s.id) };
+    }
+  }
+  return { id: undefined, nome: nomeDireto, ids: [] };
+}
+
+let logouSondaSetor = false;
+
+export interface ResultadoUsuarios {
+  itens: ItemLista[];
+  // O app precisa saber se a lista REALMENTE saiu filtrada, para nao dizer ao
+  // usuario "usuarios do setor X" quando na verdade veio todo mundo.
+  filtradoPorSetor: boolean;
+}
+
 export async function buscarUsuarios(
   q?: string,
-  setorId?: string,
-): Promise<ItemLista[]> {
+  setores?: string | string[],
+): Promise<ResultadoUsuarios> {
   const query = q && q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
-  // TESTADO EM 18/08/2026: a API do Suite NAO filtra usuario por setor —
-  // ignora setor_id, nao expoe o setor no objeto e nao tem /setores/{id}/usuarios.
-  // O parametro fica aqui, inofensivo, para funcionar sozinho no dia em que a
-  // API passar a suportar. Ate la o modal lista todos os usuarios.
-  const filtroSetor = setorId && setorId.trim()
-    ? `&setor_id=${encodeURIComponent(setorId.trim())}`
-    : "";
-  // Idem: o executor certo podia estar fora da 1a pagina.
+  const alvos = (Array.isArray(setores) ? setores : setores ? [setores] : [])
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  const setor = alvos[0] || "";
+  // O `setor_id` da API e escalar: com UM setor deixamos ela filtrar; com
+  // varios, trazemos tudo (suiteGetTodos ja pagina) e fazemos a uniao aqui.
+  const filtroSetor =
+    alvos.length === 1 ? `&setor_id=${encodeURIComponent(setor)}` : "";
+  // O executor certo podia estar fora da 1a pagina (a API pagina de 50 em 50).
   const data = await suiteGetTodos(`/usuarios?ativo=1${query}${filtroSetor}`);
-  return data.map((u) => ({
-    id: pickId(u) || "",
-    nome: pickStr(u, ["nome", "name"]) || "",
-    extra: pickStr(u, ["email", "funcao"]),
-  }));
+
+  const itens: ItemLista[] = data.map((u) => {
+    const s = setorDoUsuario(u);
+    return {
+      id: pickId(u) || "",
+      nome: pickStr(u, ["nome", "name"]) || "",
+      extra: pickStr(u, ["email", "funcao"]),
+      setorId: s.id,
+      setorNome: s.nome,
+      setorIds: s.ids,
+    };
+  });
+
+  if (!logouSondaSetor) {
+    logouSondaSetor = true;
+    const comSetor = itens.filter((i) => i.setorIds && i.setorIds.length).length;
+    console.log(
+      `[suite360] sonda de setor em /usuarios: ${comSetor}/${itens.length} usuarios expoem setor`,
+    );
+  }
+
+  if (!alvos.length) return { itens, filtradoPorSetor: false };
+
+  // Se a API expoe o setor, conferimos localmente (cinto e suspensorio): assim
+  // um `setor_id` silenciosamente ignorado nao vira lista errada na tela.
+  const expoeSetor = itens.some((i) => i.setorIds && i.setorIds.length);
+  if (expoeSetor) {
+    const querido = new Set(alvos);
+    // UNIAO: com Suporte + Fiscal marcados, aparece gente dos dois.
+    const doSetor = itens.filter((i) =>
+      (i.setorIds || []).some((id) => querido.has(String(id))),
+    );
+    // Lista vazia trava o modal sem explicacao. Melhor mostrar todos e avisar
+    // que o filtro nao valeu.
+    if (!doSetor.length) return { itens, filtradoPorSetor: false };
+    return { itens: doSetor, filtradoPorSetor: true };
+  }
+
+  // A API nao expoe setor: nao da para confirmar se filtrou. Assumimos que nao,
+  // para o app nao prometer um filtro que talvez nao exista.
+  return { itens, filtradoPorSetor: false };
+}
+
+// ---------------------------------------------------------------------------
+// Consultas que a API ganhou junto com os campos novos do chamado
+// ---------------------------------------------------------------------------
+
+export interface CampoPersonalizado {
+  id: string;
+  nome: string;
+  tipo: string; // texto | numero | data | booleano | valor
+  obrigatorio: boolean;
+  opcoes?: ItemLista[];
+}
+
+// GET /tipos-chamado/{id}/campos — definicoes dos campos personalizados do
+// assunto. Assunto sem campos devolve lista vazia e o modal nao muda em nada.
+export async function buscarCamposDoTipo(
+  tipoId: string,
+): Promise<CampoPersonalizado[]> {
+  const data = await suiteGet(
+    `/tipos-chamado/${encodeURIComponent(tipoId)}/campos`,
+  );
+  return asList(data)
+    .map((c) => ({
+      id: pickId(c) || "",
+      nome: pickStr(c, ["nome", "label", "descricao", "name"]) || "",
+      tipo: (pickStr(c, ["tipo", "type"]) || "texto").toLowerCase(),
+      obrigatorio: ehVerdadeiro(
+        c.obrigatorio ?? c.required ?? c.is_required ?? c.isObrigatorio,
+      ),
+      opcoes: Array.isArray(c.opcoes)
+        ? asList(c.opcoes).map((o) => ({
+            id: pickId(o) || "",
+            nome: pickStr(o, ["nome", "label", "descricao"]) || "",
+          }))
+        : undefined,
+    }))
+    .filter((c) => c.id);
+}
+
+function ehVerdadeiro(v: unknown): boolean {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") {
+    return ["1", "true", "sim", "yes", "on"].includes(v.trim().toLowerCase());
+  }
+  return false;
+}
+
+// GET /processos?departamento_id= — processos que podem ser vinculados. A API
+// so aceita processos do setor do executor.
+export async function buscarProcessos(
+  departamentoId?: string,
+  q?: string,
+): Promise<ItemLista[]> {
+  const dep = (departamentoId || "").trim();
+  const partes: string[] = [];
+  if (dep) partes.push(`departamento_id=${encodeURIComponent(dep)}`);
+  if (q && q.trim()) partes.push(`q=${encodeURIComponent(q.trim())}`);
+  const qs = partes.length ? `?${partes.join("&")}` : "";
+  const data = await suiteGetTodos(`/processos${qs}`);
+  return data
+    .map((p) => ({
+      id: pickId(p) || "",
+      // `nome_processo` PRIMEIRO: e o campo real desta rota. Sem ele os itens
+      // vinham com nome vazio, o combo listava linhas em branco e parecia que a
+      // busca da API estava quebrada — ela nunca esteve.
+      nome:
+        pickStr(p, ["nome_processo", "nome", "descricao", "titulo", "name"]) ||
+        "",
+      // O departamento vem como objeto { id, descricao }.
+      extra: isRecord(p.departamento)
+        ? pickStr(p.departamento, ["descricao", "nome"])
+        : pickStr(p, ["departamento", "setor"]),
+    }))
+    .filter((p) => p.id && p.nome);
+}
+
+export interface PreviewExecutor {
+  ok: boolean;
+  executor?: { id: string; nome: string; setor?: string };
+  motivo?: string;
+}
+
+// GET /chamados/preview-executor — roda o MESMO resolver que a criacao usa,
+// para conferir antes quem ficaria responsavel. NUNCA lanca: existe para evitar
+// um 422, seria contraproducente virar uma fonte nova de erro.
+export async function previewExecutor(p: {
+  cliente_id?: string;
+  tipo_apontamento_id?: string;
+  executor_id?: string;
+  responsavel_conclusao_tipo?: RespConclusaoTipo;
+  responsavel_conclusao_id?: string;
+  setor_responsavel_conclusao_id?: string;
+}): Promise<PreviewExecutor> {
+  const partes = Object.entries(p)
+    .filter(([, v]) => v !== undefined && v !== null && String(v).trim())
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`);
+  if (!partes.length) return { ok: false, motivo: "sem dados para consultar" };
+
+  try {
+    const data = await suiteGet(
+      `/chamados/preview-executor?${partes.join("&")}`,
+    );
+    const alvo =
+      isRecord(data) && isRecord(data.executor)
+        ? (data.executor as Record<string, unknown>)
+        : isRecord(data)
+          ? data
+          : {};
+    const id = pickId(alvo) || "";
+    if (!id) {
+      return {
+        ok: false,
+        motivo:
+          pickStr(alvo, ["motivo", "mensagem", "message"]) ||
+          "nenhum responsavel definido",
+      };
+    }
+    return {
+      ok: true,
+      executor: {
+        id,
+        nome: pickStr(alvo, ["nome", "name"]) || "",
+        setor: pickStr(alvo, ["setor", "setor_nome", "departamento"]),
+      },
+    };
+  } catch (erro) {
+    return { ok: false, motivo: getErrorMessage(erro) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +1009,10 @@ export async function resolverAssuntoPorTexto(
     let melhorScore = -1;
     for (const item of lista) {
       const n = norm(item.nome);
-      const score = palavras.reduce((acc, w) => acc + (n.includes(w) ? 1 : 0), 0);
+      const score = palavras.reduce(
+        (acc, w) => acc + (n.includes(w) ? 1 : 0),
+        0,
+      );
       if (score > melhorScore) {
         melhorScore = score;
         melhor = item;
@@ -786,8 +1037,9 @@ export interface RefResolvida {
   // ia   = escolhido pela IA a partir da lista do Suite
   // lookup = resolvido por busca/heuristica no backend
   // perfil = veio do perfil do usuario (Configurar Perfil)
+  // ligacao = veio do relatorio da chamada (quem atendeu) — fato, nao palpite
   // ausente = nao identificado (usuario escolhe no modal)
-  fonte: "env" | "ia" | "lookup" | "perfil" | "ausente";
+  fonte: "env" | "ia" | "lookup" | "perfil" | "ligacao" | "ausente";
 }
 
 async function lookupPrimeiro(
@@ -1129,13 +1381,65 @@ ${linhas(d.providencias)}`;
 // Criacao do chamado (POST) — gated por dry-run
 // ---------------------------------------------------------------------------
 
+export type ModoCriacao = "independente" | "agrupado_sincronizado";
+export type RespConclusaoTipo = "RESPONSAVEL_SETOR_EMPRESA" | "PERSONALIZADO";
+export type Visibilidade = "publico" | "restrito";
+
+export interface ProcessoVinculado {
+  processo_id: string | number;
+  gestor_tipo?: string;
+  gestor_user_id?: string | number;
+  membros_user_ids?: (string | number)[];
+}
+
+// Espelha a superficie do modal "Abrir chamado" do SuiteWeb.
+//
+// ATENCAO: cliente_id, origem_id, executor_id e setores_vinculados sao
+// opcionais no TIPO (a API aceita cliente_ids no lugar de cliente_id, e
+// responsavel_conclusao_tipo no lugar de executor_id), mas continuam
+// obrigatorios na REGRA — quem garante isso agora e validarChamadoBody, nao o
+// compilador. Nao afrouxar a validacao sem entender essa troca.
 export interface ChamadoBody {
-  cliente_id: string | number;
+  cliente_id?: string | number;
+  cliente_ids?: (string | number)[];
+  modo_criacao?: ModoCriacao;
+
   tipo_apontamento_id: string | number;
   descricao: string;
-  origem_id: string | number;
-  setores_vinculados: (string | number)[];
-  executor_id: string | number;
+  origem_id?: string | number;
+  setores_vinculados?: (string | number)[];
+
+  executor_id?: string | number;
+  responsavel_conclusao_tipo?: RespConclusaoTipo;
+  responsavel_conclusao_id?: string | number;
+  setor_responsavel_conclusao_id?: string | number;
+
+  titulo?: string;
+  competencia?: string; // AAAA-MM
+  prioridade?: number; // 1=Baixa 2=Media(padrao) 3=Alta 4=Urgente
+  visibilidade?: Visibilidade;
+  prazo_personalizado_data?: string; // AAAA-MM-DD
+  is_interno?: boolean;
+  usuarios_vinculados?: (string | number)[];
+  finaliza_apontamento?: boolean;
+  enviar_emails?: boolean;
+  campos_personalizados?: Record<string, unknown>;
+  iniciar_processo?: boolean;
+  processos_vinculados?: ProcessoVinculado[];
+  sobrescrever_prazo_processo_com_chamado?: boolean;
+}
+
+// `meta` do lote (a API abre N chamados quando vem cliente_ids).
+// `avisos` e o que NAO impediu a abertura mas o usuario precisa saber — ex.:
+// "criado, mas nao pude finalizar porque falta documento obrigatorio". E a
+// unica forma de descobrir isso, entao nao pode ser engolido.
+export interface MetaChamado {
+  total?: number;
+  modoCriacao?: string;
+  apontamentosIds: string[];
+  protocolos: string[];
+  grupoId?: string;
+  avisos: string[];
 }
 
 export interface CriacaoChamado {
@@ -1143,29 +1447,132 @@ export interface CriacaoChamado {
   body?: ChamadoBody; // presente quando dryRun
   id?: string; // presente quando criado de verdade
   protocolo?: string; // presente quando criado de verdade
+  status?: string;
+  statusDescricao?: string;
+  meta?: MetaChamado;
 }
 
-// Valida que nenhum ID obrigatorio esta faltando.
-export function validarChamadoBody(body: Partial<ChamadoBody>): string[] {
+export interface ValidacaoChamado {
+  faltando: string[];
+  invalidos: string[];
+}
+
+const PRIORIDADES_VALIDAS = [1, 2, 3, 4]; // 1=Baixa 2=Media 3=Alta 4=Urgente
+
+// Valida obrigatorios e formato. `faltando` mantem o nome antigo porque o app
+// ja traduz esses campos para o usuario ("Antes de criar, selecione: ...").
+export function validarChamadoBody(
+  body: Partial<ChamadoBody>,
+): ValidacaoChamado {
   const faltando: string[] = [];
-  if (!body.cliente_id) faltando.push("cliente_id");
+  const invalidos: string[] = [];
+
+  const temCliente = !!body.cliente_id || !!body.cliente_ids?.length;
+  if (!temCliente) faltando.push("cliente_id");
   if (!body.tipo_apontamento_id) faltando.push("tipo_apontamento_id");
+
+  // A API afrouxou origem e setor ("para nao invalidar integracoes"), mas aqui
+  // seguem obrigatorios: os resolvers SEMPRE produzem uma origem, e chamado sem
+  // setor e perda de dado silenciosa no relatorio.
   if (!body.origem_id) faltando.push("origem_id");
-  if (!body.executor_id) faltando.push("executor_id");
-  if (!body.setores_vinculados || !body.setores_vinculados.length) {
-    faltando.push("setores_vinculados");
-  }
+  if (!body.setores_vinculados?.length) faltando.push("setores_vinculados");
+
+  const temDono = !!body.executor_id || !!body.responsavel_conclusao_tipo;
+  if (!temDono) faltando.push("executor_id");
+
   if (!body.descricao || !String(body.descricao).trim()) {
     faltando.push("descricao");
   }
-  return faltando;
+
+  if (body.competencia && !ehCompetenciaValida(body.competencia)) {
+    invalidos.push("competencia");
+  }
+  if (
+    body.prioridade !== undefined &&
+    !PRIORIDADES_VALIDAS.includes(Number(body.prioridade))
+  ) {
+    invalidos.push("prioridade");
+  }
+  if (
+    body.visibilidade &&
+    !["publico", "restrito"].includes(body.visibilidade)
+  ) {
+    invalidos.push("visibilidade");
+  }
+  if (
+    body.modo_criacao &&
+    !["independente", "agrupado_sincronizado"].includes(body.modo_criacao)
+  ) {
+    invalidos.push("modo_criacao");
+  }
+  if (body.prazo_personalizado_data) {
+    const p = body.prazo_personalizado_data;
+    if (!ehDataISOValida(p) || ehDataPassada(p)) {
+      invalidos.push("prazo_personalizado_data");
+    }
+  }
+  if (
+    body.responsavel_conclusao_tipo === "PERSONALIZADO" &&
+    !body.responsavel_conclusao_id
+  ) {
+    faltando.push("responsavel_conclusao_id");
+  }
+  // "Criar ja finalizado" exige alguem que responda pela conclusao, e a propria
+  // API ignora o campo quando um processo e iniciado.
+  if (body.finaliza_apontamento) {
+    if (!temDono) invalidos.push("finaliza_apontamento");
+    if (body.iniciar_processo) invalidos.push("finaliza_apontamento");
+  }
+
+  return { faltando, invalidos };
+}
+
+// Normaliza meta.avisos: a documentacao nao crava o formato dos itens, entao
+// aceita string e objeto. Assumir um so formato engoliria exatamente a
+// informacao que o usuario mais precisa ver.
+function avisosDe(valor: unknown): string[] {
+  if (!Array.isArray(valor)) return [];
+  const saida: string[] = [];
+  for (const item of valor) {
+    if (typeof item === "string" && item.trim()) {
+      saida.push(item.trim());
+    } else if (isRecord(item)) {
+      const txt = pickStr(item, ["mensagem", "message", "descricao", "texto"]);
+      if (txt) saida.push(txt);
+    }
+  }
+  return saida;
+}
+
+function metaDe(bodyResp: unknown): MetaChamado {
+  const m = isRecord(bodyResp) && isRecord(bodyResp.meta) ? bodyResp.meta : {};
+  return {
+    total: typeof m.total === "number" ? m.total : undefined,
+    modoCriacao: pickStr(m, ["modo_criacao", "modoCriacao"]),
+    apontamentosIds: Array.isArray(m.apontamentos_ids)
+      ? m.apontamentos_ids.map((v) => String(v)).filter(Boolean)
+      : [],
+    protocolos: Array.isArray(m.protocolos)
+      ? m.protocolos.map((v) => String(v)).filter(Boolean)
+      : [],
+    grupoId: pickStr(m, ["grupo_id", "grupoId"]),
+    avisos: avisosDe(m.avisos),
+  };
 }
 
 export async function criarChamado(body: ChamadoBody): Promise<CriacaoChamado> {
   if (isDryRun()) {
-    return { dryRun: true, body };
+    // meta sintetico para o app nao precisar de dois caminhos de leitura.
+    return {
+      dryRun: true,
+      body,
+      meta: { apontamentosIds: [], protocolos: [], avisos: [] },
+    };
   }
 
+  // Sem retry em 429 de proposito: o 429 desta rota e DEBOUNCE (corpo identico
+  // reenviado em menos de 500ms), e nesse caso o primeiro pedido provavelmente
+  // PASSOU. Retentar duplicaria o chamado.
   const resp = await suiteRequest("/chamados", {
     method: "POST",
     body: JSON.stringify(body),
@@ -1181,9 +1588,20 @@ export async function criarChamado(body: ChamadoBody): Promise<CriacaoChamado> {
         : isRecord(resp.body)
           ? resp.body
           : {};
-    const id = pickId(data) || "";
-    const protocolo = pickStr(data, ["protocolo", "protocol", "numero"]) || "";
-    return { dryRun: false, id, protocolo };
+    const meta = metaDe(resp.body);
+    const id = pickId(data) || meta.apontamentosIds[0] || "";
+    const protocolo =
+      pickStr(data, ["protocolo", "protocol", "numero"]) ||
+      meta.protocolos[0] ||
+      "";
+    return {
+      dryRun: false,
+      id,
+      protocolo,
+      status: pickStr(data, ["status"]),
+      statusDescricao: pickStr(data, ["status_descricao", "statusDescricao"]),
+      meta,
+    };
   }
 
   throw suiteErrorFrom(resp);
