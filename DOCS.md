@@ -258,8 +258,10 @@ src/
 ### Suite360 / SuiteWeb
 
 - Base `SUITE360_BASE_URL`, Bearer `SUITE360_API_KEY` (ou `SUITEWEB_API_KEY`). Envelope `{ success, data }`.
-- Endpoints usados: `/whatsapp/contatos`, `/clientes`, `/tipos-chamado`, `/setores`, `/origens-chamado`, `/usuarios`, `POST /chamados`.
+- Endpoints usados: `/whatsapp/contatos`, `/clientes`, `/tipos-chamado`, `/tipos-chamado/{id}/campos`, `/setores`, `/origens-chamado`, `/usuarios` (com `setor_id`), `/processos`, `/chamados/preview-executor`, `POST /chamados`.
 - **DEV vs PROD:** têm URLs, chaves **e IDs** diferentes. O DEV (`http://10.10.1.183/...`) só é alcançável na rede interna — a **Vercel não alcança** esse IP. Por isso os resolvers trabalham **por nome** (robusto entre DEV e PROD).
+- **Ampliação de 2026-08-21:** o `POST /chamados` passou a aceitar título, competência, prioridade (1=Baixa … 4=Urgente), visibilidade, prazo personalizado, chamado interno, usuários e vários setores vinculados, "criar já finalizado", disparo de e-mails, várias empresas (`cliente_ids` + `modo_criacao`), campos personalizados do assunto, processos vinculados e o responsável pela conclusão (`responsavel_conclusao_tipo`/`_id`, `setor_responsavel_conclusao_id`). A resposta ganhou `meta` (com **`avisos`** — o que não impediu a criação mas o usuário precisa ver) e dois erros novos: **413** e **429 DEBOUNCE** (corpo idêntico em <500 ms — **não re-tentar**, o primeiro pedido provavelmente passou). O `GET /usuarios?setor_id=` finalmente filtra de verdade, destravando o filtro de executor por setor que estava descartado desde 18/08.
+- **Onde isso vive no código:** `services/chamadoPayload.ts` monta o corpo (whitelist campo a campo; campo vazio não vai), `services/chamadoFluxo.ts` executa o fluxo de criação compartilhado pelas 4 fontes, e `services/chamadoRefs.ts` transforma as sugestões da IA em ids utilizáveis para o modal.
 
 ---
 
@@ -274,13 +276,15 @@ src/
 
 ### Idempotência (não duplica chamado)
 
-No `POST /goto/chamado/criar`, em produção:
+O fluxo é o mesmo para as 4 fontes (`services/chamadoFluxo.ts`), com o `ns` mudando por origem (`goto`/`gmail`/`chat`/`gravacao`):
 
-1. `getChamadoCriado(conv)` — se já existe chamado para essa ligação, devolve o **protocolo existente** (não cria de novo).
-2. Senão, `reservarCriacao(conv)` — lock atômico `SET NX EX 120`. Se outra pessoa já está criando o mesmo, retorna **409 `CHAMADO_EM_CRIACAO`**.
+1. `getChamadoCriado(chave, ns)` — se já existe chamado para esse item, devolve o **protocolo existente** (não cria de novo).
+2. Senão, `reservarCriacao(chave, ns)` — lock atômico `SET NX EX 120`. Se outra pessoa já está criando o mesmo, retorna **409 `CHAMADO_EM_CRIACAO`**.
 3. Cria o chamado; em erro, libera o lock. Em sucesso, salva `{ id, protocolo }` (TTL 30 dias) e libera o lock.
 
-Isso resolve o caso da **ligação interna**: se uma pessoa abriu o chamado, a outra não consegue abrir um duplicado para a mesma ligação. (O Suite ainda tem um debounce próprio que rejeita corpos idênticos em <500ms.)
+Isso resolve o caso da **ligação interna**: se uma pessoa abriu o chamado, a outra não consegue abrir um duplicado para a mesma ligação. (O Suite ainda tem um debounce próprio que rejeita corpos idênticos em <500ms — quando ele dispara, o backend devolve `SUITE_DEBOUNCE` e o app **não** manda tentar de novo, porque o primeiro envio provavelmente passou.)
+
+> **Corrigido em 2026-08-21:** até então `gmail`, `chat` e `gravacao` respondiam ao dry-run **antes** desse bloco — ou seja, no modo que roda em produção hoje, 3 das 4 fontes não tinham proteção nenhuma contra duplicata. Só a ligação tinha. Agora a idempotência vale nos dois modos, com TTL de 10 min em dry-run e uma escotilha `forcarRecriacao: true` no body para re-testar o mesmo item em desenvolvimento.
 
 ### Resolução automática dos campos do chamado (os "resolvers")
 
@@ -291,11 +295,120 @@ Ao montar o preview, o backend tenta preencher tudo sozinho (o usuário confirma
   - **Ligação externa** → por telefone (`resolverClientePorTelefone`): varia o número (com/sem DDI 55, últimos 8/9 dígitos) e busca em `/whatsapp/contatos`; só resolve sozinho com **exatamente um** cliente e confiança **alta**. Se o telefone **não** resolver, tenta pelo **nome/CNPJ que a IA captou na conversa** (`resolverClientePorMencao`) — e só aceita se houver **um único** match forte (nunca chuta o cliente errado).
 - **Assunto** (tipo de apontamento) — a **IA escolhe da lista real de assuntos do Suite**: o backend busca os tipos ativos (`buscarTipos()`) e os envia no prompt; a IA, **com base no que foi dito**, devolve o `assunto_escolhido` (id + nome) copiado da lista. O backend valida que o id existe na lista (`fonte: "ia"`). Se a IA não escolher nada (ou a lista falhar), cai no antigo match textual `resolverAssuntoPorTexto` (sobreposição de palavras); nunca "chuta".
 - **Setor** — **pelo nome do usuário do GoTo** (`resolverSetorPorNomeUsuario`). O nome vem como `"NOME - SETOR"`. Em ligação **interna** usa quem ligou; em **externa** usa o atendente do escritório. O departamento vira setor do Suite via um **mapa de aliases** (`aliasesSetor()`): **tudo que é tecnologia** (desenvolvimento/TI/infra/hardware...) → **Suporte**; `ed. financeira` → `Educação Financeira`; `legalização` → `Regularização Fiscal`. Dá pra estender por `SUITE360_SETOR_ALIASES`.
-- **Executor** — `resolverExecutorPorNome`: tira o `" - SETOR"` do nome e busca em `/usuarios?ativo=1&q=`.
+- **Executor** — `resolverExecutorPorNome`: tira o `" - SETOR"` do nome e busca em `/usuarios?ativo=1&q=`. Desde 2026-08-21 o modal também oferece **escolher outra pessoa**, resolvida pelo próprio Suite (`GET /chamados/preview-executor`, consultado antes de enviar para evitar 422); o dropdown lista direto as pessoas do setor. A opção **responsável da empresa no setor** foi retirada do app em 2026-08-24 (abria mais um input e quase nunca era usada), mas o backend **continua suportando** `RESPONSAVEL_SETOR_EMPRESA` — reintroduzir é só devolver a opção na interface. O padrão continua sendo quem clicou.
+- **Campos novos sugeridos pela IA** (`services/chamadoRefs.ts`) — título (já existia e era descartado), competência, prioridade, "já resolvido" (vira o `finaliza_apontamento`), chamado interno, setores adicionais e pessoas mencionadas. Pessoas vêm como **nome** (201 usuários não cabem no prompt) e são resolvidas contra a lista completa, aceitando só match exato e único. Tudo chega ao modal em `refs`, para o humano confirmar.
+  - **Datas relativas:** o prompt injeta o dia da semana de hoje **e uma tabela dos próximos 7 dias**. Não é redundância: com só a data, o modelo resolveu "até sexta" para um domingo.
 - **Origem** — `resolverOrigem`: prefere "Telefone"/"Ligação".
 - **Data/hora e duração** — de `callCreated`/`callEnded` do relatório (não de `startTime`/`duration`, que não existem nesse relatório).
 
 Os IDs fixos (`SUITE360_*_ID`) têm **prioridade**: se preenchidos, fixam o valor e pulam o lookup.
+
+### Trecho principal da gravação (ligação transferida)
+
+Uma ligação transferida é gravada em **vários trechos** — um por perna da chamada
+("legs"). Até 2026-08-24 o preview transcrevia todos e concatenava com
+`--- Trecho i/N ---`, pagando IA por perna; as pernas curtas ("vou te passar pro
+fiscal") ainda sujavam o resumo. Agora transcreve **só o principal**.
+
+A leitura do relatório (`extractRecordings`, em `services/gotoApi.ts`) preserva o
+objeto inteiro de cada gravação e o participante dono — antes guardava só
+`rec.id`, e era por isso que não dava para identificar a transferência: a
+informação vinha no relatório e era descartada na leitura.
+
+Escolha em cascata (`escolherTrechoPeloRelatorio` + `escolherTrechoPrincipal`):
+
+1. trecho único;
+2. `primary`/`isPrimary`/`main`/`isMain` marcado (e só um);
+3. maior duração informada — segundos, milissegundos ou diferença de timestamps;
+4. maior arquivo baixado (`fs.stat`), quando o relatório não decide ou empata.
+
+Só o passo 4 baixa áudio, e ele reaproveita os downloads para a transcrição,
+apagando os que não venceram. Se o principal vier sem fala (`AUDIO_SEM_FALA`),
+`transcreverAlternativos` tenta os demais do maior para o menor.
+
+**Cada preview loga qual critério venceu e o que veio em cada trecho**
+(`descreverTrechos`: ramal, duração, fonte da duração e as chaves cruas). Os
+campos que a conta real devolve não são documentados publicamente pelo GoTo — o
+log é o que permite afinar `CAMPOS_DURACAO_*` / `CAMPOS_PRINCIPAL` sem chute.
+
+A nota da gravação passou a descrever a **cadeia de atendimento** (`#1 ANA -
+SUPORTE (ramal 101, 12s) -> #2 BRUNO - FISCAL (ramal 205, 8m 32s) [transcrito]`),
+que é onde a transferência fica visível para quem lê o chamado — de graça, porque
+sai do mesmo relatório.
+
+O índice escolhido vai para o app (`chamada.trechoPrincipal`) e para o Redis
+(`goto:trechoprincipal:<conv>`, 30 dias). O player pede `i=principal` e o backend
+resolve; senão o áudio ouvido não bateria com o texto do chamado. Respostas
+trazem `X-Recording-Count`, `X-Recording-Main` e `X-Recording-Index`.
+
+> **Cache:** `PreviewCacheDados.estrategiaVersao` (`TRECHO_ESTRATEGIA_VERSAO`) é
+> separada do `promptVersion` porque muda por outro motivo. Sem ela, as ligações
+> processadas nas últimas 48 h continuariam devolvendo o texto concatenado antigo.
+
+### Quem atendeu a ligação (e quem só ouviu tocar)
+
+Numa fila ou transferência o telefone toca para várias pessoas. Até 2026-08-24
+**todas** entravam como atendentes do chamado — inclusive quem não atendeu.
+
+A fonte da verdade é **`report.callStates`**, e não `report.participants` — em
+dois sentidos, os dois confirmados em relatórios reais desta conta.
+
+**1. `participants` está INCOMPLETO.** Numa fila real com transferência (9 ramais
+tocando), três pessoas atenderam e **duas delas não constavam em
+`report.participants`** — inclusive quem atendeu primeiro e transferiu, e ambas
+com gravação. Elas existiam apenas dentro de `report.callStates`. Por isso
+`participantesDoRelatorio()` (em `services/gotoApi.ts`) une as duas fontes,
+deduplicando por id do participante e acumulando gravações e status. Ler só a
+lista declarada perdia atendentes **e gravações**: nessa ligação o sistema
+enxergava 1 trecho de áudio quando existiam 3.
+
+**2. `participants` não tem os campos de atendimento.** Os objetos só trazem
+`id`, `originator`, `legId` e `transcripts` — **não existe** `duration`,
+`hangupCause` nem horário de atendimento por participante. Já `callStates` é uma
+linha do tempo (`STARTING` / `ACTIVE` / `ENDING`) onde cada participante aparece
+com `status.value`: `RINGING`, `CONNECTED` ou `DISCONNECTING`. Quem chega a
+`CONNECTED` atendeu; quem só tem `RINGING`/`DISCONNECTING`, não.
+
+`statusDosParticipantes()` cruza os dois pelo `id` do participante, e
+`decidirAtendeu()` usa isso antes de qualquer heurística. As antigas (gravação,
+duração, `hangupCause`) ficaram como reserva, para o caso de a conta passar a
+devolver esses campos.
+
+> **Pegadinha do mesmo ramal duas vezes.** Um ramal aparece uma vez **por
+> dispositivo** (app web e softphone, por exemplo). Numa ligação real do ramal
+> 252, a entrada do `webcalls.integrator` só tocou e a do `goto.clients`
+> atendeu. O `dedupRamal` ficava com a primeira e concluía "não atendeu" para
+> quem tinha atendido — hoje ele escolhe, entre as entradas do mesmo ramal, a de
+> melhor evidência (atendeu > indefinido > não atendeu; gravação desempata).
+
+Duas travas: se o filtro deixaria a lista vazia, devolve todos (chamado sem
+atendente é pior que um atendente a mais); e o `caller` reaproveita a linha já
+analisada, senão quem liga sai sempre como "sem evidência" no log.
+
+Cada preview com mais de um ramal registra a decisão e a prova:
+
+```
+[suite360:preview] req=… atendimento: 525(TAINA ALVES - CONTABIL)=ATENDEU[status CONNECTED]
+                   252(GABRIEL LOHAN - TECNOLOGIA)=ATENDEU[status CONNECTED]
+```
+
+Os atendentes (só eles) viram **usuários vinculados** do chamado, antes dos
+nomes que a IA citou — o nome vem como `"ANA - SUPORTE"` e o sufixo do setor é
+removido (`nomeSemSetor`) para casar com o cadastro do Suite. O limite de nomes
+resolvidos subiu de 5 para 12: era 5 porque a única origem era a IA, e uma fila
+com transferência estoura isso em silêncio.
+
+### Usuários por setor (filtro do modal)
+
+`buscarUsuarios(q, setores)` aceita **vários** setores. A API do Suite só filtra
+por um (`setor_id` escalar), então: um setor → delega à API; vários → busca a
+lista completa (`suiteGetTodos` já pagina) e faz a **união** local.
+`setorDoUsuario` lê o array inteiro `u.setores[]` — antes lia só `[0]`, e quem
+estava em dois setores só era encontrado pelo primeiro. Sem setor → sem filtro.
+Se o filtro esvaziar a lista, devolve todos com `filtradoPorSetor: false`:
+dropdown vazio sem explicação trava o modal.
+
+O controller aceita `setorId=6` ou `setorIds=6,4`.
 
 ### Seleção do provider de transcrição
 
