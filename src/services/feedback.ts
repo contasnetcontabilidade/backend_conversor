@@ -42,9 +42,16 @@ export interface FeedbackEntry {
     clienteVia?: string; // "telefone" | "ia_mencao" | "interno" | ""
     setorMudou?: boolean;
     executorMudou?: boolean;
+    // Sem isto, "executorMudou" daria true toda vez que a pessoa escolhesse o
+    // modo "responsavel da empresa" — misturando erro da IA com escolha de modo.
+    executorModo?: string; // "eu" | "responsavel" | "escolher"
     assuntoSugerido?: string; // categoria (nao sensivel)
     assuntoFinal?: string;
     assuntoMudou?: boolean;
+    // "Criar ja finalizado": mede se a leitura da IA sobre "ja resolvido" bate
+    // com o que o humano confirmou.
+    finalizadoSugerido?: boolean;
+    finalizadoFinal?: boolean;
   };
   descEditada?: boolean;
   iaOk?: boolean;

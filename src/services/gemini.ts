@@ -4,10 +4,17 @@ import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { AppError, getErrorMessage, isRecord } from "../lib/errors";
 import { resolveFromProjectRoot } from "../utils/paths";
+import {
+  competenciaAtual,
+  diaDaSemanaHoje,
+  hojeSaoPaulo,
+  proximosDiasDaSemana,
+} from "../utils/datas";
 import { recordUsage } from "./usage";
 import { thinkingConfigFor } from "./geminiThinking";
 
-const DEFAULT_AUDIO_FILE = process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
+const DEFAULT_AUDIO_FILE =
+  process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
 // gemini-2.5-flash: mais barato que o 3-flash e permite desligar o thinking
 // (thinkingBudget 0). Sobrescrivel por GEMINI_MODEL no ambiente.
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
@@ -18,7 +25,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-08-18";
+export const PROMPT_VERSION = "2026-08-21";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -44,7 +51,41 @@ export type ResumoJson = {
   // Assunto ESCOLHIDO pela IA a partir da lista de tipos do Suite (id + nome).
   // Vazio quando a lista nao foi fornecida ou nada se encaixou.
   assunto_escolhido: { id: string; nome: string };
+
+  // --- Sugestoes para os campos que o Suite passou a aceitar (2026-08-21) ---
+  // Todos seguem a mesma politica do resto: vazio/"indefinido" quando a IA nao
+  // tem certeza. O humano confirma no modal antes de virar chamado.
+  competencia?: string; // "AAAA-MM" ou ""
+  prioridade?: string; // "1".."4" ou "" (1=Baixa 2=Media 3=Alta 4=Urgente)
+  ja_resolvido?: "sim" | "nao" | "indefinido";
+  assunto_interno?: "sim" | "nao" | "indefinido";
+  setores_sugeridos?: Array<{ id: string; nome: string }>;
+  pessoas_mencionadas?: string[]; // NOMES; o backend resolve para ids
+  prazo_mencionado?: string; // "AAAA-MM-DD" ou ""
 };
+
+// Resumo "zerado", usado quando a IA falha: o preview segue para a revisao com
+// os campos vazios em vez de cancelar (o humano sempre consegue prosseguir).
+// Centralizado aqui porque cada campo novo do schema quebraria 4 copias.
+export function resumoVazio(): ResumoJson {
+  return {
+    titulo: "",
+    resumo: "",
+    pontos_principais: [],
+    providencias_sugeridas: [],
+    cliente_mencionado: { nome: "", cnpj: "" },
+    cliente_alternativas: [],
+    assunto_sugerido: "",
+    assunto_escolhido: { id: "", nome: "" },
+    competencia: "",
+    prioridade: "",
+    ja_resolvido: "indefinido",
+    assunto_interno: "indefinido",
+    setores_sugeridos: [],
+    pessoas_mencionadas: [],
+    prazo_mencionado: "",
+  };
+}
 
 export type ResumoInput = {
   audioPath?: string;
@@ -53,6 +94,9 @@ export type ResumoInput = {
   // Lista de assuntos/tipos do Suite para a IA escolher UM (id + nome).
   // Quando fornecida, a IA escolhe da lista (mais preciso que o texto livre).
   assuntosDisponiveis?: Array<{ id: string; nome: string }>;
+  // Lista de setores do Suite, para a IA sugerir setores ADICIONAIS ao do
+  // perfil de quem registra (mesma mecanica da lista de assuntos).
+  setoresDisponiveis?: Array<{ id: string; nome: string }>;
   // Identidade da ligacao (ramal/usuario do escritorio) para atribuir o custo
   // da IA no painel de consumo. Opcional; quando ausente, o custo fica "nao atribuido".
   ramal?: string;
@@ -140,7 +184,9 @@ function parseResumoJson(rawText: string): ResumoJson {
   const tituloBruto = String(parsed.titulo ?? "").trim();
   const resumo = String(parsed.resumo ?? "").trim();
   const pontos = Array.isArray(parsed.pontos_principais)
-    ? parsed.pontos_principais.map((item) => String(item).trim()).filter(Boolean)
+    ? parsed.pontos_principais
+        .map((item) => String(item).trim())
+        .filter(Boolean)
     : [];
   const providencias = Array.isArray(parsed.providencias_sugeridas)
     ? parsed.providencias_sugeridas
@@ -181,6 +227,26 @@ function parseResumoJson(rawText: string): ResumoJson {
   }
   const titulo = tituloBruto || resumo.slice(0, 60);
 
+  // Campos novos: tolerantes de proposito. Valor fora do esperado vira vazio —
+  // o modal so deixa de receber uma sugestao, nunca recebe uma sugestao errada.
+  const tri = (v: unknown): "sim" | "nao" | "indefinido" => {
+    const s = String(v ?? "")
+      .trim()
+      .toLowerCase();
+    return s === "sim" || s === "nao" ? s : "indefinido";
+  };
+  const prioridadeRaw = String(parsed.prioridade ?? "").trim();
+  const setoresSugeridos = Array.isArray(parsed.setores_sugeridos)
+    ? parsed.setores_sugeridos
+        .filter(isRecord)
+        .map((s) => ({
+          id: String(s.id ?? "").trim(),
+          nome: String(s.nome ?? "").trim(),
+        }))
+        .filter((s) => s.id || s.nome)
+        .slice(0, 3)
+    : [];
+
   return {
     titulo,
     resumo,
@@ -190,6 +256,20 @@ function parseResumoJson(rawText: string): ResumoJson {
     cliente_alternativas: clienteAlternativas,
     assunto_sugerido: assuntoSugerido,
     assunto_escolhido: assuntoEscolhido,
+    competencia: String(parsed.competencia ?? "").trim(),
+    prioridade: ["1", "2", "3", "4"].includes(prioridadeRaw)
+      ? prioridadeRaw
+      : "",
+    ja_resolvido: tri(parsed.ja_resolvido),
+    assunto_interno: tri(parsed.assunto_interno),
+    setores_sugeridos: setoresSugeridos,
+    pessoas_mencionadas: Array.isArray(parsed.pessoas_mencionadas)
+      ? parsed.pessoas_mencionadas
+          .map((p) => String(p).trim())
+          .filter(Boolean)
+          .slice(0, 5)
+      : [],
+    prazo_mencionado: String(parsed.prazo_mencionado ?? "").trim(),
   };
 }
 
@@ -239,7 +319,11 @@ function normalizeGeminiError(error: unknown): AppError {
     });
   }
 
-  if (/api key should be set|missing api key|default credentials|adc/i.test(message)) {
+  if (
+    /api key should be set|missing api key|default credentials|adc/i.test(
+      message,
+    )
+  ) {
     return new AppError({
       statusCode: 500,
       code: "GEMINI_AUTH_CONFIG_ERROR",
@@ -321,10 +405,10 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
   const contexto = ehChat
     ? `Voce registra chamados de atendimento de um escritorio de contabilidade a partir de MENSAGENS DO GOOGLE CHAT selecionadas manualmente por um COLABORADOR do escritorio (${qtdMsgs} mensagem(ns), em ordem cronologica, separadas por linhas como \"--- Mensagem 1/${qtdMsgs} — de Fulano em DATA ---\").`
     : ehConversa
-    ? `Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de uma CONVERSA por e-mail (thread) com ${qtdMsgs} mensagens, recebida de um cliente. As mensagens vem em ordem cronologica, separadas por linhas como "--- Mensagem 1/${qtdMsgs} — de Fulano ---".`
-    : origem === "email"
-      ? "Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de um E-MAIL recebido de um cliente."
-      : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
+      ? `Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de uma CONVERSA por e-mail (thread) com ${qtdMsgs} mensagens, recebida de um cliente. As mensagens vem em ordem cronologica, separadas por linhas como "--- Mensagem 1/${qtdMsgs} — de Fulano ---".`
+      : origem === "email"
+        ? "Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de um E-MAIL recebido de um cliente."
+        : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
   const fontePalavra = ehChat
     ? "na conversa"
     : origem === "email"
@@ -360,7 +444,18 @@ PARTICULARIDADES DO GOOGLE CHAT — siga a risca:
 4) Mensagens de APP/BOT (alertas de sistema) sao CONTEXTO, nao pedido do cliente.
 `
     : "";
-  const prompt = `${contexto}${blocoConversa}${blocoChat}
+  // Sem a data de hoje o modelo nao tem como resolver "ate sexta" nem julgar se
+  // uma competencia faz sentido. Fuso do escritorio, nao UTC.
+  //
+  // O dia da semana e a tabela dos proximos dias NAO sao redundancia: com a data
+  // sozinha, o modelo resolveu "ate sexta" para um DOMINGO. Contar dias e uma
+  // conta que ele erra; dar a resposta pronta e barato.
+  const blocoData =
+    `DATA DE HOJE: ${hojeSaoPaulo()} (${diaDaSemanaHoje()}), fuso America/Sao_Paulo. ` +
+    `COMPETENCIA ATUAL: ${competenciaAtual()}.\n` +
+    `PROXIMOS DIAS (use esta tabela para resolver "ate sexta", "segunda que vem" etc.): ${proximosDiasDaSemana()}.\n`;
+
+  const prompt = `${blocoData}${contexto}${blocoConversa}${blocoChat}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
 *** NAO REPITA A MESMA INFORMACAO ***
@@ -422,6 +517,34 @@ Campos obrigatorios:
   se aplique. A lista e longa e cobre quase tudo: percorra-a inteira antes de desistir e prefira o item
   razoavelmente proximo a deixar vazio (quem revisa troca em 1 clique; vazio obriga a procurar do zero).
   Deixe vazio SO se nada na lista tiver relacao com o assunto.
+- competencia: string "AAAA-MM" ou "". SO quando o conteudo indicar explicitamente o mes/ano de
+  REFERENCIA da obrigacao ("folha de julho", "DAS 08/2026", "competencia 07/25", "faturamento de
+  junho"). NAO use a data de hoje como competencia: sem mencao clara, devolva "".
+- prioridade: "1", "2", "3", "4" ou "". Escala: 1=Baixa, 2=Media (PADRAO do sistema), 3=Alta,
+  4=Urgente. Como 2 e o padrao, devolva "" quando nao houver sinal claro — nao precisa dizer o
+  obvio. Use "4"/"3" SO com urgencia explicita e verificavel no texto: prazo legal vencendo hoje
+  ou amanha, sistema parado, risco de multa, notificacao/intimacao com prazo. Cliente irritado,
+  cobranca ou tom ansioso NAO sao prioridade alta. Use "1" so quando o proprio texto disser que
+  pode esperar ("sem pressa", "quando puder").
+- ja_resolvido: "sim" | "nao" | "indefinido". "sim" SOMENTE quando o pedido foi atendido DENTRO
+  deste atendimento e nao sobrou pendencia — o que normalmente implica providencias_sugeridas
+  VAZIO. Se houver qualquer providencia, e "nao". Sem saber, "indefinido".
+- assunto_interno: "sim" | "nao" | "indefinido". "sim" quando a demanda e do PROPRIO escritorio
+  (colega falando com colega, processo interno, sem cliente externo envolvido); "nao" quando ha
+  um cliente sendo atendido; "indefinido" se nao der para saber.
+- setores_sugeridos: array de { id, nome } (maximo 3). SOMENTE setores citados explicitamente ou
+  claramente responsaveis pelo que foi pedido, copiando id e nome EXATAMENTE da "LISTA DE SETORES"
+  abaixo (quando houver). NAO inclua o setor de quem esta registrando o chamado — o sistema ja
+  coloca esse. Vazio se nao houver certeza.
+- pessoas_mencionadas: string[] (maximo 5). NOMES de pessoas DO ESCRITORIO citadas como envolvidas
+  na demanda ("a Ana vai verificar", "falei com o Joao do fiscal", "passar para a Carla"). Escreva
+  so o nome, sem cargo nem setor. NAO inclua o cliente, nem quem esta registrando, nem terceiros
+  (banco, orgao, contador externo). Vazio se nao houver.
+- prazo_mencionado: string "AAAA-MM-DD" ou "". SO uma data-limite EXPLICITA de entrega ao cliente
+  ("preciso ate dia 30", "me manda ate sexta"). Para referencias relativas ("sexta", "segunda que
+  vem", "amanha"), COPIE a data da tabela PROXIMOS DIAS acima — nao calcule de cabeca. Se o dia
+  citado for o proprio dia de hoje, use a data de hoje. NAO derive prazo de data de VENCIMENTO de
+  guia/imposto — isso e informacao do conteudo, nao prazo do chamado. Sem mencao clara, "".
 O escritorio que registra o chamado se chama "Contas Contabilidade". Se na transcricao o nome do PROPRIO
 escritorio vier com grafia claramente errada por falha de transcricao (ex.: "Contos Contabilidade",
 "Pontas Contabilidade", "Contas Contabil"), use a forma correta "Contas Contabilidade" no resumo. Isso vale
@@ -433,6 +556,14 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
   const blocoAssuntos = assuntos.length
     ? `\n\nLISTA DE ASSUNTOS DISPONIVEIS (escolha EXATAMENTE UM em assunto_escolhido):\n${assuntos
         .map((a) => `- [${a.id}] ${a.nome}`)
+        .join("\n")}`
+    : "";
+
+  // Mesma mecanica da lista de assuntos: a IA so pode escolher o que existe.
+  const setores = input.setoresDisponiveis || [];
+  const blocoSetores = setores.length
+    ? `\n\nLISTA DE SETORES (use apenas estes em setores_sugeridos):\n${setores
+        .map((s) => `- [${s.id}] ${s.nome}`)
         .join("\n")}`
     : "";
 
@@ -450,6 +581,15 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
       "cliente_alternativas",
       "assunto_sugerido",
       "assunto_escolhido",
+      // Campos novos entram em required E em properties: o schema e estrito
+      // (additionalProperties: false), entao nao ha meio-termo.
+      "competencia",
+      "prioridade",
+      "ja_resolvido",
+      "assunto_interno",
+      "setores_sugeridos",
+      "pessoas_mencionadas",
+      "prazo_mencionado",
     ],
     properties: {
       titulo: { type: "string" },
@@ -470,6 +610,23 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         required: ["id", "nome"],
         properties: { id: { type: "string" }, nome: { type: "string" } },
       },
+      competencia: { type: "string" },
+      // enum com "" da ao modelo uma saida explicita de "nao sei", em vez de
+      // forcar um numero inventado.
+      prioridade: { type: "string", enum: ["", "1", "2", "3", "4"] },
+      ja_resolvido: { type: "string", enum: ["sim", "nao", "indefinido"] },
+      assunto_interno: { type: "string", enum: ["sim", "nao", "indefinido"] },
+      setores_sugeridos: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "nome"],
+          properties: { id: { type: "string" }, nome: { type: "string" } },
+        },
+      },
+      pessoas_mencionadas: { type: "array", items: { type: "string" } },
+      prazo_mencionado: { type: "string" },
     },
   };
 
@@ -483,7 +640,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
     try {
       const response = await getGeminiClient().models.generateContent({
         model: modelUsado,
-        contents: `${prompt}${blocoAssuntos}\n\n${
+        contents: `${prompt}${blocoAssuntos}${blocoSetores}\n\n${
           origem === "chat"
             ? "CONVERSA (GOOGLE CHAT)"
             : origem === "email"
@@ -544,7 +701,10 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         /unavailable|internal error|overloaded|timeout|deadline|502|503|504|econnreset|network|fetch failed/.test(
           msg,
         );
-      if (tentativa < MAX_TENTATIVAS && (vazioOuInvalido || quota || upstream)) {
+      if (
+        tentativa < MAX_TENTATIVAS &&
+        (vazioOuInvalido || quota || upstream)
+      ) {
         const espera = quota
           ? Math.min(3000 * tentativa, 8000)
           : upstream
