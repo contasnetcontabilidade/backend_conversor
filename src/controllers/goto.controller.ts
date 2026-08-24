@@ -12,7 +12,10 @@ import { Readable } from "node:stream";
 import {
   downloadRecording,
   extractRecordingId,
+  escolherTrechoPeloRelatorio,
   extractRecordingIds,
+  extractRecordings,
+  participantesDoRelatorio,
   getCallReport,
   listarHistoricoChamadas,
   obterGravacao,
@@ -27,6 +30,7 @@ import {
   CallEndedEvent,
   chamadoFoiAberto,
   drainEvents,
+  getTrechoPrincipal,
   marcarChamadoAberto,
 } from "../services/store";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
@@ -162,6 +166,14 @@ export interface ParticipanteLinha {
   nome: string;
   temGravacao?: boolean; // atendeu com gravacao (atendente "principal")
   duracaoSeg?: number; // duracao no trecho dele, se o relatorio trouxer
+  /**
+   * true  = atendeu (ha prova no relatorio)
+   * false = NAO atendeu (o telefone tocou e ele nao pegou)
+   * null  = o relatorio nao permitiu decidir
+   */
+  atendeu?: boolean | null;
+  /** Em que evidencia a decisao acima se apoiou — vai para o log. */
+  atendeuPor?: string;
 }
 export interface AnaliseChamada {
   tipo: "externo" | "interno";
@@ -170,9 +182,30 @@ export interface AnaliseChamada {
   answerers: ParticipanteLinha[]; // TODOS que atenderam (inclui transferidos)
 }
 
+// Um mesmo ramal aparece VARIAS vezes no relatorio — uma por dispositivo
+// (o app web e o softphone, por exemplo). Numa ligacao real do ramal 252, a
+// entrada do `webcalls.integrator` so tocou e a do `goto.clients` atendeu.
+// Ficar com a primeira, como antes, dava "nao atendeu" para quem atendeu.
+// Agora, entre as entradas do mesmo ramal, vence a que tem a melhor evidencia.
 function dedupRamal(arr: ParticipanteLinha[]): ParticipanteLinha[] {
-  const seen = new Set<string>();
-  return arr.filter((a) => (seen.has(a.ramal) ? false : seen.add(a.ramal)));
+  const porRamal = new Map<string, ParticipanteLinha>();
+  const peso = (l: ParticipanteLinha) =>
+    (l.atendeu === true ? 4 : l.atendeu === null ? 2 : 0) +
+    (l.temGravacao ? 1 : 0);
+  for (const l of arr) {
+    const atual = porRamal.get(l.ramal);
+    if (!atual || peso(l) > peso(atual)) porRamal.set(l.ramal, l);
+  }
+  // Preserva a ordem de aparicao no relatorio.
+  const vistos = new Set<string>();
+  const saida: ParticipanteLinha[] = [];
+  for (const l of arr) {
+    if (vistos.has(l.ramal)) continue;
+    vistos.add(l.ramal);
+    const escolhido = porRamal.get(l.ramal);
+    if (escolhido) saida.push(escolhido);
+  }
+  return saida;
 }
 
 // Duracao (segundos) do participante, best-effort: o relatorio do GoTo e lido
@@ -206,7 +239,103 @@ function duracaoParticipante(p: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
-// Analisa o relatorio: externo (com numero do cliente) ou interno (caller + answerers).
+// Quem realmente ATENDEU.
+//
+// Numa fila ou transferencia o telefone toca para varias pessoas, e ate agora
+// todas entravam como "atendentes" — inclusive quem so viu o telefone tocar.
+//
+// A fonte da verdade e `report.callStates`: uma linha do tempo de eventos
+// (STARTING / ACTIVE / ENDING) em que cada participante aparece com
+// `status.value` = RINGING, CONNECTED ou DISCONNECTING. Quem chegou a
+// CONNECTED atendeu; quem so tocou e desligou, nao. Isso foi confirmado num
+// relatorio real desta conta.
+//
+// Os objetos de `report.participants` NAO trazem duracao, hangupCause nem
+// horario de atendimento — os unicos campos por participante sao id, originator,
+// legId e transcripts. Por isso as heuristicas antigas (duracao/hangup) quase
+// sempre caiam em "sem evidencia"; ficam so como reserva, para o caso de a
+// conta passar a devolver esses campos.
+
+// Status de callStates que provam atendimento.
+const STATUS_ATENDEU = new Set(["CONNECTED", "ACTIVE", "ANSWERED"]);
+// Status que aparecem sem que a pessoa tenha atendido.
+const STATUS_SO_TOCOU = new Set(["RINGING", "DISCONNECTING", "DISCONNECTED"]);
+
+// Q.850: 16 = desligou normal (atendeu e encerrou); 17 = ocupado;
+// 18 = sem resposta do usuario; 19 = tocou e ninguem atendeu; 21 = rejeitada.
+const HANGUP_NAO_ATENDEU = new Set([17, 18, 19, 21]);
+
+function decidirAtendeu(
+  p: Record<string, unknown>,
+  temGravacao: boolean,
+  duracaoSeg: number | undefined,
+  status?: Set<string>,
+): { atendeu: boolean | null; por: string } {
+  // 0) callStates: o dado explicito da conta. Vem antes de tudo.
+  if (status && status.size) {
+    for (const st of status) {
+      if (STATUS_ATENDEU.has(st)) return { atendeu: true, por: `status ${st}` };
+    }
+    // Teve status, mas nenhum de atendimento: tocou e nao pegou.
+    const soTocou = [...status].every((st) => STATUS_SO_TOCOU.has(st));
+    if (soTocou) {
+      return { atendeu: false, por: `so ${[...status].join("/")}` };
+    }
+  }
+
+  // 1) Gravacao: quase tao forte quanto. Um trecho gravado significa audio.
+  if (temGravacao) return { atendeu: true, por: "tem gravacao" };
+
+  // 2) Campo booleano explicito, se existir.
+  for (const k of ["answered", "wasAnswered", "connected", "isAnswered"]) {
+    const v = p[k];
+    if (v === true) return { atendeu: true, por: `${k}=true` };
+    if (v === false) return { atendeu: false, por: `${k}=false` };
+  }
+
+  // 3) Horario de atendimento preenchido = atendeu.
+  for (const k of ["answeredTime", "connectedTime", "answerTime", "talkStartTime"]) {
+    if (tsMs(p[k])) return { atendeu: true, por: `${k} preenchido` };
+  }
+
+  // 4) Tempo de conversa > 0 = atendeu.
+  if (typeof duracaoSeg === "number" && duracaoSeg > 0) {
+    return { atendeu: true, por: `duracao ${duracaoSeg}s` };
+  }
+
+  // 5) Causa de desligamento que significa "nao atendeu".
+  const causa = p.hangupCause ?? p.disconnectCause ?? p.cause;
+  const causaNum = typeof causa === "number" ? causa : Number(causa);
+  if (Number.isFinite(causaNum)) {
+    if (HANGUP_NAO_ATENDEU.has(causaNum)) {
+      return { atendeu: false, por: `hangupCause=${causaNum}` };
+    }
+    if (causaNum === 16) return { atendeu: true, por: "hangupCause=16" };
+  }
+
+  // 6) Duracao informada como ZERO (nao ausente) = tocou e nao atenderam.
+  //
+  // Le os campos CRUS, e nao o `duracaoSeg` do parametro: duracaoParticipante()
+  // so devolve valores > 0, entao um `duration: 0` chega aqui como `undefined` e
+  // seria confundido com "o relatorio nao informou". Sao coisas diferentes —
+  // "zero segundos de conversa" e justamente a prova de que nao atendeu.
+  for (const k of ["durationSeconds", "durationSeg", "talkTime", "duration"]) {
+    const v = p[k];
+    if (v === 0 || v === "0") return { atendeu: false, por: `${k}=0` };
+  }
+
+  return { atendeu: null, por: "sem evidencia" };
+}
+
+// Aplica o filtro com uma trava de seguranca: se NINGUEM ficar de pe, devolve a
+// lista original. Chamado sem atendente nenhum e pior que um atendente a mais —
+// e seria o resultado sempre que o relatorio nao trouxesse esses campos.
+function somenteQuemAtendeu(linhas: ParticipanteLinha[]): ParticipanteLinha[] {
+  const ficam = linhas.filter((l) => l.atendeu !== false);
+  return ficam.length ? ficam : linhas;
+}
+
+// Analisa o relatorio: externo (com numero do cliente) ou interno (caller + answerers).// Analisa o relatorio: externo (com numero do cliente) ou interno (caller + answerers).
 export function analisarChamada(
   report: Record<string, unknown>,
 ): AnaliseChamada | null {
@@ -217,28 +346,28 @@ export function analisarChamada(
   // todasLinhas: TODOS os ramais LINE (com ou sem gravacao) na ordem do relatorio.
   // Numa transferencia, o atendente transferido pode nao ter gravacao no trecho
   // dele — por isso NAO exigimos recordings para captura-lo.
-  const todasLinhas: ParticipanteLinha[] = [];
-  for (const p of participants) {
-    if (
-      isRecord(p) &&
-      isRecord(p.type) &&
-      p.type.value === "LINE" &&
-      typeof p.type.extensionNumber === "string" &&
-      p.type.extensionNumber
-    ) {
-      const dur = duracaoParticipante(p);
-      todasLinhas.push({
-        ramal: p.type.extensionNumber,
-        nome: typeof p.type.name === "string" ? p.type.name : "",
-        temGravacao: Array.isArray(p.recordings) && p.recordings.length > 0,
-        ...(dur != null ? { duracaoSeg: dur } : {}),
-      });
-      // [TEMP] confirmar os campos de tempo por participante numa transferencia real.
+  // participantesDoRelatorio une `participants` com quem so aparece em
+  // `callStates`. Numa fila real com transferencia, 2 dos 3 atendentes (com
+  // gravacao) estavam FORA de `participants` — inclusive a pessoa que atendeu
+  // primeiro e transferiu. Iterar so a lista declarada perdia esses atendentes.
+  const todasLinhas: ParticipanteLinha[] = participantesDoRelatorio(report).map(
+    (p) => {
+      const dur = duracaoParticipante(p.bruto);
+      const temGravacao = p.recordings.length > 0;
+      const decisao = decidirAtendeu(p.bruto, temGravacao, dur, p.status);
       if (process.env.GOTO_LOG_PARTICIPANTES === "1") {
-        console.log("[goto][participante]", JSON.stringify(p));
+        console.log("[goto][participante]", JSON.stringify(p.bruto));
       }
-    }
-  }
+      return {
+        ramal: p.ramal,
+        nome: p.nome,
+        temGravacao,
+        ...(dur != null ? { duracaoSeg: dur } : {}),
+        atendeu: decisao.atendeu,
+        atendeuPor: decisao.por,
+      };
+    },
+  );
 
   const externo = participants.find(
     (p) => isRecord(p) && isRecord(p.type) && p.type.value === "PHONE_NUMBER",
@@ -253,7 +382,11 @@ export function analisarChamada(
         ? String(callerObj.number || t.number || "")
         : String(t.number || callerObj.number || "");
     // Externo: TODOS os ramais LINE sao atendentes (inclui os transferidos).
-    return { tipo: "externo", numeroExterno, answerers: dedupRamal(todasLinhas) };
+    return {
+      tipo: "externo",
+      numeroExterno,
+      answerers: somenteQuemAtendeu(dedupRamal(todasLinhas)),
+    };
   }
 
   // Interno: caller = participante LINE onde id === originator (quem iniciou).
@@ -266,16 +399,20 @@ export function analisarChamada(
       typeof p.type.extensionNumber === "string" &&
       p.id === p.originator
     ) {
-      caller = {
-        ramal: p.type.extensionNumber,
+      // Reaproveita a linha JA analisada (com atendeu/atendeuPor). Montar um
+      // objeto novo aqui, como antes, fazia quem ligou aparecer sempre como
+      // "sem evidencia" no log — mesmo tendo CONNECTED em callStates.
+      const ramalCaller = p.type.extensionNumber;
+      caller = todasLinhas.find((l) => l.ramal === ramalCaller) || {
+        ramal: ramalCaller,
         nome: typeof p.type.name === "string" ? p.type.name : "",
       };
       break;
     }
   }
   // Interno: quem atendeu = os demais ramais LINE (sem exigir gravacao).
-  const answerersInternos = dedupRamal(
-    todasLinhas.filter((a) => a.ramal !== caller?.ramal),
+  const answerersInternos = somenteQuemAtendeu(
+    dedupRamal(todasLinhas.filter((a) => a.ramal !== caller?.ramal)),
   );
   return { tipo: "interno", caller, answerers: answerersInternos };
 }
@@ -464,10 +601,16 @@ export async function gotoGravacaoController(req: Request, res: Response) {
       message: "Informe conversationSpaceId.",
     });
   }
-  const i = Math.max(0, parseInt(String(req.query.i ?? "0"), 10) || 0);
+  // `i=principal` pede o trecho que foi transcrito, sem o app precisar saber o
+  // indice de antemao. Um numero pede aquele trecho especifico — e o que o
+  // download em lote usa para percorrer 0..N-1.
+  const pedido = String(req.query.i ?? "0").trim();
+  const querPrincipal = pedido === "principal";
+  const i = querPrincipal ? 0 : Math.max(0, parseInt(pedido, 10) || 0);
 
   const report = await getCallReport(conversationSpaceId);
-  const recordingIds = extractRecordingIds(report);
+  const trechos = extractRecordings(report);
+  const recordingIds = trechos.map((t) => t.id);
   if (!recordingIds.length) {
     throw new AppError({
       statusCode: 404,
@@ -475,7 +618,18 @@ export async function gotoGravacaoController(req: Request, res: Response) {
       message: "Nenhuma gravacao encontrada para esta ligacao.",
     });
   }
-  const idx = Math.min(i, recordingIds.length - 1);
+
+  // Qual e o principal: primeiro o que o preview ja decidiu (pode ter sido pela
+  // medicao dos arquivos, que nao da para refazer aqui sem baixar tudo);
+  // senao o que o relatorio disser; senao o primeiro.
+  const salvo = await getTrechoPrincipal(conversationSpaceId).catch(() => null);
+  const doRelatorio = escolherTrechoPeloRelatorio(trechos);
+  const principal = Math.min(
+    salvo ?? doRelatorio?.indice ?? 0,
+    recordingIds.length - 1,
+  );
+
+  const idx = querPrincipal ? principal : Math.min(i, recordingIds.length - 1);
   const { response, ext } = await obterGravacao(recordingIds[idx]);
 
   const nome = `ligacao_${conversationSpaceId.slice(0, 8)}${
@@ -484,7 +638,14 @@ export async function gotoGravacaoController(req: Request, res: Response) {
   res.setHeader("Content-Type", ext === ".wav" ? "audio/wav" : "audio/mpeg");
   res.setHeader("Content-Disposition", `attachment; filename="${nome}"`);
   res.setHeader("X-Recording-Count", String(recordingIds.length));
-  res.setHeader("Access-Control-Expose-Headers", "X-Recording-Count");
+  // Qual trecho e o principal e qual esta sendo servido — o app usa para marcar
+  // "principal" na lista de trechos do player.
+  res.setHeader("X-Recording-Main", String(principal));
+  res.setHeader("X-Recording-Index", String(idx));
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "X-Recording-Count, X-Recording-Main, X-Recording-Index",
+  );
   const len = response.headers.get("content-length");
   if (len) res.setHeader("Content-Length", len);
 
