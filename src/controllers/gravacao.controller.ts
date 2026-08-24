@@ -1,27 +1,24 @@
 import { randomUUID } from "crypto";
 import { Request, Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
-import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
+import {
+  gerarResumoGemini,
+  resumoVazio,
+  PROMPT_VERSION,
+  type ResumoJson,
+} from "../services/gemini";
 import { transcreverAudio } from "../services/transcricao";
-import { registrarCustoChamado } from "../services/custoChamados";
+import { fluxoCriarChamado } from "../services/chamadoFluxo";
+import { montarRefs } from "../services/chamadoRefs";
+import { getPreviewCache, salvarPreviewCache } from "../services/store";
 import {
-  getChamadoCriado,
-  getPreviewCache,
-  liberarCriacao,
-  reservarCriacao,
-  salvarChamadoCriado,
-  salvarPreviewCache,
-} from "../services/store";
-import {
+  buscarSetores,
   buscarTipos,
-  criarChamado,
   isDryRun,
   montarDescricaoGravacao,
   resolverAssuntoPorTexto,
   resolverClientePorMencao,
   resolverOrigem,
-  validarChamadoBody,
-  type ChamadoBody,
   type RefResolvida,
 } from "../services/suite360";
 import { getOptionalString } from "../utils/request";
@@ -111,7 +108,9 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
   let resumo: ResumoJson;
   let iaOk = true;
 
-  const cache = await getPreviewCache(gravacaoId).catch(() => null);
+  const cache = await getPreviewCache(gravacaoId, PROMPT_VERSION).catch(
+    () => null,
+  );
   if (cache) {
     transcript = cache.transcript;
     resumo = cache.resumo as ResumoJson;
@@ -136,6 +135,10 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
     transcript = t.transcript;
 
     const tiposDisponiveis = await buscarTipos().catch(() => []);
+
+    // Lista de setores para a IA poder sugerir setores ADICIONAIS ao do perfil.
+
+    const setoresDisponiveis = await buscarSetores().catch(() => []);
     try {
       ({ resumo } = await gerarResumoGemini({
         text: transcript,
@@ -146,6 +149,10 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
         assuntosDisponiveis: tiposDisponiveis.map((x) => ({
           id: x.id,
           nome: x.nome,
+        })),
+        setoresDisponiveis: setoresDisponiveis.map((s) => ({
+          id: s.id,
+          nome: s.nome,
         })),
         ramal,
         usuario,
@@ -159,15 +166,7 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
           error,
         )} — seguindo com campos vazios.`,
       );
-      resumo = {
-        titulo: "",
-        resumo: "",
-        pontos_principais: [],
-        providencias_sugeridas: [],
-        cliente_mencionado: { nome: "", cnpj: "" },
-        assunto_sugerido: "",
-        assunto_escolhido: { id: "", nome: "" },
-      };
+      resumo = resumoVazio();
     }
     // So cacheia o que presta: resumo vazio nao vale guardar por 48h.
     if (iaOk) {
@@ -176,6 +175,7 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
         resumo,
         iaOk,
         gravacaoNota: "",
+        promptVersion: PROMPT_VERSION,
       }).catch(() => undefined);
     }
   }
@@ -242,6 +242,15 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
     transcricao: transcript,
   });
 
+  const refs = await montarRefs({
+    resumo,
+    tipo,
+    origem,
+    setor,
+    executor,
+    clienteId: clienteEncontrado?.id,
+  });
+
   console.log(
     `[gravacao:preview] req=${requestId} id=${gravacaoId} dur=${duracao} ` +
       `cache=${cache ? "sim" : "nao"} cliente=${
@@ -269,7 +278,7 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
       ia: resumo,
       transcricao: transcript,
       cliente,
-      refs: { tipo, origem, setor, executor },
+      refs,
       descricao,
     },
   });
@@ -280,133 +289,17 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
 // ---------------------------------------------------------------------------
 
 export async function gravacaoCriarController(req: Request, res: Response) {
-  const requestId = randomUUID();
   const body = (req.body || {}) as Record<string, unknown>;
   const gravacaoId = getOptionalString(body, "gravacaoId") || "";
 
-  const setores = listaDeStrings(body.setores_vinculados);
-  const descricaoRaw = body.descricao;
-  const chamadoBody: Partial<ChamadoBody> = {
-    cliente_id: campoId(body, "cliente_id"),
-    tipo_apontamento_id: campoId(body, "tipo_apontamento_id"),
-    descricao: typeof descricaoRaw === "string" ? descricaoRaw : "",
-    origem_id: campoId(body, "origem_id"),
-    setores_vinculados: setores,
-    executor_id: campoId(body, "executor_id"),
-  };
-
-  const faltando = validarChamadoBody(chamadoBody);
-  const dryRun = isDryRun();
-  if (faltando.length && !dryRun) {
-    throw new AppError({
-      statusCode: 422,
-      code: "SUITE_CAMPOS_OBRIGATORIOS",
-      message:
-        "Faltam dados obrigatorios para abrir o chamado. Corrija/configure antes de enviar.",
-      details: { faltando },
-    });
-  }
-
-  // --- DEV (dry-run): so devolve o JSON que SERIA enviado. ---
-  if (dryRun) {
-    const resultado = await criarChamado(chamadoBody as ChamadoBody);
-    res.status(200).json({
-      ok: true,
-      data: {
-        requestId,
-        dryRun: true,
-        faltando,
-        mensagem: faltando.length
-          ? "Simulado — ainda faltam IDs para envio real: " + faltando.join(", ")
-          : "Chamado simulado — envio ao Suite desligado (SUITE360_DRY_RUN).",
-        body: resultado.body,
-      },
-    });
-    return;
-  }
-
-  // --- PRODUCAO: idempotencia pelo id da gravacao ---
-  if (gravacaoId) {
-    const jaCriado = await getChamadoCriado(gravacaoId, NS).catch(() => null);
-    if (jaCriado) {
-      res.status(200).json({
-        ok: true,
-        data: {
-          requestId,
-          dryRun: false,
-          jaExistia: true,
-          id: jaCriado.id,
-          protocolo: jaCriado.protocolo,
-          mensagem: `Chamado ja existente para esta gravacao: ${jaCriado.protocolo}`,
-        },
-      });
-      return;
-    }
-    const reservou = await reservarCriacao(gravacaoId, NS).catch(() => true);
-    if (!reservou) {
-      throw new AppError({
-        statusCode: 409,
-        code: "CHAMADO_EM_CRIACAO",
-        message:
-          "Este chamado ja esta sendo criado. Aguarde alguns segundos e verifique.",
-      });
-    }
-  }
-
-  let resultado: Awaited<ReturnType<typeof criarChamado>>;
-  try {
-    resultado = await criarChamado(chamadoBody as ChamadoBody);
-  } catch (error) {
-    if (gravacaoId) {
-      await liberarCriacao(gravacaoId, NS).catch(() => undefined);
-    }
-    throw error;
-  }
-
-  const protocolo = resultado.protocolo || "";
-  if (gravacaoId) {
-    // Se o registro de idempotencia falhar, NAO liberar a reserva: ela e a
-    // unica barreira que resta contra criar o mesmo chamado duas vezes.
-    let registrou = true;
-    await salvarChamadoCriado(
-      gravacaoId,
-      { id: resultado.id || "", protocolo },
-      NS,
-    ).catch((erro) => {
-      registrou = false;
-      console.error(
-        `[gravacao:criar] req=${requestId} id=${gravacaoId} protocolo=${protocolo} ` +
-          `NAO registrou a idempotencia: ${getErrorMessage(erro)}`,
-      );
-    });
-    if (registrou) {
-      await liberarCriacao(gravacaoId, NS).catch(() => undefined);
-    }
-    await registrarCustoChamado({
-      itemId: gravacaoId,
-      fonte: "gravacao",
-      clienteId: String(chamadoBody.cliente_id ?? ""),
-      cliente: getOptionalString(body, "cliente_nome"),
-      assuntoId: String(chamadoBody.tipo_apontamento_id ?? ""),
-      assunto: getOptionalString(body, "assunto_nome"),
-      ramal: getOptionalString(body, "ramal"),
-      usuario: getOptionalString(body, "usuario"),
-      protocolo,
-    }).catch(() => undefined);
-  }
-
-  console.log(
-    `[gravacao:criar] req=${requestId} id=${gravacaoId || "-"} ` +
-      `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,
-  );
-  res.status(201).json({
-    ok: true,
-    data: {
-      requestId,
-      dryRun: false,
-      id: resultado.id || "",
-      protocolo,
-      mensagem: `Chamado criado com sucesso: ${protocolo}`,
-    },
+  await fluxoCriarChamado({
+    res,
+    requestId: randomUUID(),
+    body,
+    ns: NS,
+    chave: gravacaoId,
+    fonteCusto: "gravacao",
+    logTag: "gravacao:criar",
+    msgJaExistia: (p) => `Chamado ja existente para esta gravacao: ${p}`,
   });
 }

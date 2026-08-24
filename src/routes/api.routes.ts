@@ -27,10 +27,13 @@ import {
   erroController,
 } from "../controllers/admin.controller";
 import {
+  suiteCamposTipoController,
   suiteClientesController,
   suiteCriarController,
   suiteOrigensController,
   suitePreviewController,
+  suitePreviewExecutorController,
+  suiteProcessosController,
   suiteSetoresController,
   suiteTiposController,
   suiteUsuariosController,
@@ -89,7 +92,10 @@ apiRouter.post(
 
 // --- Integracao GoTo ---
 apiRouter.get("/goto/oauth/start", asyncHandler(gotoOAuthStartController));
-apiRouter.get("/goto/oauth/callback", asyncHandler(gotoOAuthCallbackController));
+apiRouter.get(
+  "/goto/oauth/callback",
+  asyncHandler(gotoOAuthCallbackController),
+);
 apiRouter.post("/goto/setup/:token", asyncHandler(gotoSetupController));
 apiRouter.post("/goto/webhook/:token", asyncHandler(gotoWebhookController));
 apiRouter.get("/goto/eventos", asyncHandler(gotoEventosController));
@@ -106,10 +112,25 @@ apiRouter.get("/suite360/tipos", asyncHandler(suiteTiposController));
 apiRouter.get("/suite360/setores", asyncHandler(suiteSetoresController));
 apiRouter.get("/suite360/origens", asyncHandler(suiteOrigensController));
 apiRouter.get("/suite360/usuarios", asyncHandler(suiteUsuariosController));
+// Campos personalizados do assunto, processos vinculaveis e previa de quem
+// ficaria responsavel — tudo read-only, para o modal montar o formulario certo
+// antes de enviar (e evitar um 422 do Suite).
+apiRouter.get(
+  "/suite360/tipos/:id/campos",
+  asyncHandler(suiteCamposTipoController),
+);
+apiRouter.get("/suite360/processos", asyncHandler(suiteProcessosController));
+apiRouter.get(
+  "/suite360/preview-executor",
+  asyncHandler(suitePreviewExecutorController),
+);
 
 // --- Integracao Gmail (chamados a partir de e-mails) ---
 apiRouter.get("/gmail/oauth/start", asyncHandler(gmailOAuthStartController));
-apiRouter.get("/gmail/oauth/callback", asyncHandler(gmailOAuthCallbackController));
+apiRouter.get(
+  "/gmail/oauth/callback",
+  asyncHandler(gmailOAuthCallbackController),
+);
 apiRouter.get("/gmail/oauth/done", asyncHandler(gmailOAuthDoneController));
 apiRouter.get("/gmail/emails", asyncHandler(gmailEmailsController));
 apiRouter.post("/gmail/chamado/preview", asyncHandler(gmailPreviewController));
@@ -132,7 +153,10 @@ apiRouter.post(
   uploadAudioMiddleware,
   asyncHandler(gravacaoPreviewController),
 );
-apiRouter.post("/gravacao/chamado/criar", asyncHandler(gravacaoCriarController));
+apiRouter.post(
+  "/gravacao/chamado/criar",
+  asyncHandler(gravacaoCriarController),
+);
 
 // --- Painel admin de custos de IA ---
 apiRouter.get("/admin", adminPageController);

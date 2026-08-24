@@ -16,27 +16,26 @@ import {
   removerMarcadorDoEmail,
 } from "../services/gmailApi";
 import {
-  getChamadoCriado,
   getContaDoEmail,
-  liberarCriacao,
-  reservarCriacao,
-  salvarChamadoCriado,
   salvarContaDoEmail,
   setPerfilToken,
 } from "../services/store";
 import { resolverContaGoogle } from "../services/googleConta";
-import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
-import { registrarCustoChamado } from "../services/custoChamados";
 import {
+  gerarResumoGemini,
+  resumoVazio,
+  type ResumoJson,
+} from "../services/gemini";
+import { fluxoCriarChamado } from "../services/chamadoFluxo";
+import { montarRefs } from "../services/chamadoRefs";
+import {
+  buscarSetores,
   buscarTipos,
-  criarChamado,
   isDryRun,
   montarDescricaoEmail,
   resolverAssuntoPorTexto,
   resolverClientePorMencao,
   resolverOrigemEmail,
-  validarChamadoBody,
-  type ChamadoBody,
   type RefResolvida,
 } from "../services/suite360";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
@@ -76,12 +75,16 @@ export async function gmailOAuthStartController(req: Request, res: Response) {
   const state = (process.env.GMAIL_OAUTH_STATE || randomUUID()).trim();
   // ?chat=1 forca os escopos do Google Chat no consentimento (e o que o botao
   // "Reconectar conta Google" da aba Chat usa); ?chat=0 pede so o Gmail.
-  const chatParam = typeof req.query.chat === "string" ? req.query.chat.trim() : "";
+  const chatParam =
+    typeof req.query.chat === "string" ? req.query.chat.trim() : "";
   const comChat = chatParam ? chatParam !== "0" : undefined;
   res.redirect(buildAuthorizeUrl(state, { comChat }));
 }
 
-export async function gmailOAuthCallbackController(req: Request, res: Response) {
+export async function gmailOAuthCallbackController(
+  req: Request,
+  res: Response,
+) {
   const erro = typeof req.query.error === "string" ? req.query.error : "";
   const code = typeof req.query.code === "string" ? req.query.code : "";
   if (erro) {
@@ -208,6 +211,10 @@ export async function gmailPreviewController(req: Request, res: Response) {
 
   const tiposDisponiveis = await buscarTipos().catch(() => []);
 
+  // Lista de setores para a IA poder sugerir setores ADICIONAIS ao do perfil.
+
+  const setoresDisponiveis = await buscarSetores().catch(() => []);
+
   // A IA e best-effort (retry robusto ja no gerarResumoGemini).
   let resumo: ResumoJson;
   let iaOk = true;
@@ -219,6 +226,10 @@ export async function gmailPreviewController(req: Request, res: Response) {
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
         id: t.id,
         nome: t.nome,
+      })),
+      setoresDisponiveis: setoresDisponiveis.map((s) => ({
+        id: s.id,
+        nome: s.nome,
       })),
       ramal,
       usuario,
@@ -235,15 +246,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
         error,
       )} — seguindo com campos vazios.`,
     );
-    resumo = {
-      titulo: "",
-      resumo: "",
-      pontos_principais: [],
-      providencias_sugeridas: [],
-      cliente_mencionado: { nome: "", cnpj: "" },
-      assunto_sugerido: "",
-      assunto_escolhido: { id: "", nome: "" },
-    };
+    resumo = resumoVazio();
   }
 
   // Assunto: env fixo > escolha da IA (validada na lista) > match textual.
@@ -256,7 +259,10 @@ export async function gmailPreviewController(req: Request, res: Response) {
   if (tipoEnv) tipo = { id: tipoEnv, fonte: "env" };
   else if (tipoNaLista)
     tipo = { id: tipoNaLista.id, nome: tipoNaLista.nome, fonte: "ia" };
-  else tipo = await resolverAssuntoPorTexto(resumo.assunto_sugerido || resumo.titulo);
+  else
+    tipo = await resolverAssuntoPorTexto(
+      resumo.assunto_sugerido || resumo.titulo,
+    );
 
   const origem = await resolverOrigemEmail();
 
@@ -299,6 +305,17 @@ export async function gmailPreviewController(req: Request, res: Response) {
     corpo: corpoTexto,
   });
 
+  // Sugestoes novas da IA (titulo, competencia, prioridade, setores e pessoas
+  // vinculadas, "ja resolvido") + campos personalizados do assunto.
+  const refs = await montarRefs({
+    resumo,
+    tipo,
+    origem,
+    setor,
+    executor,
+    clienteId: clienteEncontrado?.id,
+  });
+
   console.log(
     `[gmail:preview] req=${requestId} chave=${chave} msgs=${qtdMensagens} ` +
       `conta=${email} cliente=${clienteEncontrado?.id || cliente.status} tipo=${
@@ -334,7 +351,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
       ia: resumo,
       transcricao: corpoTexto,
       cliente,
-      refs: { tipo, origem, setor, executor },
+      refs,
       descricao,
     },
   });
@@ -362,137 +379,26 @@ async function removerMarcadorPosCriar(
 }
 
 export async function gmailCriarController(req: Request, res: Response) {
-  const requestId = randomUUID();
   const body = ensureBodyObject(req.body);
   const messageId = getOptionalString(body, "messageId");
   const threadId = getOptionalString(body, "threadId");
   // Chave de idempotencia/marcador: threadId (conversa) quando houver; senao msgId.
-  const chave = threadId || messageId;
+  const chave = threadId || messageId || "";
 
-  const setoresRaw = body.setores_vinculados;
-  const setores = Array.isArray(setoresRaw)
-    ? setoresRaw.map((s) => String(s)).filter(Boolean)
-    : [];
-  const descricaoRaw = body.descricao;
-  const chamadoBody: Partial<ChamadoBody> = {
-    cliente_id: campoId(body, "cliente_id"),
-    tipo_apontamento_id: campoId(body, "tipo_apontamento_id"),
-    descricao: typeof descricaoRaw === "string" ? descricaoRaw : "",
-    origem_id: campoId(body, "origem_id"),
-    setores_vinculados: setores,
-    executor_id: campoId(body, "executor_id"),
-  };
-
-  const faltando = validarChamadoBody(chamadoBody);
-  const dryRun = isDryRun();
-  if (faltando.length && !dryRun) {
-    throw new AppError({
-      statusCode: 422,
-      code: "SUITE_CAMPOS_OBRIGATORIOS",
-      message:
-        "Faltam dados obrigatorios para abrir o chamado. Corrija/configure antes de enviar.",
-      details: { faltando },
-    });
-  }
-
-  // --- DEV (dry-run): so devolve o JSON que SERIA enviado. ---
-  if (dryRun) {
-    const resultado = await criarChamado(chamadoBody as ChamadoBody);
-    res.status(200).json({
-      ok: true,
-      data: {
-        requestId,
-        dryRun: true,
-        faltando,
-        mensagem: faltando.length
-          ? "Simulado — ainda faltam IDs para envio real: " + faltando.join(", ")
-          : "Chamado simulado — envio ao Suite desligado (SUITE360_DRY_RUN).",
-        body: resultado.body,
-      },
-    });
-    return;
-  }
-
-  // --- PRODUCAO: idempotencia pela conversa (thread) — nao duplica o chamado ---
-  if (chave) {
-    const jaCriado = await getChamadoCriado(chave, "gmail").catch(() => null);
-    if (jaCriado) {
+  await fluxoCriarChamado({
+    res,
+    requestId: randomUUID(),
+    body,
+    ns: "gmail",
+    chave,
+    fonteCusto: "email",
+    logTag: "gmail:criar",
+    msgJaExistia: (p) => `Chamado ja existente para esta conversa: ${p}`,
+    // O marcador so sai quando o chamado existe DE VERDADE: em dry-run o
+    // e-mail tem que continuar aparecendo na lista para poder ser retestado.
+    depois: async ({ dryRun }) => {
+      if (dryRun) return;
       await removerMarcadorPosCriar(chave, threadId);
-      res.status(200).json({
-        ok: true,
-        data: {
-          requestId,
-          dryRun: false,
-          jaExistia: true,
-          id: jaCriado.id,
-          protocolo: jaCriado.protocolo,
-          mensagem: `Chamado ja existente para esta conversa: ${jaCriado.protocolo}`,
-        },
-      });
-      return;
-    }
-    const reservou = await reservarCriacao(chave, "gmail").catch(() => true);
-    if (!reservou) {
-      throw new AppError({
-        statusCode: 409,
-        code: "CHAMADO_EM_CRIACAO",
-        message:
-          "Este chamado ja esta sendo criado. Aguarde alguns segundos e verifique.",
-      });
-    }
-  }
-
-  let resultado: Awaited<ReturnType<typeof criarChamado>>;
-  try {
-    resultado = await criarChamado(chamadoBody as ChamadoBody);
-  } catch (error) {
-    if (chave) await liberarCriacao(chave, "gmail").catch(() => undefined);
-    throw error;
-  }
-
-  const protocolo = resultado.protocolo || "";
-  if (chave) {
-    // Se o registro de idempotencia falhar, NAO liberar a reserva: ela e a
-    // unica barreira que resta contra criar o mesmo chamado duas vezes. Deixar
-    // o TTL de 120s expirar sozinho e mais seguro que abrir a janela agora.
-    let registrou = true;
-    await salvarChamadoCriado(
-      chave,
-      { id: resultado.id || "", protocolo },
-      "gmail",
-    ).catch((erro) => {
-      registrou = false;
-      console.error(
-        `[gmail:criar] req=${requestId} chave=${chave} protocolo=${protocolo} NAO registrou a idempotencia: ${getErrorMessage(erro)}`,
-      );
-    });
-    if (registrou) await liberarCriacao(chave, "gmail").catch(() => undefined);
-    // Custo de IA deste e-mail -> cliente/assunto (painel de custos).
-    await registrarCustoChamado({
-      itemId: chave,
-      fonte: "email",
-      clienteId: String(chamadoBody.cliente_id ?? ""),
-      cliente: getOptionalString(body, "cliente_nome"),
-      assuntoId: String(chamadoBody.tipo_apontamento_id ?? ""),
-      assunto: getOptionalString(body, "assunto_nome"),
-      ramal: getOptionalString(body, "ramal"),
-      usuario: getOptionalString(body, "usuario"),
-      protocolo,
-    }).catch(() => undefined);
-  }
-  await removerMarcadorPosCriar(chave, threadId);
-  console.log(
-    `[gmail:criar] req=${requestId} chave=${chave || "-"} ` +
-      `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,
-  );
-  res.status(201).json({
-    ok: true,
-    data: {
-      requestId,
-      dryRun: false,
-      id: resultado.id || "",
-      protocolo,
-      mensagem: `Chamado criado com sucesso: ${protocolo}`,
     },
   });
 }

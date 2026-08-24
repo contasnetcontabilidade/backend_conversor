@@ -15,28 +15,27 @@ import {
   type EspacoResumo,
 } from "../services/chatApi";
 import { resolverContaGoogle } from "../services/googleConta";
-import { gerarResumoGemini, type ResumoJson } from "../services/gemini";
-import { registrarCustoChamado } from "../services/custoChamados";
 import {
-  getChamadoCriado,
+  gerarResumoGemini,
+  resumoVazio,
+  type ResumoJson,
+} from "../services/gemini";
+import { fluxoCriarChamado } from "../services/chamadoFluxo";
+import { montarRefs } from "../services/chamadoRefs";
+import {
   getChatFeitos,
   getSelecaoChat,
-  liberarCriacao,
   marcarChatFeito,
-  reservarCriacao,
-  salvarChamadoCriado,
   salvarSelecaoChat,
 } from "../services/store";
 import {
+  buscarSetores,
   buscarTipos,
-  criarChamado,
   isDryRun,
   montarDescricaoChat,
   resolverAssuntoPorTexto,
   resolverClientePorMencao,
   resolverOrigemChat,
-  validarChamadoBody,
-  type ChamadoBody,
   type RefResolvida,
 } from "../services/suite360";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
@@ -80,9 +79,14 @@ function qs(req: Request, nome: string): string {
 // primeira experiencia da base inteira, entao o app precisa saber disso sem
 // tomar um 403 no meio da tela.
 export async function chatStatusController(req: Request, res: Response) {
-  const email = await resolverContaGoogle(qs(req, "profileToken"), qs(req, "email"));
+  const email = await resolverContaGoogle(
+    qs(req, "profileToken"),
+    qs(req, "email"),
+  );
   const habilitado = chatHabilitado();
-  const temChat = habilitado ? await temEscopoChat(email).catch(() => false) : false;
+  const temChat = habilitado
+    ? await temEscopoChat(email).catch(() => false)
+    : false;
 
   // So mexe na secao se a conta ja pode falar com o Chat.
   const secaoId = temChat
@@ -108,7 +112,10 @@ export async function chatStatusController(req: Request, res: Response) {
 // Barreira unica para as rotas de leitura: erro claro e acionavel em vez do 403
 // cru do Google.
 async function contaComChat(req: Request): Promise<string> {
-  const email = await resolverContaGoogle(qs(req, "profileToken"), qs(req, "email"));
+  const email = await resolverContaGoogle(
+    qs(req, "profileToken"),
+    qs(req, "email"),
+  );
   if (!chatHabilitado()) {
     throw new AppError({
       statusCode: 403,
@@ -181,9 +188,10 @@ export async function chatMessagesController(req: Request, res: Response) {
 
   const pageSizeParam = Number(qs(req, "pageSize"));
   const pagina = await listarMensagens(email, spaceId, {
-    pageSize: Number.isFinite(pageSizeParam) && pageSizeParam > 0
-      ? pageSizeParam
-      : undefined,
+    pageSize:
+      Number.isFinite(pageSizeParam) && pageSizeParam > 0
+        ? pageSizeParam
+        : undefined,
     pageToken: qs(req, "pageToken") || undefined,
     desde: qs(req, "desde") || undefined,
   });
@@ -305,6 +313,10 @@ export async function chatPreviewController(req: Request, res: Response) {
 
   const tiposDisponiveis = await buscarTipos().catch(() => []);
 
+  // Lista de setores para a IA poder sugerir setores ADICIONAIS ao do perfil.
+
+  const setoresDisponiveis = await buscarSetores().catch(() => []);
+
   // A IA e best-effort (o retry robusto ja mora no gerarResumoGemini): se ela
   // falhar, o chamado ainda abre com os campos vazios para preenchimento manual.
   let resumo: ResumoJson;
@@ -317,6 +329,10 @@ export async function chatPreviewController(req: Request, res: Response) {
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
         id: t.id,
         nome: t.nome,
+      })),
+      setoresDisponiveis: setoresDisponiveis.map((s) => ({
+        id: s.id,
+        nome: s.nome,
       })),
       ramal,
       usuario,
@@ -331,15 +347,7 @@ export async function chatPreviewController(req: Request, res: Response) {
         error,
       )} — seguindo com campos vazios.`,
     );
-    resumo = {
-      titulo: "",
-      resumo: "",
-      pontos_principais: [],
-      providencias_sugeridas: [],
-      cliente_mencionado: { nome: "", cnpj: "" },
-      assunto_sugerido: "",
-      assunto_escolhido: { id: "", nome: "" },
-    };
+    resumo = resumoVazio();
   }
 
   // Assunto: env fixo > escolha da IA (validada na lista) > match textual.
@@ -399,6 +407,15 @@ export async function chatPreviewController(req: Request, res: Response) {
     conversa: sel.texto,
   });
 
+  const refs = await montarRefs({
+    resumo,
+    tipo,
+    origem,
+    setor,
+    executor,
+    clienteId: clienteEncontrado?.id,
+  });
+
   console.log(
     `[chat:preview] req=${requestId} chave=${chave} msgs=${sel.qtd} ` +
       `conta=${email} cliente=${clienteEncontrado?.id || cliente.status} tipo=${
@@ -439,7 +456,7 @@ export async function chatPreviewController(req: Request, res: Response) {
       ia: resumo,
       transcricao: sel.texto,
       cliente,
-      refs: { tipo, origem, setor, executor },
+      refs,
       descricao,
     },
   });
@@ -469,7 +486,6 @@ async function marcarFeitoPosCriar(
 }
 
 export async function chatCriarController(req: Request, res: Response) {
-  const requestId = randomUUID();
   const body = ensureBodyObject(req.body);
   const spaceId = getOptionalString(body, "spaceId") || "";
   const messageIds = listaDeStrings(body.messageIds);
@@ -478,127 +494,20 @@ export async function chatCriarController(req: Request, res: Response) {
     getOptionalString(body, "chaveChat") ||
     (spaceId && messageIds.length ? chaveDaSelecao(spaceId, messageIds) : "");
 
-  const setores = listaDeStrings(body.setores_vinculados);
-  const descricaoRaw = body.descricao;
-  const chamadoBody: Partial<ChamadoBody> = {
-    cliente_id: campoId(body, "cliente_id"),
-    tipo_apontamento_id: campoId(body, "tipo_apontamento_id"),
-    descricao: typeof descricaoRaw === "string" ? descricaoRaw : "",
-    origem_id: campoId(body, "origem_id"),
-    setores_vinculados: setores,
-    executor_id: campoId(body, "executor_id"),
-  };
-
-  const faltando = validarChamadoBody(chamadoBody);
-  const dryRun = isDryRun();
-  if (faltando.length && !dryRun) {
-    throw new AppError({
-      statusCode: 422,
-      code: "SUITE_CAMPOS_OBRIGATORIOS",
-      message:
-        "Faltam dados obrigatorios para abrir o chamado. Corrija/configure antes de enviar.",
-      details: { faltando },
-    });
-  }
-
-  // --- DEV (dry-run): so devolve o JSON que SERIA enviado. ---
-  if (dryRun) {
-    const resultado = await criarChamado(chamadoBody as ChamadoBody);
-    res.status(200).json({
-      ok: true,
-      data: {
-        requestId,
-        dryRun: true,
-        faltando,
-        mensagem: faltando.length
-          ? "Simulado — ainda faltam IDs para envio real: " + faltando.join(", ")
-          : "Chamado simulado — envio ao Suite desligado (SUITE360_DRY_RUN).",
-        body: resultado.body,
-      },
-    });
-    return;
-  }
-
-  // --- PRODUCAO: idempotencia pela selecao — nao duplica o chamado ---
-  if (chave) {
-    const jaCriado = await getChamadoCriado(chave, NS).catch(() => null);
-    if (jaCriado) {
-      await marcarFeitoPosCriar(chave, spaceId, messageIds, jaCriado.protocolo);
-      res.status(200).json({
-        ok: true,
-        data: {
-          requestId,
-          dryRun: false,
-          jaExistia: true,
-          id: jaCriado.id,
-          protocolo: jaCriado.protocolo,
-          mensagem: `Chamado ja existente para estas mensagens: ${jaCriado.protocolo}`,
-        },
-      });
-      return;
-    }
-    const reservou = await reservarCriacao(chave, NS).catch(() => true);
-    if (!reservou) {
-      throw new AppError({
-        statusCode: 409,
-        code: "CHAMADO_EM_CRIACAO",
-        message:
-          "Este chamado ja esta sendo criado. Aguarde alguns segundos e verifique.",
-      });
-    }
-  }
-
-  let resultado: Awaited<ReturnType<typeof criarChamado>>;
-  try {
-    resultado = await criarChamado(chamadoBody as ChamadoBody);
-  } catch (error) {
-    if (chave) await liberarCriacao(chave, NS).catch(() => undefined);
-    throw error;
-  }
-
-  const protocolo = resultado.protocolo || "";
-  if (chave) {
-    // Se o registro de idempotencia falhar, NAO liberar a reserva: ela e a
-    // unica barreira que resta contra criar o mesmo chamado duas vezes. Deixar
-    // o TTL de 120s expirar sozinho e mais seguro que abrir a janela agora.
-    let registrou = true;
-    await salvarChamadoCriado(
-      chave,
-      { id: resultado.id || "", protocolo },
-      NS,
-    ).catch((erro) => {
-      registrou = false;
-      console.error(
-        `[chat:criar] req=${requestId} chave=${chave} protocolo=${protocolo} NAO registrou a idempotencia: ${getErrorMessage(erro)}`,
-      );
-    });
-    if (registrou) await liberarCriacao(chave, NS).catch(() => undefined);
-    await registrarCustoChamado({
-      itemId: chave,
-      fonte: "chat",
-      clienteId: String(chamadoBody.cliente_id ?? ""),
-      cliente: getOptionalString(body, "cliente_nome"),
-      assuntoId: String(chamadoBody.tipo_apontamento_id ?? ""),
-      assunto: getOptionalString(body, "assunto_nome"),
-      ramal: getOptionalString(body, "ramal"),
-      usuario: getOptionalString(body, "usuario"),
-      protocolo,
-    }).catch(() => undefined);
-  }
-  await marcarFeitoPosCriar(chave, spaceId, messageIds, protocolo);
-
-  console.log(
-    `[chat:criar] req=${requestId} chave=${chave || "-"} ` +
-      `cliente=${chamadoBody.cliente_id} protocolo=${protocolo}`,
-  );
-  res.status(201).json({
-    ok: true,
-    data: {
-      requestId,
-      dryRun: false,
-      id: resultado.id || "",
-      protocolo,
-      mensagem: `Chamado criado com sucesso: ${protocolo}`,
+  await fluxoCriarChamado({
+    res,
+    requestId: randomUUID(),
+    body,
+    ns: NS,
+    chave,
+    fonteCusto: "chat",
+    logTag: "chat:criar",
+    msgJaExistia: (p) => `Chamado ja existente para estas mensagens: ${p}`,
+    // Marcar as mensagens como "ja viraram chamado" e compartilhado entre
+    // atendentes, entao so vale quando o chamado existe de verdade.
+    depois: async ({ dryRun, protocolo }) => {
+      if (dryRun) return;
+      await marcarFeitoPosCriar(chave, spaceId, messageIds, protocolo);
     },
   });
 }
