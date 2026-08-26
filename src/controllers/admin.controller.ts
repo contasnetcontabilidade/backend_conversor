@@ -1261,14 +1261,19 @@ function renderSemChamado(iv,c,muted,grid,gold){
     return a;}).sort(function(a,b){return b.sem-a.sem});
 
   // Chamados criados por versoes antigas do app vem SEM ramal. Eles existem e
-  // custaram, mas nao pertencem a nenhuma linha da tabela — por isso os
-  // cartoes somam por TOTAL, nao pela soma das linhas: senao o convertido
-  // daria zero e tudo apareceria como 100% sem chamado.
-  var convSemRamal=chamRows.filter(function(r){return !String(r.ramal||'')}).reduce(function(a,r){return a+(r.custoUsd||0)},0);
+  // custaram, mas nao pertencem a nenhuma linha da tabela. So valem os de
+  // DEPOIS do corte: antes dele o gasto ja entrou inteiro como convertido
+  // acima, entao somar de novo aqui contava o mesmo chamado duas vezes.
+  var convSemRamal=chamRows.filter(function(r){
+    return !String(r.ramal||'') && (!corte || r.dia>=corte);
+  }).reduce(function(a,r){return a+(r.custoUsd||0)},0);
   var reais=lista.filter(function(x){return !x.teste});
   var gastoReal=reais.reduce(function(a,x){return a+x.gasto},0);
-  var convReal=reais.reduce(function(a,x){return a+x.conv},0)+convSemRamal;
-  var semReal=Math.max(0,gastoReal-convReal);
+  // Soma o SEM ja limitado por ramal, em vez de subtrair os totais: quando um
+  // ramal converte mais do que gastou (chamado aberto por outra pessoa), o
+  // excedente apagava o sem chamado dos outros e o cartao dava R$ 0,00
+  // enquanto a tabela logo abaixo mostrava linhas com valor.
+  var semReal=Math.max(0,reais.reduce(function(a,x){return a+x.sem},0)-convSemRamal);
   var gastoTeste=lista.filter(function(x){return x.teste}).reduce(function(a,x){return a+x.gasto},0);
   var pct=gastoReal>0?Math.round(semReal/gastoReal*100):0;
   document.getElementById('sc-pct').textContent=pct+'%';
