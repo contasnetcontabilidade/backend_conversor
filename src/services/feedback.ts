@@ -52,8 +52,19 @@ export interface FeedbackEntry {
     // com o que o humano confirmou.
     finalizadoSugerido?: boolean;
     finalizadoFinal?: boolean;
+    // O que a IA sugeriu ao abrir a revisao, nunca sobrescrito. O
+    // finalizadoSugerido acima vira false no primeiro clique do switch, entao
+    // "a IA marcou e o usuario desmarcou" nunca aparecia nos dados. Campo novo
+    // (em vez de corrigir o antigo) porque app velho e novo convivem durante o
+    // auto-update: ausente = app antigo.
+    finalizadoIa?: boolean;
   };
   descEditada?: boolean;
+  // Tamanho da edicao, sem conteudo: "descEditada" so dizia sim/nao, e 42% dos
+  // chamados editavam sem dar para saber se foi enxugar, completar ou reescrever.
+  descTamSistema?: number; // caracteres do texto que o sistema montou
+  descTamFinal?: number; // caracteres do texto enviado
+  descPalavrasMantidas?: number; // 0..1: palavras distintas do sistema que ficaram
   iaOk?: boolean;
 }
 
