@@ -398,6 +398,13 @@ removido (`nomeSemSetor`) para casar com o cadastro do Suite. O limite de nomes
 resolvidos subiu de 5 para 12: era 5 porque a única origem era a IA, e uma fila
 com transferência estoura isso em silêncio.
 
+**Quem abre o chamado** (o executor do perfil, ou do GoTo em ligação) entra em
+primeiro lugar nos vinculados, em todas as origens (`incluirQuemAbre` em
+`chamadoRefs.ts`). Vai pela prévia, não só no envio: aparece como chip no
+formulário e pode ser removido, sem versão nova do app. Se já estava entre os
+atendentes, só sobe para a frente. Executor vindo de env (`SUITE360_EXECUTOR_ID`)
+não entra — é conta genérica e ficaria vinculada em todo chamado.
+
 ### Usuários por setor (filtro do modal)
 
 `buscarUsuarios(q, setores)` aceita **vários** setores. A API do Suite só filtra
