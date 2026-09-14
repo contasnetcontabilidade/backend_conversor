@@ -271,6 +271,31 @@ function nomesParaVincular(ctx: ContextoRefs): string[] {
   });
 }
 
+// Quem abre o chamado (o executor do perfil / do GoTo) entra como vinculado, na
+// frente: sem isto, quando o chamado vai para outra pessoa ou setor, quem abriu
+// perde o acompanhamento. Vai pela previa (e nao so no envio) para aparecer como
+// chip no formulario e poder ser removido — e sem precisar de versao nova do app.
+// Executor vindo de env e conta generica: vincular ela em todo chamado so poluiria.
+function incluirQuemAbre(
+  vinculados: RefMulti,
+  executor: RefResolvida,
+): RefMulti {
+  const id = executor.id ? String(executor.id) : "";
+  if (!id || (executor.fonte !== "perfil" && executor.fonte !== "lookup")) {
+    return vinculados;
+  }
+  // Em ligacao quem abriu costuma ja estar entre os atendentes: sobe para a
+  // frente em vez de duplicar.
+  const resto = vinculados.itens.filter((u) => String(u.id) !== id);
+  const itens = [{ id, nome: executor.nome || "" }, ...resto];
+  return {
+    ...vinculados,
+    ids: itens.map((u) => u.id),
+    itens,
+    fonte: vinculados.itens.length ? vinculados.fonte : executor.fonte,
+  };
+}
+
 export async function montarRefs(ctx: ContextoRefs): Promise<RefsChamado> {
   const { resumo, tipo, origem, setor, executor } = ctx;
 
@@ -310,6 +335,8 @@ export async function montarRefs(ctx: ContextoRefs): Promise<RefsChamado> {
           }).catch((): PreviewExecutor => ({ ok: false }))
         : Promise.resolve(undefined),
     ]);
+
+  const usuariosComQuemAbre = incluirQuemAbre(usuariosVinculados, executor);
 
   // "Ja resolvido" com cinto e suspensorio: a IA precisa dizer que sim E nao
   // ter sobrado providencia. Um chamado nascer fechado por engano e pior que
@@ -357,7 +384,7 @@ export async function montarRefs(ctx: ContextoRefs): Promise<RefsChamado> {
     executorModo: { valor: "eu", fonte: "perfil" },
 
     setoresVinculados,
-    usuariosVinculados,
+    usuariosVinculados: usuariosComQuemAbre,
 
     camposPersonalizados: {
       definicoes,
