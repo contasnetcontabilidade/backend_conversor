@@ -33,7 +33,7 @@ import {
 } from "../services/store";
 import { isAblyConfigured, publishChamadoCriado } from "../services/ably";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
-import { montarRefs } from "../services/chamadoRefs";
+import { montarRefs, nomeSemSetor } from "../services/chamadoRefs";
 import {
   buscarCamposDoTipo,
   buscarClientes,
@@ -645,11 +645,22 @@ export async function suitePreviewController(req: Request, res: Response) {
           assuntosDisponiveis: tiposDisponiveis.map((t) => ({
             id: t.id,
             nome: t.nome,
+            categoria: t.extra,
           })),
           setoresDisponiveis: setoresDisponiveis.map((s) => ({
             id: s.id,
             nome: s.nome,
           })),
+          // Perfil primeiro (mesma prioridade do setor/executor do chamado);
+          // sem perfil, o nome do GoTo ja traz o setor ("NOME - SETOR").
+          quemRegistra: {
+            nome: execNomePerfil || nomeSemSetor(nomeUsuario),
+            setor:
+              setorNomePerfil ||
+              (nomeUsuario.lastIndexOf(" - ") >= 0
+                ? nomeUsuario.slice(nomeUsuario.lastIndexOf(" - ") + 3).trim()
+                : ""),
+          },
           ramal: ramalUsuario,
           usuario: nomeUsuario,
           fonte: "ligacao",
