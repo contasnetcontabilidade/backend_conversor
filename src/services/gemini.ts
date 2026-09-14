@@ -25,7 +25,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-08-21";
+export const PROMPT_VERSION = "2026-09-14";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -93,7 +93,15 @@ export type ResumoInput = {
   model?: string;
   // Lista de assuntos/tipos do Suite para a IA escolher UM (id + nome).
   // Quando fornecida, a IA escolhe da lista (mais preciso que o texto livre).
-  assuntosDisponiveis?: Array<{ id: string; nome: string }>;
+  // A categoria (quando o Suite tiver) ajuda a IA a achar o assunto do setor de
+  // quem registra.
+  assuntosDisponiveis?: Array<{ id: string; nome: string; categoria?: string }>;
+  // Quem esta registrando o chamado (colaborador do escritorio). Sem isto a IA
+  // classificava pelo TEMA do cliente: o feedback de 24/08 a 14/09 mostrou o
+  // suporte trocando 16 de 22 assuntos para "SUPORTE A SISTEMAS" (a IA tinha
+  // escolhido DCTFWEB, certificado, duvidas gerais...). E as regras "nao inclua
+  // quem esta registrando" citavam uma pessoa que o modelo nao conhecia.
+  quemRegistra?: { nome?: string; setor?: string };
   // Lista de setores do Suite, para a IA sugerir setores ADICIONAIS ao do
   // perfil de quem registra (mesma mecanica da lista de assuntos).
   setoresDisponiveis?: Array<{ id: string; nome: string }>;
@@ -455,7 +463,16 @@ PARTICULARIDADES DO GOOGLE CHAT — siga a risca:
     `COMPETENCIA ATUAL: ${competenciaAtual()}.\n` +
     `PROXIMOS DIAS (use esta tabela para resolver "ate sexta", "segunda que vem" etc.): ${proximosDiasDaSemana()}.\n`;
 
-  const prompt = `${blocoData}${contexto}${blocoConversa}${blocoChat}
+  const regNome = (input.quemRegistra?.nome || "").trim();
+  const regSetor = (input.quemRegistra?.setor || "").trim();
+  const blocoQuemRegistra =
+    regNome || regSetor
+      ? `QUEM REGISTRA ESTE CHAMADO: ${regNome || "colaborador"}${
+          regSetor ? ` (setor ${regSetor})` : ""
+        } — colaborador de ${NOME_ESCRITORIO}, NUNCA o cliente. Mensagens ou falas dessa pessoa sao do escritorio.\n`
+      : "";
+
+  const prompt = `${blocoData}${blocoQuemRegistra}${contexto}${blocoConversa}${blocoChat}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
 *** NAO REPITA A MESMA INFORMACAO ***
@@ -482,6 +499,9 @@ Campos obrigatorios:
   cliente"). Seja concreto e curto, baseando-se SOMENTE no que aparece no conteudo (nao
   invente dados). Deixe o array VAZIO quando o pedido ja foi atendido dentro do proprio
   atendimento ou quando nao houver nada a fazer (ex.: agradecimento, confirmacao).
+  Se a RESPOSTA do escritorio aparece no proprio conteudo e ja entregou o que foi pedido
+  (orientacao dada, acesso liberado, senha redefinida, arquivo/guia enviado, duvida
+  respondida), isso NAO vira providencia — nem "confirmar com o cliente se deu certo".
 - cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique QUEM E ATENDIDO — a empresa
   (ou a pessoa fisica) do outro lado do atendimento. Ordem de prioridade: (1) o CNPJ/CPF, se aparecer;
   (2) a ASSINATURA ${fontePalavra}; (3) quando houver e-mail do remetente, o DOMINIO dele
@@ -517,6 +537,18 @@ Campos obrigatorios:
   se aplique. A lista e longa e cobre quase tudo: percorra-a inteira antes de desistir e prefira o item
   razoavelmente proximo a deixar vazio (quem revisa troca em 1 clique; vazio obriga a procurar do zero).
   Deixe vazio SO se nada na lista tiver relacao com o assunto.
+  DESEMPATE PELO SETOR DE QUEM REGISTRA (quando informado acima): o assunto classifica o TRABALHO
+  que o escritorio fez ou vai fazer, nao o tema de fundo do cliente.
+    * Se quem registra e do suporte/tecnologia e o atendimento foi TECNICO — ajudar a acessar ou usar
+      um sistema/portal (Acessorias, Dominio, Onvio, SuiteWeb, e-CAC, portal do cliente), senha,
+      configuracao, erro de sistema — prefira o assunto de suporte a sistemas (ou a variante
+      "... - SUPORTE" do tema, se existir), mesmo que a duvida seja sobre DCTFWeb, certificado ou
+      e-mail. Se o pedido NAO foi tecnico (ex.: cliente pedindo para trocar o e-mail cadastrado),
+      mantenha o assunto do tema.
+    * Havendo um assunto da categoria do setor de quem registra que sirva, ele ganha do equivalente
+      generico.
+    * "DUVIDAS GERAIS DO CLIENTE" e "PROCESSOS INTERNOS" sao a ultima opcao: so quando nada mais
+      especifico servir.
 - competencia: string "AAAA-MM" ou "". SO quando o conteudo indicar explicitamente o mes/ano de
   REFERENCIA da obrigacao ("folha de julho", "DAS 08/2026", "competencia 07/25", "faturamento de
   junho"). NAO use a data de hoje como competencia: sem mencao clara, devolva "".
@@ -529,6 +561,9 @@ Campos obrigatorios:
 - ja_resolvido: "sim" | "nao" | "indefinido". "sim" SOMENTE quando o pedido foi atendido DENTRO
   deste atendimento e nao sobrou pendencia — o que normalmente implica providencias_sugeridas
   VAZIO. Se houver qualquer providencia, e "nao". Sem saber, "indefinido".
+  Conta como atendido DENTRO deste atendimento quando a resposta do escritorio (de quem registra ou
+  de um colega) esta no proprio conteudo, ja entregou o que foi pedido e o cliente nao voltou com
+  pedido novo depois dela. Se so aparece o pedido, sem a resposta, NAO e "sim".
 - assunto_interno: "sim" | "nao" | "indefinido". "sim" quando a demanda e do PROPRIO escritorio
   (colega falando com colega, processo interno, sem cliente externo envolvido); "nao" quando ha
   um cliente sendo atendido; "indefinido" se nao der para saber.
@@ -555,7 +590,10 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
   const assuntos = input.assuntosDisponiveis || [];
   const blocoAssuntos = assuntos.length
     ? `\n\nLISTA DE ASSUNTOS DISPONIVEIS (escolha EXATAMENTE UM em assunto_escolhido):\n${assuntos
-        .map((a) => `- [${a.id}] ${a.nome}`)
+        .map(
+          (a) =>
+            `- [${a.id}] ${a.nome}${a.categoria ? ` (categoria: ${a.categoria})` : ""}`,
+        )
         .join("\n")}`
     : "";
 
