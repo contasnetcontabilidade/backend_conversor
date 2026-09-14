@@ -534,17 +534,19 @@ Campos obrigatorios:
 - assunto_escolhido: objeto { id: string, nome: string }. Com base no conteudo, escolha na
   "LISTA DE ASSUNTOS DISPONIVEIS" abaixo (quando houver) o item que MELHOR representa o motivo do
   atendimento, e copie o id e o nome EXATAMENTE como aparecem na lista. Escolha o mais especifico que
-  se aplique. A lista e longa e cobre quase tudo: percorra-a inteira antes de desistir e prefira o item
+  se aplique AO TRABALHO FEITO (ver DESEMPATE abaixo). A lista e longa e cobre quase tudo: percorra-a inteira antes de desistir e prefira o item
   razoavelmente proximo a deixar vazio (quem revisa troca em 1 clique; vazio obriga a procurar do zero).
   Deixe vazio SO se nada na lista tiver relacao com o assunto.
   DESEMPATE PELO SETOR DE QUEM REGISTRA (quando informado acima): o assunto classifica o TRABALHO
   que o escritorio fez ou vai fazer, nao o tema de fundo do cliente.
     * Se quem registra e do suporte/tecnologia e o atendimento foi TECNICO — ajudar a acessar ou usar
       um sistema/portal (Acessorias, Dominio, Onvio, SuiteWeb, e-CAC, portal do cliente), senha,
-      configuracao, erro de sistema — prefira o assunto de suporte a sistemas (ou a variante
-      "... - SUPORTE" do tema, se existir), mesmo que a duvida seja sobre DCTFWeb, certificado ou
-      e-mail. Se o pedido NAO foi tecnico (ex.: cliente pedindo para trocar o e-mail cadastrado),
-      mantenha o assunto do tema.
+      configuracao, erro de sistema — o TEMA NAO decide o assunto. Ex.: "nao consigo baixar o DARF
+      da DCTFWeb no Onvio" resolvido pelo suporte e SUPORTE A SISTEMAS, e NAO "DCTFWEB": o suporte
+      nao fez nada de DCTFWeb, fez suporte ao sistema. Escolha o assunto de suporte a sistemas, ou a
+      variante "... - SUPORTE" do tema quando ela existir (ex.: "CERTIFICADO DIGITAL - SUPORTE").
+      Se o pedido NAO foi tecnico (ex.: cliente pedindo para trocar o e-mail cadastrado), mantenha
+      o assunto do tema.
     * Havendo um assunto da categoria do setor de quem registra que sirva, ele ganha do equivalente
       generico.
     * "DUVIDAS GERAIS DO CLIENTE" e "PROCESSOS INTERNOS" sao a ultima opcao: so quando nada mais
@@ -589,7 +591,11 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
   // Lista de assuntos do Suite para a IA escolher UM (quando fornecida pelo controller).
   const assuntos = input.assuntosDisponiveis || [];
   const blocoAssuntos = assuntos.length
-    ? `\n\nLISTA DE ASSUNTOS DISPONIVEIS (escolha EXATAMENTE UM em assunto_escolhido):\n${assuntos
+    ? `\n\nLISTA DE ASSUNTOS DISPONIVEIS (escolha EXATAMENTE UM em assunto_escolhido${
+        regSetor
+          ? `; quem registra e do setor ${regSetor} — aplique o DESEMPATE PELO SETOR antes de escolher`
+          : ""
+      }):\n${assuntos
         .map(
           (a) =>
             `- [${a.id}] ${a.nome}${a.categoria ? ` (categoria: ${a.categoria})` : ""}`,
