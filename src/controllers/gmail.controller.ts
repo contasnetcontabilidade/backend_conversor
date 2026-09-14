@@ -226,11 +226,16 @@ export async function gmailPreviewController(req: Request, res: Response) {
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
         id: t.id,
         nome: t.nome,
+        categoria: t.extra,
       })),
       setoresDisponiveis: setoresDisponiveis.map((s) => ({
         id: s.id,
         nome: s.nome,
       })),
+      quemRegistra: {
+        nome: execNomePerfil || usuario,
+        setor: setorNomePerfil,
+      },
       ramal,
       usuario,
       fonte: "email",
