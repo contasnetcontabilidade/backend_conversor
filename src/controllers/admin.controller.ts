@@ -33,6 +33,21 @@ export async function feedbackController(req: Request, res: Response) {
   ) as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   const bool = (v: unknown) => v === true || v === "true";
+  // Campos que app antigo nao manda: ausente fica undefined (e nao false/0),
+  // senao nao da para separar "app antigo" de "valor zero" na analise.
+  const boolOpc = (v: unknown) => (v === undefined ? undefined : bool(v));
+  const inteiroOpc = (v: unknown) => {
+    const n = Number(v);
+    return v === undefined || v === null || !Number.isFinite(n)
+      ? undefined
+      : Math.min(Math.max(Math.round(n), 0), 1_000_000);
+  };
+  const fracaoOpc = (v: unknown) => {
+    const n = Number(v);
+    return v === undefined || v === null || !Number.isFinite(n)
+      ? undefined
+      : Math.round(Math.min(Math.max(n, 0), 1) * 100) / 100;
+  };
   const ratingRaw = str(b.rating);
   const dv = (
     b.divergencias && typeof b.divergencias === "object" ? b.divergencias : {}
@@ -64,8 +79,12 @@ export async function feedbackController(req: Request, res: Response) {
       assuntoMudou: bool(dv.assuntoMudou),
       finalizadoSugerido: bool(dv.finalizadoSugerido),
       finalizadoFinal: bool(dv.finalizadoFinal),
+      finalizadoIa: boolOpc(dv.finalizadoIa),
     },
     descEditada: bool(b.descEditada),
+    descTamSistema: inteiroOpc(b.descTamSistema),
+    descTamFinal: inteiroOpc(b.descTamFinal),
+    descPalavrasMantidas: fracaoOpc(b.descPalavrasMantidas),
     iaOk: b.iaOk === undefined ? undefined : bool(b.iaOk),
   };
   await registrarFeedback(entry).catch(() => undefined);
