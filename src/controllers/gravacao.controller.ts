@@ -149,11 +149,16 @@ export async function gravacaoPreviewController(req: Request, res: Response) {
         assuntosDisponiveis: tiposDisponiveis.map((x) => ({
           id: x.id,
           nome: x.nome,
+          categoria: x.extra,
         })),
         setoresDisponiveis: setoresDisponiveis.map((s) => ({
           id: s.id,
           nome: s.nome,
         })),
+        quemRegistra: {
+          nome: execNomePerfil || usuario,
+          setor: setorNomePerfil,
+        },
         ramal,
         usuario,
         fonte: "gravacao",
