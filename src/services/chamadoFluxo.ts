@@ -25,6 +25,7 @@ import {
   criarChamado,
   isDryRun,
   validarChamadoBody,
+  type AnexoChamado,
   type ChamadoBody,
 } from "./suite360";
 
@@ -51,6 +52,11 @@ export interface FluxoCriarOpts {
   msgJaExistia: (protocolo: string) => string;
   antes?: () => Promise<void>;
   depois?: (info: DepoisInfo) => Promise<void>;
+  // Resolve os anexos escolhidos pelo usuario. E funcao, e nao lista pronta,
+  // porque baixar arquivo e caro: so roda quando a criacao vai mesmo acontecer
+  // (depois da idempotencia) e nao no reclique que responde "ja existia".
+  // Se lancar, o chamado NAO e criado — ver a chamada la embaixo.
+  anexos?: () => Promise<AnexoChamado[]>;
 }
 
 export async function fluxoCriarChamado(opts: FluxoCriarOpts): Promise<void> {
@@ -133,6 +139,23 @@ export async function fluxoCriarChamado(opts: FluxoCriarOpts): Promise<void> {
         },
       });
       return;
+    }
+  }
+
+  // Anexos ANTES da reserva de criacao, de proposito. Se o download falhar com a
+  // reserva na mao, a chave ficaria travada por 120s e a pessoa veria "ja esta
+  // sendo criado" ao tentar de novo — mensagem errada para o que aconteceu.
+  // Aqui o erro sobe limpo, sem chamado criado e sem lock preso.
+  if (opts.anexos) {
+    try {
+      const baixados = await opts.anexos();
+      if (baixados.length) chamado.anexos = baixados;
+    } catch (error) {
+      console.warn(
+        `[${logTag}] req=${requestId} chave=${chave || "-"} anexo falhou: ` +
+          `${getErrorMessage(error)} — chamado NAO criado.`,
+      );
+      throw error;
     }
   }
 
