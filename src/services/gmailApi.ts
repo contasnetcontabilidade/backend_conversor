@@ -137,10 +137,17 @@ function extrairCorpo(payload: any): string {
 }
 
 export interface AnexoEmail {
-  // Chave que o app devolve no "criar". O attachmentId sozinho NAO serve: numa
-  // thread ele so e unico dentro da propria mensagem.
-  id: string; // "<messageId>:<attachmentId>"
+  // Chave que o app devolve depois (visualizar, criar).
+  //
+  // Usa partId, e NAO attachmentId: o attachmentId do Gmail NAO e estavel —
+  // duas leituras seguidas da MESMA mensagem devolvem valores diferentes
+  // (medido: dois tokens de 404 caracteres, completamente distintos). Com ele
+  // na chave, todo lookup posterior falharia com "anexo nao encontrado".
+  // O partId e a posicao da parte na arvore MIME, entao nao muda.
+  id: string; // "<messageId>:<partId>"
   messageId: string;
+  // Vale só para ESTA leitura. Quem baixa tem que usar o attachmentId vindo da
+  // mesma busca que resolveu o anexo, nunca um guardado de antes.
   attachmentId: string;
   nome: string;
   mime: string;
@@ -177,8 +184,11 @@ function extrairAnexos(payload: any, messageId: string): AnexoEmail[] {
     // Sem filename e corpo (texto/html). Com filename mas sem attachmentId e
     // conteudo embutido na propria resposta, que nao tem o que baixar.
     if (nome && attachmentId && !ehImagemEmbutida(part)) {
+      // Sem partId (nao deveria acontecer), o nome do arquivo ainda e melhor
+      // chave que o attachmentId, que muda a cada leitura.
+      const parte = String(part.partId ?? "").trim() || nome;
       achados.push({
-        id: `${messageId}:${attachmentId}`,
+        id: `${messageId}:${parte}`,
         messageId,
         attachmentId,
         nome,
