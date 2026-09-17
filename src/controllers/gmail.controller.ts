@@ -30,6 +30,7 @@ import {
 } from "../services/gemini";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
 import {
+  previaApresentacao,
   previaDocumento,
   previaPlanilha,
   tipoConversao,
@@ -188,12 +189,6 @@ async function resolverAnexosEscolhidos(
   return saida;
 }
 
-// GET /gmail/anexo — devolve os bytes de UM anexo, para o app pre-visualizar
-// antes de criar o chamado.
-//
-// Rota separada da criacao de proposito: olhar o arquivo nao pode depender de
-// estar criando nada, e a pessoa pode abrir e fechar o visualizador varias vezes
-// antes de decidir. Nao grava nem marca nada — so le.
 function queryDe(req: Request) {
   return (nome: string) => String(req.query[nome] ?? "").trim();
 }
@@ -236,6 +231,12 @@ async function anexoDaQuery(req: Request) {
   return { email, anexo };
 }
 
+// GET /gmail/anexo — devolve os bytes de UM anexo, para o app pre-visualizar
+// antes de criar o chamado.
+//
+// Rota separada da criacao de proposito: olhar o arquivo nao pode depender de
+// estar criando nada, e a pessoa pode abrir e fechar o visualizador varias vezes
+// antes de decidir. Nao grava nem marca nada — so le.
 export async function gmailAnexoController(req: Request, res: Response) {
   const { email, anexo } = await anexoDaQuery(req);
   const bytes = await baixarAnexo(email, anexo.messageId, anexo.attachmentId);
@@ -267,7 +268,9 @@ export async function gmailAnexoPreviaController(req: Request, res: Response) {
   const previa =
     conversao === "planilha"
       ? await previaPlanilha(bytes, queryDe(req)("aba") || undefined)
-      : await previaDocumento(bytes);
+      : conversao === "apresentacao"
+        ? await previaApresentacao(bytes)
+        : await previaDocumento(bytes);
 
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
