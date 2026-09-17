@@ -48,6 +48,7 @@ import {
 } from "../services/suite360";
 import {
   previaApresentacao,
+  previaCsv,
   previaDocumento,
   previaPlanilha,
   tipoConversao,
@@ -117,7 +118,7 @@ function nomeParaSuite(a: AnexoChat): string {
   // Acento e espaco viram problema em nome de arquivo baixado depois.
   const autor = a.autor
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^A-Za-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .split("-")[0];
@@ -746,9 +747,11 @@ export async function chatAnexoPreviaController(req: Request, res: Response) {
   const previa =
     conversao === "planilha"
       ? await previaPlanilha(bytes, qs(req, "aba") || undefined)
-      : conversao === "apresentacao"
-        ? await previaApresentacao(bytes)
-        : await previaDocumento(bytes);
+      : conversao === "csv"
+        ? await previaCsv(bytes)
+        : conversao === "apresentacao"
+          ? await previaApresentacao(bytes)
+          : await previaDocumento(bytes);
 
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
