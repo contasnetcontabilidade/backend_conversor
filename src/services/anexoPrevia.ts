@@ -52,7 +52,7 @@ export type PreviaAnexo =
 export function tipoConversao(
   mime: string,
   nome: string,
-): "planilha" | "documento" | "apresentacao" | "" {
+): "planilha" | "documento" | "apresentacao" | "csv" | "" {
   const m = String(mime || "").toLowerCase();
   const ext = String(nome || "")
     .toLowerCase()
@@ -62,7 +62,107 @@ export function tipoConversao(
   }
   if (m.includes("wordprocessingml") || ext === "docx") return "documento";
   if (m.includes("presentationml") || ext === "pptx") return "apresentacao";
+  // A extensao manda no CSV: o mime chega como text/plain,
+  // application/vnd.ms-excel ou octet-stream dependendo de quem exportou.
+  if (ext === "csv" || m === "text/csv") return "csv";
   return "";
+}
+
+// --- CSV -------------------------------------------------------------------
+
+// CSV nao carrega declaracao de codificacao. Sistema brasileiro antigo exporta
+// em Latin-1, e decodificar isso como UTF-8 enche a tabela de caractere de
+// substituicao — "Endereço" vira "Endere�o".
+//
+// Regra: BOM manda; sem BOM, tenta UTF-8 e, se aparecer caractere invalido,
+// refaz como Latin-1 (que nunca falha, por ser byte a byte).
+function textoDoCsv(bytes: Buffer): string {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return bytes.subarray(3).toString("utf-8");
+  }
+  const comoUtf8 = bytes.toString("utf-8");
+  return comoUtf8.includes("�") ? bytes.toString("latin1") : comoUtf8;
+}
+
+// Excel em portugues exporta com ";" porque a virgula e separador decimal aqui.
+// Contar fora das aspas evita eleger a virgula por causa de "R$ 1.250,00".
+function separadorDoCsv(texto: string): string {
+  const amostra = texto.slice(0, 20000);
+  const contagem: Record<string, number> = { ";": 0, ",": 0, "\t": 0 };
+  let dentroDeAspas = false;
+  for (let i = 0; i < amostra.length; i++) {
+    const c = amostra[i];
+    if (c === '"') dentroDeAspas = !dentroDeAspas;
+    else if (!dentroDeAspas && c in contagem) contagem[c] += 1;
+  }
+  let melhor = ",";
+  for (const sep of Object.keys(contagem)) {
+    if (contagem[sep] > contagem[melhor]) melhor = sep;
+  }
+  return melhor;
+}
+
+// Parser proprio em vez de biblioteca: o formato que interessa aqui e pequeno
+// (aspas, aspas duplicadas dentro do campo, quebra de linha dentro do campo) e
+// nao se paga trazer dependencia para isso.
+function parseCsv(texto: string, sep: string, maxLinhas: number): {
+  linhas: string[][];
+  total: number;
+} {
+  const linhas: string[][] = [];
+  let campo = "";
+  let linha: string[] = [];
+  let dentroDeAspas = false;
+  let total = 0;
+
+  const fecharLinha = () => {
+    linha.push(campo);
+    campo = "";
+    // Linha vazia no fim do arquivo nao conta como dado.
+    const vazia = linha.length === 1 && linha[0] === "";
+    if (!vazia) {
+      total += 1;
+      if (linhas.length < maxLinhas) linhas.push(linha.slice(0, MAX_COLUNAS));
+    }
+    linha = [];
+  };
+
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (dentroDeAspas) {
+      if (c === '"') {
+        if (texto[i + 1] === '"') {
+          campo += '"'; // "" dentro do campo = uma aspa literal
+          i += 1;
+        } else dentroDeAspas = false;
+      } else campo += c;
+      continue;
+    }
+    if (c === '"') dentroDeAspas = true;
+    else if (c === sep) {
+      linha.push(campo);
+      campo = "";
+    } else if (c === "\n") fecharLinha();
+    else if (c !== "\r") campo += c;
+  }
+  if (campo !== "" || linha.length) fecharLinha();
+
+  return { linhas, total };
+}
+
+export async function previaCsv(bytes: Buffer): Promise<PreviaAnexo> {
+  const texto = textoDoCsv(bytes);
+  const sep = separadorDoCsv(texto);
+  const { linhas, total } = parseCsv(texto, sep, MAX_LINHAS);
+  return {
+    tipo: "tabela",
+    // CSV nao tem abas: lista vazia faz o app nao desenhar o seletor.
+    abas: [],
+    aba: "",
+    linhas,
+    totalLinhas: total,
+    truncado: total > linhas.length,
+  };
 }
 
 // Uma celula pode vir como string, numero, Date, formula, hyperlink ou rich

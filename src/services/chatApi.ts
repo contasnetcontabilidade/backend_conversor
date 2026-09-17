@@ -185,6 +185,19 @@ export interface EspacoResumo {
   tipo: "SPACE" | "GROUP_CHAT" | "DIRECT_MESSAGE";
 }
 
+export interface AnexoChat {
+  // "spaces/X/messages/Y/attachments/Z" — o `name` do proprio anexo. Verificado
+  // estavel entre leituras (o do Gmail nao e, e isso custou caro la).
+  id: string;
+  // Token de midia para o download. Vale para ESTA leitura: quem baixa usa o
+  // que veio da mesma busca que resolveu o anexo, nunca um guardado antes.
+  resourceName: string;
+  nome: string; // contentName
+  mime: string; // contentType do metadado, NAO do download (ver baixarAnexoChat)
+  autor: string; // quem enviou — entra no rotulo, porque todo print vem como "image.png"
+  hora: string; // createTime da mensagem
+}
+
 export interface MensagemChat {
   id: string; // "spaces/X/messages/Y"
   spaceId: string;
@@ -196,6 +209,7 @@ export interface MensagemChat {
   threadName: string;
   editado: boolean;
   temAnexo: boolean;
+  anexos: AnexoChat[];
 }
 
 export interface PaginaMensagens {
@@ -554,6 +568,28 @@ function normalizarMensagem(
 
   const autorId = String(bruta.sender?.name || "");
   const ehApp = String(bruta.sender?.type || "") === "BOT";
+  const quem = nomeDoAutor(autorId, bruta.sender?.displayName, ehApp, membros);
+  const hora = String(bruta.createTime || "");
+  // So anexo ENVIADO (attachmentDataRef). Arquivo do Drive compartilhado no chat
+  // vem como driveDataRef e exigiria a API do Drive com escopo novo — ou seja,
+  // todo mundo reconectando. Na varredura dos espacos, 12 de 12 anexos eram
+  // enviados; nenhum do Drive.
+  const anexosLista: AnexoChat[] = anexos
+    .filter((a: { attachmentDataRef?: { resourceName?: string } }) =>
+      Boolean(a?.attachmentDataRef?.resourceName),
+    )
+    .map((a: Record<string, unknown>) => ({
+      id: String(a.name || ""),
+      resourceName: String(
+        (a.attachmentDataRef as { resourceName?: string })?.resourceName || "",
+      ),
+      nome: String(a.contentName || "arquivo"),
+      mime: String(a.contentType || "application/octet-stream"),
+      autor: quem,
+      hora,
+    }))
+    .filter((a: AnexoChat) => a.id && a.resourceName);
+
   return {
     id: String(bruta.name || ""),
     spaceId,
@@ -563,13 +599,79 @@ function normalizarMensagem(
         .map((a: { contentName?: string }) => a?.contentName || "arquivo")
         .join(", ")})`,
     autorId,
-    autor: nomeDoAutor(autorId, bruta.sender?.displayName, ehApp, membros),
+    autor: quem,
     autorEhApp: ehApp,
-    hora: String(bruta.createTime || ""),
+    hora,
     threadName: String(bruta.thread?.name || ""),
     editado: Boolean(bruta.lastUpdateTime),
     temAnexo,
+    anexos: anexosLista,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Anexos: tamanho e download
+// ---------------------------------------------------------------------------
+
+function urlDaMidia(resourceName: string): string {
+  return `${CHAT_API}/media/${encodeURIComponent(resourceName)}?alt=media`;
+}
+
+// Tamanho SEM baixar o arquivo.
+//
+// A API do Chat nao expoe tamanho no metadado do anexo, e responde 404 a HEAD.
+// O jeito que sobra: abrir o GET, ler o content-length do cabecalho e ABORTAR
+// antes de consumir o corpo. Medido: ~0,5s e praticamente zero de banda, contra
+// o download inteiro. E o que permite riscar o anexo grande demais na lista, em
+// vez de a pessoa so descobrir na hora de criar.
+//
+// Devolve -1 quando nao da para saber — quem chama decide, e nunca bloqueia por
+// falta de informacao.
+export async function tamanhoAnexoChat(
+  email: string,
+  resourceName: string,
+): Promise<number> {
+  const controle = new AbortController();
+  try {
+    const token = await getValidAccessToken(email);
+    const resp = await fetch(urlDaMidia(resourceName), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controle.signal,
+    });
+    const bruto = resp.headers.get("content-length");
+    if (!resp.ok || !bruto) return -1;
+    const n = Number(bruto);
+    return Number.isFinite(n) && n >= 0 ? n : -1;
+  } catch {
+    return -1;
+  } finally {
+    // Sempre: e o abort que evita baixar o corpo inteiro.
+    controle.abort();
+  }
+}
+
+// Baixa UM anexo enviado no Chat.
+//
+// Nao engole erro, igual ao do Gmail: o chamado nao pode ser criado sem um anexo
+// que a pessoa escolheu.
+export async function baixarAnexoChat(
+  email: string,
+  resourceName: string,
+): Promise<Buffer> {
+  const token = await getValidAccessToken(email);
+  const resp = await fetch(urlDaMidia(resourceName), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) {
+    throw new AppError({
+      statusCode: resp.status === 401 || resp.status === 403 ? 401 : 502,
+      code: "CHAT_ANEXO_FALHOU",
+      message: `Falha ao baixar o anexo do Chat (HTTP ${resp.status}).`,
+    });
+  }
+  // O download responde application/octet-stream para tudo — por isso o mime
+  // util e o contentType do metadado, guardado no AnexoChat.
+  return Buffer.from(await resp.arrayBuffer());
 }
 
 // Uma pagina de mensagens do espaco, mais recentes primeiro.
@@ -631,7 +733,7 @@ export async function listarMensagens(
     // individual de cada mensagem marcada (era o que saturava a fila do espaco
     // e fazia mensagens sumirem da selecao).
     for (const m of mensagens) {
-      await cacheSet(`chat:msg:${email}:${m.id}`, m, 600).catch(
+      await cacheSet(`chat:msg2:${email}:${m.id}`, m, 600).catch(
         () => undefined,
       );
     }
@@ -662,7 +764,7 @@ export async function obterMensagens(
 
   for (const id of messageIds) {
     const cacheada = await cacheGet<MensagemChat>(
-      `chat:msg:${email}:${id}`,
+      `chat:msg2:${email}:${id}`,
     ).catch(() => null);
     if (cacheada) encontradas.push(cacheada);
     else faltando.push(id);
@@ -692,7 +794,7 @@ export async function obterMensagens(
     for (const m of vindas) {
       if (!m) continue;
       encontradas.push(m);
-      await cacheSet(`chat:msg:${email}:${m.id}`, m, 600).catch(
+      await cacheSet(`chat:msg2:${email}:${m.id}`, m, 600).catch(
         () => undefined,
       );
     }

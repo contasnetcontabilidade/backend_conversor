@@ -31,6 +31,7 @@ import {
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
 import {
   previaApresentacao,
+  previaCsv,
   previaDocumento,
   previaPlanilha,
   tipoConversao,
@@ -268,9 +269,11 @@ export async function gmailAnexoPreviaController(req: Request, res: Response) {
   const previa =
     conversao === "planilha"
       ? await previaPlanilha(bytes, queryDe(req)("aba") || undefined)
-      : conversao === "apresentacao"
-        ? await previaApresentacao(bytes)
-        : await previaDocumento(bytes);
+      : conversao === "csv"
+        ? await previaCsv(bytes)
+        : conversao === "apresentacao"
+          ? await previaApresentacao(bytes)
+          : await previaDocumento(bytes);
 
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
