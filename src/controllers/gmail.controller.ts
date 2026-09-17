@@ -29,6 +29,11 @@ import {
   type ResumoJson,
 } from "../services/gemini";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
+import {
+  previaDocumento,
+  previaPlanilha,
+  tipoConversao,
+} from "../services/anexoPrevia";
 import { montarRefs } from "../services/chamadoRefs";
 import {
   ANEXO_TAMANHO_MAX_BYTES,
@@ -189,8 +194,15 @@ async function resolverAnexosEscolhidos(
 // Rota separada da criacao de proposito: olhar o arquivo nao pode depender de
 // estar criando nada, e a pessoa pode abrir e fechar o visualizador varias vezes
 // antes de decidir. Nao grava nem marca nada — so le.
-export async function gmailAnexoController(req: Request, res: Response) {
-  const q = (nome: string) => String(req.query[nome] ?? "").trim();
+function queryDe(req: Request) {
+  return (nome: string) => String(req.query[nome] ?? "").trim();
+}
+
+// Resolve QUAL anexo a query pede, conferindo que ele pertence mesmo ao e-mail
+// informado. Compartilhado pelas duas rotas de anexo: sem isso, um id qualquer
+// viraria um GET arbitrario na caixa da pessoa.
+async function anexoDaQuery(req: Request) {
+  const q = queryDe(req);
   const id = q("id");
   const threadId = q("threadId");
   const messageId = q("messageId");
@@ -211,8 +223,6 @@ export async function gmailAnexoController(req: Request, res: Response) {
   }
 
   const email = await resolverContaGoogle(q("profileToken"), q("email"));
-  // Resolve pela lista do proprio e-mail, e nao pelo id cru da query: assim um
-  // id qualquer nao vira um GET arbitrario na caixa da pessoa.
   const anexo = (
     await anexosDoEmail(email, threadId || undefined, messageId || undefined)
   ).find((a) => a.id === id);
@@ -223,7 +233,11 @@ export async function gmailAnexoController(req: Request, res: Response) {
       message: "Anexo não encontrado neste e-mail.",
     });
   }
+  return { email, anexo };
+}
 
+export async function gmailAnexoController(req: Request, res: Response) {
+  const { email, anexo } = await anexoDaQuery(req);
   const bytes = await baixarAnexo(email, anexo.messageId, anexo.attachmentId);
   res.setHeader("Content-Type", anexo.mime);
   res.setHeader("Content-Length", String(bytes.length));
@@ -234,6 +248,28 @@ export async function gmailAnexoController(req: Request, res: Response) {
     `inline; filename*=UTF-8''${encodeURIComponent(anexo.nome)}`,
   );
   res.status(200).send(bytes);
+}
+
+// GET /gmail/anexo/previa — anexo que o navegador nao desenha sozinho
+// (planilha, Word): converte aqui e devolve JSON para o app montar a tela.
+export async function gmailAnexoPreviaController(req: Request, res: Response) {
+  const { email, anexo } = await anexoDaQuery(req);
+  const conversao = tipoConversao(anexo.mime, anexo.nome);
+  if (!conversao) {
+    throw new AppError({
+      statusCode: 422,
+      code: "ANEXO_SEM_PREVIA",
+      message: `Não há pré-visualização para "${anexo.nome}".`,
+    });
+  }
+
+  const bytes = await baixarAnexo(email, anexo.messageId, anexo.attachmentId);
+  const previa =
+    conversao === "planilha"
+      ? await previaPlanilha(bytes, queryDe(req)("aba") || undefined)
+      : await previaDocumento(bytes);
+
+  res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
 
 // ---------------------------------------------------------------------------
