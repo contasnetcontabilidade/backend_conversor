@@ -8,12 +8,14 @@ import {
 } from "../services/gmailAuth";
 import { garantirSecaoChamado } from "../services/chatApi";
 import {
+  baixarAnexo,
   garantirMarcador,
   listarEmailsMarcados,
   obterEmail,
   obterThread,
   removerMarcadorDaThread,
   removerMarcadorDoEmail,
+  type AnexoEmail,
 } from "../services/gmailApi";
 import {
   getContaDoEmail,
@@ -27,15 +29,24 @@ import {
   type ResumoJson,
 } from "../services/gemini";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
+import {
+  previaApresentacao,
+  previaDocumento,
+  previaPlanilha,
+  tipoConversao,
+} from "../services/anexoPrevia";
 import { montarRefs } from "../services/chamadoRefs";
 import {
+  ANEXO_TAMANHO_MAX_BYTES,
   buscarSetores,
   buscarTipos,
+  formatarBytes,
   isDryRun,
   montarDescricaoEmail,
   resolverAssuntoPorTexto,
   resolverClientePorMencao,
   resolverOrigemEmail,
+  type AnexoChamado,
   type RefResolvida,
 } from "../services/suite360";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
@@ -65,6 +76,203 @@ function campoId(
   if (typeof v === "number" && Number.isFinite(v)) return String(v);
   if (typeof v === "string" && v.trim()) return v.trim();
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Anexos do e-mail
+// ---------------------------------------------------------------------------
+
+// Lista os anexos da conversa inteira (ou do e-mail unico). A MESMA leitura
+// serve ao preview e ao criar — no criar ela existe para CONFERIR o que o app
+// pediu, em vez de confiar na lista que ficou na tela.
+async function anexosDoEmail(
+  conta: string,
+  threadId?: string,
+  messageId?: string,
+): Promise<AnexoEmail[]> {
+  if (threadId) return (await obterThread(conta, threadId)).anexos;
+  if (messageId) return (await obterEmail(conta, messageId)).anexos;
+  return [];
+}
+
+// Formato que vai para a tela. O motivo do bloqueio sai pronto daqui para a
+// regra de tamanho nao virar uma segunda copia dentro do renderer.
+function anexosParaApp(anexos: AnexoEmail[]) {
+  return anexos.map((a) => {
+    const excede = a.tamanho > ANEXO_TAMANHO_MAX_BYTES;
+    return {
+      id: a.id,
+      nome: a.nome,
+      mime: a.mime,
+      tamanho: a.tamanho,
+      tamanhoTexto: formatarBytes(a.tamanho),
+      bloqueado: excede,
+      motivo: excede
+        ? `${formatarBytes(a.tamanho)} — acima do limite de ` +
+          `${formatarBytes(ANEXO_TAMANHO_MAX_BYTES)} do Suite`
+        : "",
+    };
+  });
+}
+
+// Baixa o que a pessoa marcou no modal, na ordem em que foi marcado.
+//
+// Reconfere a lista no Gmail em vez de aceitar o que o app mandou: o modal pode
+// estar aberto ha minutos, e o limite de tamanho e regra do Suite — se ficar so
+// na tela, um modal velho manda 22 MB e o Suite responde 413.
+//
+// Qualquer falha derruba a criacao COM o nome do arquivo. Criar o chamado sem o
+// anexo que a pessoa escolheu seria pior que o erro: a API do Suite nao tem
+// endpoint para anexar depois, entao nao teria conserto.
+async function resolverAnexosEscolhidos(
+  escolhidos: string[],
+  chave: string,
+  threadId?: string,
+  messageId?: string,
+): Promise<AnexoChamado[]> {
+  const conta = await getContaDoEmail(chave).catch(() => null);
+  if (!conta) {
+    throw new AppError({
+      statusCode: 400,
+      code: "GMAIL_CONTA_DESCONHECIDA",
+      message:
+        "Não foi possível identificar a conta do Google deste e-mail para baixar os anexos. Feche e abra o chamado de novo.",
+    });
+  }
+
+  const porId = new Map(
+    (await anexosDoEmail(conta, threadId, messageId)).map((a) => [a.id, a]),
+  );
+
+  const saida: AnexoChamado[] = [];
+  // Um de cada vez de proposito: em paralelo, quatro anexos de 20 MB seriam
+  // ~107 MB de Buffer + base64 vivos ao mesmo tempo na memoria do backend.
+  for (const id of escolhidos) {
+    const anexo = porId.get(id);
+    if (!anexo) {
+      throw new AppError({
+        statusCode: 422,
+        code: "GMAIL_ANEXO_NAO_ENCONTRADO",
+        message:
+          "Um dos anexos escolhidos não está mais neste e-mail. Feche e abra o chamado de novo para atualizar a lista.",
+        details: { id },
+      });
+    }
+    if (anexo.tamanho > ANEXO_TAMANHO_MAX_BYTES) {
+      throw new AppError({
+        statusCode: 422,
+        code: "GMAIL_ANEXO_GRANDE",
+        message:
+          `O anexo "${anexo.nome}" tem ${formatarBytes(anexo.tamanho)} e passa ` +
+          `do limite de ${formatarBytes(ANEXO_TAMANHO_MAX_BYTES)} do Suite. ` +
+          "Desmarque esse anexo para criar o chamado.",
+        details: { anexo: anexo.nome },
+      });
+    }
+    try {
+      const bytes = await baixarAnexo(conta, anexo.messageId, anexo.attachmentId);
+      saida.push({
+        nome: anexo.nome,
+        conteudo_base64: bytes.toString("base64"),
+      });
+    } catch (error) {
+      throw new AppError({
+        statusCode: 502,
+        code: "GMAIL_ANEXO_FALHOU",
+        message:
+          `Não foi possível baixar o anexo "${anexo.nome}" do Gmail. ` +
+          "O chamado não foi criado.",
+        details: { anexo: anexo.nome, causa: getErrorMessage(error) },
+      });
+    }
+  }
+  return saida;
+}
+
+function queryDe(req: Request) {
+  return (nome: string) => String(req.query[nome] ?? "").trim();
+}
+
+// Resolve QUAL anexo a query pede, conferindo que ele pertence mesmo ao e-mail
+// informado. Compartilhado pelas duas rotas de anexo: sem isso, um id qualquer
+// viraria um GET arbitrario na caixa da pessoa.
+async function anexoDaQuery(req: Request) {
+  const q = queryDe(req);
+  const id = q("id");
+  const threadId = q("threadId");
+  const messageId = q("messageId");
+
+  if (!id) {
+    throw new AppError({
+      statusCode: 400,
+      code: "ANEXO_ID_REQUIRED",
+      message: "Informe o id do anexo.",
+    });
+  }
+  if (!threadId && !messageId) {
+    throw new AppError({
+      statusCode: 400,
+      code: "MESSAGE_ID_REQUIRED",
+      message: "Informe o threadId ou messageId do e-mail.",
+    });
+  }
+
+  const email = await resolverContaGoogle(q("profileToken"), q("email"));
+  const anexo = (
+    await anexosDoEmail(email, threadId || undefined, messageId || undefined)
+  ).find((a) => a.id === id);
+  if (!anexo) {
+    throw new AppError({
+      statusCode: 404,
+      code: "GMAIL_ANEXO_NAO_ENCONTRADO",
+      message: "Anexo não encontrado neste e-mail.",
+    });
+  }
+  return { email, anexo };
+}
+
+// GET /gmail/anexo — devolve os bytes de UM anexo, para o app pre-visualizar
+// antes de criar o chamado.
+//
+// Rota separada da criacao de proposito: olhar o arquivo nao pode depender de
+// estar criando nada, e a pessoa pode abrir e fechar o visualizador varias vezes
+// antes de decidir. Nao grava nem marca nada — so le.
+export async function gmailAnexoController(req: Request, res: Response) {
+  const { email, anexo } = await anexoDaQuery(req);
+  const bytes = await baixarAnexo(email, anexo.messageId, anexo.attachmentId);
+  res.setHeader("Content-Type", anexo.mime);
+  res.setHeader("Content-Length", String(bytes.length));
+  // inline: o visualizador do app so exibe. O nome vai codificado porque nome de
+  // anexo tem acento e aspas, e header nao aceita.
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename*=UTF-8''${encodeURIComponent(anexo.nome)}`,
+  );
+  res.status(200).send(bytes);
+}
+
+// GET /gmail/anexo/previa — anexo que o navegador nao desenha sozinho
+// (planilha, Word): converte aqui e devolve JSON para o app montar a tela.
+export async function gmailAnexoPreviaController(req: Request, res: Response) {
+  const { email, anexo } = await anexoDaQuery(req);
+  const conversao = tipoConversao(anexo.mime, anexo.nome);
+  if (!conversao) {
+    throw new AppError({
+      statusCode: 422,
+      code: "ANEXO_SEM_PREVIA",
+      message: `Não há pré-visualização para "${anexo.nome}".`,
+    });
+  }
+
+  const bytes = await baixarAnexo(email, anexo.messageId, anexo.attachmentId);
+  const previa =
+    conversao === "planilha"
+      ? await previaPlanilha(bytes, queryDe(req)("aba") || undefined)
+      : conversao === "apresentacao"
+        ? await previaApresentacao(bytes)
+        : await previaDocumento(bytes);
+
+  res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
 
 // ---------------------------------------------------------------------------
@@ -189,8 +397,10 @@ export async function gmailPreviewController(req: Request, res: Response) {
   let corpoTexto: string;
   let snippet: string;
   let qtdMensagens = 1;
+  let anexos: AnexoEmail[];
   if (threadId) {
     const thread = await obterThread(email, threadId);
+    anexos = thread.anexos;
     qtdMensagens = thread.count;
     const remet = thread.remetentes.length
       ? thread.remetentes.join(", ")
@@ -202,6 +412,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
     snippet = corpoTexto.slice(0, 180);
   } else {
     const msg = await obterEmail(email, messageId!);
+    anexos = msg.anexos;
     de = msg.from;
     assunto = msg.subject;
     dataHora = msg.date;
@@ -325,7 +536,8 @@ export async function gmailPreviewController(req: Request, res: Response) {
     `[gmail:preview] req=${requestId} chave=${chave} msgs=${qtdMensagens} ` +
       `conta=${email} cliente=${clienteEncontrado?.id || cliente.status} tipo=${
         tipo.id || tipo.fonte
-      } setor=${setor.id || setor.fonte} executor=${executor.id || executor.fonte}`,
+      } setor=${setor.id || setor.fonte} executor=${executor.id || executor.fonte} ` +
+      `anexos=${anexos.length}`,
   );
 
   res.status(200).json({
@@ -358,6 +570,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
       cliente,
       refs,
       descricao,
+      anexos: anexosParaApp(anexos),
     },
   });
 }
@@ -389,6 +602,12 @@ export async function gmailCriarController(req: Request, res: Response) {
   const threadId = getOptionalString(body, "threadId");
   // Chave de idempotencia/marcador: threadId (conversa) quando houver; senao msgId.
   const chave = threadId || messageId || "";
+  // Ids no formato "<messageId>:<attachmentId>", como saiu do preview. So os
+  // IDENTIFICADORES trafegam aqui: os bytes vao do Google direto para o backend,
+  // nunca pelo desktop.
+  const anexosEscolhidos = Array.isArray(body.anexosEscolhidos)
+    ? body.anexosEscolhidos.map((v) => String(v)).filter(Boolean)
+    : [];
 
   await fluxoCriarChamado({
     res,
@@ -399,6 +618,10 @@ export async function gmailCriarController(req: Request, res: Response) {
     fonteCusto: "email",
     logTag: "gmail:criar",
     msgJaExistia: (p) => `Chamado ja existente para esta conversa: ${p}`,
+    anexos: anexosEscolhidos.length
+      ? () =>
+          resolverAnexosEscolhidos(anexosEscolhidos, chave, threadId, messageId)
+      : undefined,
     // O marcador so sai quando o chamado existe DE VERDADE: em dry-run o
     // e-mail tem que continuar aparecendo na lista para poder ser retestado.
     depois: async ({ dryRun }) => {

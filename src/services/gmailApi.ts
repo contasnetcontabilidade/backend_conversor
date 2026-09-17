@@ -80,6 +80,7 @@ export interface EmailCompleto extends EmailResumo {
   fromNome: string;
   fromEmail: string;
   corpo: string;
+  anexos: AnexoEmail[];
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -133,6 +134,109 @@ function extrairCorpo(payload: any): string {
   }
   if (payload.body?.data) return decodeB64Url(payload.body.data).trim();
   return "";
+}
+
+export interface AnexoEmail {
+  // Chave que o app devolve depois (visualizar, criar).
+  //
+  // Usa partId, e NAO attachmentId: o attachmentId do Gmail NAO e estavel —
+  // duas leituras seguidas da MESMA mensagem devolvem valores diferentes
+  // (medido: dois tokens de 404 caracteres, completamente distintos). Com ele
+  // na chave, todo lookup posterior falharia com "anexo nao encontrado".
+  // O partId e a posicao da parte na arvore MIME, entao nao muda.
+  id: string; // "<messageId>:<partId>"
+  messageId: string;
+  // Vale só para ESTA leitura. Quem baixa tem que usar o attachmentId vindo da
+  // mesma busca que resolveu o anexo, nunca um guardado de antes.
+  attachmentId: string;
+  nome: string;
+  mime: string;
+  tamanho: number; // bytes JA decodificados (o Gmail manda o tamanho real)
+}
+
+// Imagem embutida no corpo (logo, icone de rede social, assinatura) e anexo do
+// ponto de vista do Gmail: vem com filename e attachmentId igual aos outros. Sem
+// este filtro, quase todo e-mail listaria 4-5 imagens de assinatura.
+//
+// A ordem dos testes aqui e o que importa.
+//
+// Content-ID NAO serve como criterio sozinho: o Gmail poe Content-ID tambem em
+// anexo comum. Medido num e-mail real — um PDF com
+// `Content-Disposition: attachment` vinha com `Content-ID: <f_mu15q6sy0>` e era
+// descartado como se fosse assinatura, sem aviso nenhum.
+//
+// `Content-Disposition: attachment` e a declaracao explicita de "isto e anexo" e
+// vence qualquer outra pista. So depois dela vale perguntar se a parte e uma
+// imagem embutida no corpo.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ehImagemEmbutida(part: any): boolean {
+  const headers = part?.headers || [];
+  const disp = header(headers, "Content-Disposition").toLowerCase().trim();
+  if (disp.startsWith("attachment")) return false;
+  // Nao-imagem nunca e "embutida": arquivo e arquivo, e some da lista seria
+  // pior que aparecer a mais.
+  if (!String(part?.mimeType || "").startsWith("image/")) return false;
+  // Sobra imagem que o corpo referencia (src="cid:...") ou marcada inline: logo,
+  // icone de rede social, assinatura.
+  return !!header(headers, "Content-ID") || disp.startsWith("inline");
+}
+
+// Varre as partes da mensagem e lista o que e anexo de verdade.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extrairAnexos(payload: any, messageId: string): AnexoEmail[] {
+  const achados: AnexoEmail[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const varrer = (part: any): void => {
+    if (!part) return;
+    const nome = String(part.filename || "").trim();
+    const attachmentId = String(part.body?.attachmentId || "");
+    // Sem filename e corpo (texto/html). Com filename mas sem attachmentId e
+    // conteudo embutido na propria resposta, que nao tem o que baixar.
+    if (nome && attachmentId && !ehImagemEmbutida(part)) {
+      // Sem partId (nao deveria acontecer), o nome do arquivo ainda e melhor
+      // chave que o attachmentId, que muda a cada leitura.
+      const parte = String(part.partId ?? "").trim() || nome;
+      achados.push({
+        id: `${messageId}:${parte}`,
+        messageId,
+        attachmentId,
+        nome,
+        mime: String(part.mimeType || "application/octet-stream"),
+        tamanho: Number(part.body?.size) || 0,
+      });
+    }
+    for (const sub of part.parts || []) varrer(sub);
+  };
+  varrer(payload);
+  return achados;
+}
+
+// Baixa UM anexo. Devolve os bytes ja decodificados — quem chama decide se vira
+// base64 (Suite) ou arquivo.
+//
+// Nao engole erro de proposito: o chamado NAO pode ser criado sem um anexo que a
+// pessoa escolheu, entao a falha tem que subir para quem sabe o nome do arquivo.
+export async function baixarAnexo(
+  email: string,
+  messageId: string,
+  attachmentId: string,
+): Promise<Buffer> {
+  const resp = await gmailGet(
+    email,
+    `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(
+      attachmentId,
+    )}`,
+  );
+  const data = String(resp?.data || "");
+  if (!data) {
+    throw new AppError({
+      statusCode: 502,
+      code: "GMAIL_ANEXO_VAZIO",
+      message: "O Gmail devolveu o anexo sem conteúdo.",
+    });
+  }
+  // A API do Gmail devolve em base64url (- e _ no lugar de + e /).
+  return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
 
 function parseFrom(from: string): { nome: string; email: string } {
@@ -198,6 +302,7 @@ export async function obterEmail(
     date: header(headers, "Date"),
     snippet: String(msg?.snippet || ""),
     corpo: extrairCorpo(msg?.payload),
+    anexos: extrairAnexos(msg?.payload, String(msg?.id || messageId)),
   };
 }
 
@@ -210,6 +315,7 @@ export interface ThreadCompleta {
   count: number; // quantidade de mensagens na conversa
   messageIds: string[];
   corpo: string; // corpos concatenados em ordem cronologica, com separadores
+  anexos: AnexoEmail[]; // de TODAS as mensagens da conversa, em ordem
 }
 
 // Busca a thread (conversa) inteira: junta o corpo de TODAS as mensagens em ordem
@@ -228,12 +334,14 @@ export async function obterThread(
   // O Gmail devolve as mensagens da thread em ordem cronologica (mais antiga 1o).
   const mensagens = msgs.map((m) => {
     const headers = m?.payload?.headers || [];
+    const id = String(m?.id || "");
     return {
-      id: String(m?.id || ""),
+      id,
       from: header(headers, "From"),
       subject: header(headers, "Subject"),
       date: header(headers, "Date"),
       corpo: extrairCorpo(m?.payload),
+      anexos: extrairAnexos(m?.payload, id),
     };
   });
   const primeira = mensagens[0];
@@ -263,6 +371,7 @@ export async function obterThread(
     count: mensagens.length,
     messageIds: mensagens.map((m) => m.id).filter(Boolean),
     corpo,
+    anexos: mensagens.flatMap((m) => m.anexos),
   };
 }
 

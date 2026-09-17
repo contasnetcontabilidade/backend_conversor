@@ -1392,6 +1392,32 @@ export interface ProcessoVinculado {
   membros_user_ids?: (string | number)[];
 }
 
+// Anexo pelo caminho JSON da API (o outro e multipart com `anexos[]`). Escolhido
+// o JSON porque o POST /chamados ja vai como JSON e, nos fluxos do app, os bytes
+// vem do Google direto para o backend — nunca passam pelo desktop.
+export interface AnexoChamado {
+  nome: string;
+  conteudo_base64: string;
+}
+
+// Teto POR ARQUIVO documentado na API ("max. 20 MB cada"). O Gmail aceita ate
+// 25 MB, entao existe uma faixa em que o anexo esta no e-mail e nao cabe no
+// chamado: esses aparecem bloqueados na lista, com o motivo.
+export const ANEXO_TAMANHO_MAX_BYTES = 20 * 1024 * 1024;
+
+// Anda junto com o limite acima: todo lugar que recusa um anexo precisa dizer o
+// tamanho de um jeito que a pessoa entenda.
+export function formatarBytes(bytes: number): string {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  const mb = n / (1024 * 1024);
+  // Decimal so embaixo de 10 MB: acima disso ele nao ajuda a decidir nada e
+  // deixaria o texto do limite como "20,0 MB".
+  const txt = mb >= 10 ? String(Math.round(mb)) : mb.toFixed(1);
+  return `${txt.replace(".", ",")} MB`;
+}
+
 // Espelha a superficie do modal "Abrir chamado" do SuiteWeb.
 //
 // ATENCAO: cliente_id, origem_id, executor_id e setores_vinculados sao
@@ -1427,6 +1453,7 @@ export interface ChamadoBody {
   iniciar_processo?: boolean;
   processos_vinculados?: ProcessoVinculado[];
   sobrescrever_prazo_processo_com_chamado?: boolean;
+  anexos?: AnexoChamado[];
 }
 
 // `meta` do lote (a API abre N chamados quando vem cliente_ids).
@@ -1562,10 +1589,25 @@ function metaDe(bodyResp: unknown): MetaChamado {
 
 export async function criarChamado(body: ChamadoBody): Promise<CriacaoChamado> {
   if (isDryRun()) {
+    // O app imprime este body na tela (painel "Previa"). Com o base64 de
+    // verdade, um anexo de 2 MB viraria 2,7 milhoes de caracteres no JSON — a
+    // previa ficaria ilegivel e a resposta, enorme. Troca o conteudo por um
+    // resumo e mantem o resto do corpo fiel ao que iria.
+    const bodyPrevia: ChamadoBody = body.anexos?.length
+      ? {
+          ...body,
+          anexos: body.anexos.map((a) => ({
+            nome: a.nome,
+            conteudo_base64: `(${formatarBytes(
+              Math.floor((a.conteudo_base64.length * 3) / 4),
+            )} em base64 — omitido na previa)`,
+          })),
+        }
+      : body;
     // meta sintetico para o app nao precisar de dois caminhos de leitura.
     return {
       dryRun: true,
-      body,
+      body: bodyPrevia,
       meta: { apontamentosIds: [], protocolos: [], avisos: [] },
     };
   }
