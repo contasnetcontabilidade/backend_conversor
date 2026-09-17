@@ -1411,7 +1411,11 @@ export function formatarBytes(bytes: number): string {
   const n = Number(bytes) || 0;
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1).replace(".", ",")} MB`;
+  const mb = n / (1024 * 1024);
+  // Decimal so embaixo de 10 MB: acima disso ele nao ajuda a decidir nada e
+  // deixaria o texto do limite como "20,0 MB".
+  const txt = mb >= 10 ? String(Math.round(mb)) : mb.toFixed(1);
+  return `${txt.replace(".", ",")} MB`;
 }
 
 // Espelha a superficie do modal "Abrir chamado" do SuiteWeb.
