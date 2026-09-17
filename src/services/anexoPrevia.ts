@@ -38,6 +38,12 @@ export type PreviaAnexo =
       texto: string;
       imagens: ImagemPrevia[];
       imagensOmitidas: number;
+    }
+  | {
+      tipo: "slides";
+      slides: { numero: number; linhas: string[] }[];
+      imagens: ImagemPrevia[];
+      imagensOmitidas: number;
     };
 
 // Que conversao este anexo pede ("" = nenhuma, o app exibe os bytes crus).
@@ -46,7 +52,7 @@ export type PreviaAnexo =
 export function tipoConversao(
   mime: string,
   nome: string,
-): "planilha" | "documento" | "" {
+): "planilha" | "documento" | "apresentacao" | "" {
   const m = String(mime || "").toLowerCase();
   const ext = String(nome || "")
     .toLowerCase()
@@ -55,6 +61,7 @@ export function tipoConversao(
     return "planilha";
   }
   if (m.includes("wordprocessingml") || ext === "docx") return "documento";
+  if (m.includes("presentationml") || ext === "pptx") return "apresentacao";
   return "";
 }
 
@@ -135,17 +142,20 @@ const IMG_MIME: Record<string, string> = {
 // Por que nao usar o convertToHtml do mammoth, que ja traz as imagens: o HTML
 // dele teria que ser sanitizado antes de entrar na tela. Lendo o ZIP direto, a
 // tela e montada pelo app com dados que nunca sao interpretados como markup.
-function imagensDoDocx(bytes: Buffer): {
+function imagensDoZip(
+  bytes: Buffer,
+  prefixo: string,
+): {
   imagens: ImagemPrevia[];
   omitidas: number;
 } {
   let arquivos: Record<string, Uint8Array>;
   try {
     arquivos = unzipSync(new Uint8Array(bytes), {
-      filter: (f) => f.name.startsWith("word/media/"),
+      filter: (f) => f.name.startsWith(prefixo),
     });
   } catch {
-    // .docx corrompido ou protegido: a previa segue so com o texto.
+    // Arquivo corrompido ou protegido: a previa segue so com o texto.
     return { imagens: [], omitidas: 0 };
   }
 
@@ -174,7 +184,7 @@ function imagensDoDocx(bytes: Buffer): {
     }
     acumulado += dados.length;
     imagens.push({
-      nome: nome.replace("word/media/", ""),
+      nome: nome.replace(prefixo, ""),
       mime,
       base64: Buffer.from(dados).toString("base64"),
     });
@@ -188,11 +198,80 @@ export async function previaDocumento(bytes: Buffer): Promise<PreviaAnexo> {
   // Contrato escaneado nao tem texto NENHUM — so paginas em imagem. Sem estas,
   // a previa dizia "documento sem texto" para um arquivo de 500 KB cheio de
   // conteudo.
-  const { imagens, omitidas } = imagensDoDocx(bytes);
+  const { imagens, omitidas } = imagensDoZip(bytes, "word/media/");
   return {
     tipo: "documento",
     texto: String(value || "").trim(),
     imagens,
     imagensOmitidas: omitidas,
   };
+}
+
+// Tetos da apresentacao, na mesma logica dos outros: deck de 300 slides nao
+// ajuda ninguem a decidir se anexa ou nao.
+const MAX_SLIDES = 100;
+const MAX_LINHAS_SLIDE = 60;
+
+function decodificarXml(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    // &amp; por ultimo: antes, "&amp;lt;" viraria "<" em vez de "&lt;".
+    .replace(/&amp;/g, "&");
+}
+
+// Texto de um slide, uma linha por paragrafo.
+//
+// Le o XML por expressao regular em vez de montar um parser: o OOXML guarda o
+// texto em <a:t> dentro de <a:p>, e aqui so EXTRAI — nada do arquivo volta a
+// ser interpretado como markup, entao nao ha o risco que justificaria um parser
+// completo.
+function textoDoSlide(xml: string): string[] {
+  const linhas: string[] = [];
+  for (const paragrafo of xml.split(/<a:p[\s>]/).slice(1)) {
+    const partes = [...paragrafo.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)].map(
+      (m) => decodificarXml(m[1]),
+    );
+    const linha = partes.join("").trim();
+    if (linha) linhas.push(linha);
+    if (linhas.length >= MAX_LINHAS_SLIDE) break;
+  }
+  return linhas;
+}
+
+export async function previaApresentacao(bytes: Buffer): Promise<PreviaAnexo> {
+  let arquivos: Record<string, Uint8Array> = {};
+  try {
+    arquivos = unzipSync(new Uint8Array(bytes), {
+      filter: (f) => /^ppt\/slides\/slide\d+\.xml$/.test(f.name),
+    });
+  } catch {
+    /* corrompido ou protegido: cai no fallback de imagens abaixo */
+  }
+
+  // O ZIP nao devolve os slides em ordem (medido: slide2, slide3, slide4,
+  // slide1...), entao ordenar pelo numero do nome nao e detalhe.
+  const nomes = Object.keys(arquivos).sort((a, b) => {
+    const n = (s: string) => Number((s.match(/slide(\d+)\.xml$/) || [])[1] || 0);
+    return n(a) - n(b);
+  });
+
+  const slides = nomes.slice(0, MAX_SLIDES).map((nome) => ({
+    numero: Number((nome.match(/slide(\d+)\.xml$/) || [])[1] || 0),
+    linhas: textoDoSlide(Buffer.from(arquivos[nome]).toString("utf-8")),
+  }));
+
+  // Deck inteiro sem texto = slides em imagem (o mesmo caso do contrato
+  // escaneado). So entao as midias valem a pena; num deck de texto elas seriam
+  // o logo repetido.
+  const semTexto = slides.every((s) => !s.linhas.length);
+  const { imagens, omitidas } = semTexto
+    ? imagensDoZip(bytes, "ppt/media/")
+    : { imagens: [], omitidas: 0 };
+
+  return { tipo: "slides", slides, imagens, imagensOmitidas: omitidas };
 }
