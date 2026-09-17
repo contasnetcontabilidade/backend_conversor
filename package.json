@@ -18,6 +18,7 @@
     "dotenv": "^17.3.1",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
+    "fflate": "^0.8.3",
     "mammoth": "^1.12.3",
     "multer": "^2.1.1",
     "nodejs-whisper": "^0.2.9"
