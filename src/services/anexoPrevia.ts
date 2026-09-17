@@ -7,11 +7,22 @@
 
 import ExcelJS from "exceljs";
 import mammoth from "mammoth";
+import { unzipSync } from "fflate";
 
 // Tetos da previa. Existe planilha de 50 mil linhas, e mandar isso para a tela
 // travaria o renderer sem ajudar ninguem a decidir se anexa ou nao.
 const MAX_LINHAS = 200;
 const MAX_COLUNAS = 30;
+// Documento escaneado e so imagem. O teto e por RESPOSTA (o base64 infla ~33%),
+// para um .docx grande nao virar um JSON de dezenas de MB na tela.
+const MAX_IMAGENS = 30;
+const MAX_BYTES_IMAGENS = 12 * 1024 * 1024;
+
+export interface ImagemPrevia {
+  nome: string;
+  mime: string;
+  base64: string;
+}
 
 export type PreviaAnexo =
   | {
@@ -22,7 +33,12 @@ export type PreviaAnexo =
       totalLinhas: number;
       truncado: boolean;
     }
-  | { tipo: "texto"; texto: string };
+  | {
+      tipo: "documento";
+      texto: string;
+      imagens: ImagemPrevia[];
+      imagensOmitidas: number;
+    };
 
 // Que conversao este anexo pede ("" = nenhuma, o app exibe os bytes crus).
 // Vai pelo mime e cai na extensao porque anexo de Office as vezes chega como
@@ -102,10 +118,81 @@ export async function previaPlanilha(
   };
 }
 
+// Tipos de imagem que o navegador desenha. .docx tambem carrega EMF/WMF (vetor
+// do proprio Office), que nenhum navegador abre — esses entram na contagem de
+// omitidas em vez de virar uma imagem quebrada na tela.
+const IMG_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  bmp: "image/bmp",
+  webp: "image/webp",
+};
+
+// Imagens de dentro do .docx, que e um ZIP com as midias em word/media/.
+//
+// Por que nao usar o convertToHtml do mammoth, que ja traz as imagens: o HTML
+// dele teria que ser sanitizado antes de entrar na tela. Lendo o ZIP direto, a
+// tela e montada pelo app com dados que nunca sao interpretados como markup.
+function imagensDoDocx(bytes: Buffer): {
+  imagens: ImagemPrevia[];
+  omitidas: number;
+} {
+  let arquivos: Record<string, Uint8Array>;
+  try {
+    arquivos = unzipSync(new Uint8Array(bytes), {
+      filter: (f) => f.name.startsWith("word/media/"),
+    });
+  } catch {
+    // .docx corrompido ou protegido: a previa segue so com o texto.
+    return { imagens: [], omitidas: 0 };
+  }
+
+  // Ordena pelo numero do nome (image1, image2, ...), que e a ordem em que o
+  // Word grava as midias. E aproximado: a ordem real vem das relacoes do
+  // document.xml, e ler aquilo so para uma previa nao se paga.
+  const nomes = Object.keys(arquivos).sort((a, b) => {
+    const n = (s: string) => Number((s.match(/(\d+)\.\w+$/) || [])[1] || 0);
+    return n(a) - n(b) || a.localeCompare(b);
+  });
+
+  const imagens: ImagemPrevia[] = [];
+  let omitidas = 0;
+  let acumulado = 0;
+  for (const nome of nomes) {
+    const ext = nome.toLowerCase().replace(/^.*\./, "");
+    const mime = IMG_MIME[ext];
+    const dados = arquivos[nome];
+    if (!mime || !dados?.length) {
+      omitidas += 1;
+      continue;
+    }
+    if (imagens.length >= MAX_IMAGENS || acumulado + dados.length > MAX_BYTES_IMAGENS) {
+      omitidas += 1;
+      continue;
+    }
+    acumulado += dados.length;
+    imagens.push({
+      nome: nome.replace("word/media/", ""),
+      mime,
+      base64: Buffer.from(dados).toString("base64"),
+    });
+  }
+  return { imagens, omitidas };
+}
+
 export async function previaDocumento(bytes: Buffer): Promise<PreviaAnexo> {
-  // extractRawText e nao convertToHtml de proposito: o HTML do mammoth teria
-  // que ser sanitizado antes de entrar na tela, e para conferir um anexo antes
-  // de enviar o texto puro ja resolve.
+  // extractRawText e nao convertToHtml: ver o comentario em imagensDoDocx.
   const { value } = await mammoth.extractRawText({ buffer: bytes });
-  return { tipo: "texto", texto: String(value || "").trim() };
+  // Contrato escaneado nao tem texto NENHUM — so paginas em imagem. Sem estas,
+  // a previa dizia "documento sem texto" para um arquivo de 500 KB cheio de
+  // conteudo.
+  const { imagens, omitidas } = imagensDoDocx(bytes);
+  return {
+    tipo: "documento",
+    texto: String(value || "").trim(),
+    imagens,
+    imagensOmitidas: omitidas,
+  };
 }
