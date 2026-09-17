@@ -158,18 +158,27 @@ export interface AnexoEmail {
 // ponto de vista do Gmail: vem com filename e attachmentId igual aos outros. Sem
 // este filtro, quase todo e-mail listaria 4-5 imagens de assinatura.
 //
-// O marcador de "embutida" e o Content-ID: e por ele que o HTML referencia a
-// parte (src="cid:..."). Content-Disposition: inline sozinho NAO basta como
-// criterio — varios clientes mandam PDF de verdade como inline, e esse a pessoa
-// precisa ver na lista.
+// A ordem dos testes aqui e o que importa.
+//
+// Content-ID NAO serve como criterio sozinho: o Gmail poe Content-ID tambem em
+// anexo comum. Medido num e-mail real — um PDF com
+// `Content-Disposition: attachment` vinha com `Content-ID: <f_mu15q6sy0>` e era
+// descartado como se fosse assinatura, sem aviso nenhum.
+//
+// `Content-Disposition: attachment` e a declaracao explicita de "isto e anexo" e
+// vence qualquer outra pista. So depois dela vale perguntar se a parte e uma
+// imagem embutida no corpo.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ehImagemEmbutida(part: any): boolean {
   const headers = part?.headers || [];
-  if (header(headers, "Content-ID")) return true;
-  const disp = header(headers, "Content-Disposition").toLowerCase();
-  return (
-    disp.startsWith("inline") && String(part?.mimeType || "").startsWith("image/")
-  );
+  const disp = header(headers, "Content-Disposition").toLowerCase().trim();
+  if (disp.startsWith("attachment")) return false;
+  // Nao-imagem nunca e "embutida": arquivo e arquivo, e some da lista seria
+  // pior que aparecer a mais.
+  if (!String(part?.mimeType || "").startsWith("image/")) return false;
+  // Sobra imagem que o corpo referencia (src="cid:...") ou marcada inline: logo,
+  // icone de rede social, assinatura.
+  return !!header(headers, "Content-ID") || disp.startsWith("inline");
 }
 
 // Varre as partes da mensagem e lista o que e anexo de verdade.
