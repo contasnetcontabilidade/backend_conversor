@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { chatHabilitado, temEscopoChat } from "../services/gmailAuth";
 import {
+  baixarAnexoChat,
   chaveDaSelecao,
   garantirSecaoChamado,
   listarEspacos,
@@ -11,7 +12,9 @@ import {
   montarTextoSelecionado,
   obterMensagens,
   periodoLegivel,
+  tamanhoAnexoChat,
   tamanhoPagina,
+  type AnexoChat,
   type EspacoResumo,
 } from "../services/chatApi";
 import { resolverContaGoogle } from "../services/googleConta";
@@ -24,20 +27,31 @@ import { fluxoCriarChamado } from "../services/chamadoFluxo";
 import { montarRefs } from "../services/chamadoRefs";
 import {
   getChatFeitos,
+  getContaDoItem,
   getSelecaoChat,
   marcarChatFeito,
+  salvarContaDoItem,
   salvarSelecaoChat,
 } from "../services/store";
 import {
+  ANEXO_TAMANHO_MAX_BYTES,
   buscarSetores,
   buscarTipos,
+  formatarBytes,
   isDryRun,
   montarDescricaoChat,
   resolverAssuntoPorTexto,
   resolverClientePorMencao,
   resolverOrigemChat,
+  type AnexoChamado,
   type RefResolvida,
 } from "../services/suite360";
+import {
+  previaApresentacao,
+  previaDocumento,
+  previaPlanilha,
+  tipoConversao,
+} from "../services/anexoPrevia";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
 
 // Aba "Chat": abre chamado a partir de mensagens do Google Chat selecionadas
@@ -63,6 +77,179 @@ function campoId(
 function listaDeStrings(valor: unknown): string[] {
   if (!Array.isArray(valor)) return [];
   return valor.map((v) => String(v || "").trim()).filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Anexos das mensagens selecionadas
+// ---------------------------------------------------------------------------
+
+function horaCurta(iso: string): { data: string; hora: string } {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return { data: "", hora: "" };
+  const fmt = (opts: Intl.DateTimeFormatOptions) =>
+    d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", ...opts });
+  const [dia, mes, ano] = fmt({
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).split("/");
+  return {
+    data: `${ano}-${mes}-${dia}`,
+    hora: fmt({ hour: "2-digit", minute: "2-digit" }).replace(":", ""),
+  };
+}
+
+// Print colado no Chat chega SEMPRE como "image.png" — foi o nome mais comum na
+// varredura dos espacos. Numa lista de cinco, todos iguais, ninguem sabe qual e
+// qual, e dentro do chamado cinco arquivos homonimos e pior ainda.
+//
+// Por isso o nome generico e trocado por data-hora-autor. Nome proprio
+// (relatorio.xlsx, contrato.pdf) e mantido: ali o nome carrega informacao que
+// a data nao substitui.
+const NOME_GENERICO = /^(image|imagem|captura|screenshot|foto)[-_ ]?\d*$/i;
+
+function nomeParaSuite(a: AnexoChat): string {
+  const ponto = a.nome.lastIndexOf(".");
+  const base = ponto > 0 ? a.nome.slice(0, ponto) : a.nome;
+  const ext = ponto > 0 ? a.nome.slice(ponto) : "";
+  if (!NOME_GENERICO.test(base)) return a.nome;
+  const { data, hora } = horaCurta(a.hora);
+  // Acento e espaco viram problema em nome de arquivo baixado depois.
+  const autor = a.autor
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .split("-")[0];
+  const partes = [data, hora, autor].filter(Boolean);
+  return partes.length ? `${partes.join("-")}${ext}` : a.nome;
+}
+
+// Rotulo da LISTA (o que a pessoa le na tela). Mantem o nome original a vista e
+// acrescenta quem mandou e quando — o que distingue um print do outro.
+function rotuloAnexo(a: AnexoChat): string {
+  const { hora } = horaCurta(a.hora);
+  const quando = hora ? `${hora.slice(0, 2)}:${hora.slice(2)}` : "";
+  const cauda = [a.autor, quando].filter(Boolean).join(", ");
+  return cauda ? `${a.nome} — ${cauda}` : a.nome;
+}
+
+// Formato que vai para a tela. As sondagens de tamanho vao em PARALELO: cada
+// uma custa uma ida e volta (~0,5s) e nenhum byte de corpo, entao em serie so
+// somaria espera.
+async function anexosChatParaApp(email: string, anexos: AnexoChat[]) {
+  const tamanhos = await Promise.all(
+    anexos.map((a) =>
+      tamanhoAnexoChat(email, a.resourceName).catch(() => -1),
+    ),
+  );
+  return anexos.map((a, i) => {
+    const tamanho = tamanhos[i];
+    // tamanho -1 = a sondagem falhou. NAO bloqueia: barrar por falta de
+    // informacao esconderia um anexo bom. O limite ainda e cobrado na criacao.
+    const excede = tamanho >= 0 && tamanho > ANEXO_TAMANHO_MAX_BYTES;
+    return {
+      id: a.id,
+      nome: rotuloAnexo(a),
+      mime: a.mime,
+      tamanho: Math.max(tamanho, 0),
+      tamanhoTexto: tamanho >= 0 ? formatarBytes(tamanho) : "",
+      bloqueado: excede,
+      motivo: excede
+        ? `${formatarBytes(tamanho)} — acima do limite de ` +
+          `${formatarBytes(ANEXO_TAMANHO_MAX_BYTES)} do Suite`
+        : "",
+    };
+  });
+}
+
+// Relê as mensagens e devolve os anexos delas. Serve ao preview e, no criar e no
+// visualizador, para CONFERIR o que o app pediu em vez de confiar na tela.
+async function anexosDaSelecao(
+  email: string,
+  spaceId: string,
+  messageIds: string[],
+): Promise<AnexoChat[]> {
+  if (!spaceId || !messageIds.length) return [];
+  const { mensagens } = await obterMensagens(email, spaceId, messageIds);
+  return mensagens.flatMap((m) => m.anexos || []);
+}
+
+// Conta do Google desta selecao. Gravada no preview (ver chat:acct la).
+async function contaDaSelecao(chave: string): Promise<string> {
+  const conta = await getContaDoItem(chave, NS).catch(() => null);
+  if (!conta) {
+    throw new AppError({
+      statusCode: 400,
+      code: "CHAT_CONTA_DESCONHECIDA",
+      message:
+        "Não foi possível identificar a conta do Google desta conversa para baixar os anexos. Feche e abra o chamado de novo.",
+    });
+  }
+  return conta;
+}
+
+// Baixa o que a pessoa marcou. Mesmas regras do Gmail: um de cada vez (memoria),
+// limite do Suite reconferido aqui, e qualquer falha derruba a criacao COM o
+// nome do arquivo — a API do Suite nao tem endpoint para anexar depois.
+async function resolverAnexosChatEscolhidos(
+  escolhidos: string[],
+  chave: string,
+  spaceId: string,
+  messageIds: string[],
+): Promise<AnexoChamado[]> {
+  const conta = await contaDaSelecao(chave);
+  const ids = messageIds.length
+    ? messageIds
+    : await getSelecaoChat(chave).catch(() => [] as string[]);
+  const porId = new Map(
+    (await anexosDaSelecao(conta, spaceId, ids)).map((a) => [a.id, a]),
+  );
+
+  const saida: AnexoChamado[] = [];
+  for (const id of escolhidos) {
+    const anexo = porId.get(id);
+    if (!anexo) {
+      throw new AppError({
+        statusCode: 422,
+        code: "CHAT_ANEXO_NAO_ENCONTRADO",
+        message:
+          "Um dos anexos escolhidos não está mais nesta conversa. Feche e abra o chamado de novo para atualizar a lista.",
+        details: { id },
+      });
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await baixarAnexoChat(conta, anexo.resourceName);
+    } catch (error) {
+      throw new AppError({
+        statusCode: 502,
+        code: "CHAT_ANEXO_FALHOU",
+        message:
+          `Não foi possível baixar o anexo "${anexo.nome}" do Chat. ` +
+          "O chamado não foi criado.",
+        details: { anexo: anexo.nome, causa: getErrorMessage(error) },
+      });
+    }
+    // Cobrado aqui tambem: no Chat o tamanho da lista veio de sondagem, que
+    // pode ter falhado. Este e o unico ponto onde o tamanho e certo.
+    if (bytes.length > ANEXO_TAMANHO_MAX_BYTES) {
+      throw new AppError({
+        statusCode: 422,
+        code: "CHAT_ANEXO_GRANDE",
+        message:
+          `O anexo "${anexo.nome}" tem ${formatarBytes(bytes.length)} e passa ` +
+          `do limite de ${formatarBytes(ANEXO_TAMANHO_MAX_BYTES)} do Suite. ` +
+          "Desmarque esse anexo para criar o chamado.",
+        details: { anexo: anexo.nome },
+      });
+    }
+    saida.push({
+      nome: nomeParaSuite(anexo),
+      conteudo_base64: bytes.toString("base64"),
+    });
+  }
+  return saida;
 }
 
 function qs(req: Request, nome: string): string {
@@ -274,9 +461,11 @@ export async function chatPreviewController(req: Request, res: Response) {
 
   const email = await resolverContaGoogle(profileToken || "", emailParam);
   const chave = chaveDaSelecao(spaceId, messageIds);
-  // (o "criar" recupera a selecao por chat:sel; a conta nao e consultada la,
-  // entao gravar chat:acct era escrita morta e foi removida)
-  // Guardado DEPOIS da leitura, com os ids efetivamente lidos (ver abaixo).
+  // chat:acct VOLTOU. Foi removido um dia como escrita morta, e estava certo na
+  // epoca: o "criar" so precisava da selecao. Agora ele baixa os anexos
+  // escolhidos e precisa da conta do Google — e o corpo do "criar" nao carrega
+  // profileToken. Nao remover de novo sem checar isto.
+  await salvarContaDoItem(chave, email, NS).catch(() => undefined);
 
   const { mensagens: msgs, falharam } = await obterMensagens(
     email,
@@ -463,6 +652,10 @@ export async function chatPreviewController(req: Request, res: Response) {
       cliente,
       refs,
       descricao,
+      anexos: await anexosChatParaApp(
+        email,
+        msgs.flatMap((m) => m.anexos || []),
+      ),
     },
   });
 }
@@ -490,6 +683,76 @@ async function marcarFeitoPosCriar(
   await marcarChatFeito(espaco, ids, protocolo).catch(() => undefined);
 }
 
+// ---------------------------------------------------------------------------
+// GET /chat/anexo e /chat/anexo/previa — visualizacao antes de criar
+// ---------------------------------------------------------------------------
+
+// Resolve QUAL anexo a query pede, conferindo que ele pertence mesmo a esta
+// selecao. Sem isso, um id qualquer viraria um download arbitrario do Chat.
+async function anexoChatDaQuery(req: Request) {
+  const id = qs(req, "id");
+  const chave = qs(req, "chaveChat");
+  const spaceId = qs(req, "spaceId");
+  if (!id || !chave) {
+    throw new AppError({
+      statusCode: 400,
+      code: "ANEXO_ID_REQUIRED",
+      message: "Informe o id do anexo e a conversa.",
+    });
+  }
+
+  const conta = await contaDaSelecao(chave);
+  const ids = await getSelecaoChat(chave).catch(() => [] as string[]);
+  // O spaceId vem na query, mas a chave ja o carrega como prefixo — serve de
+  // reserva quando o app nao manda o campo.
+  const espaco = spaceId || `spaces/${chave.split(":")[0]}`;
+  const anexo = (await anexosDaSelecao(conta, espaco, ids)).find(
+    (a) => a.id === id,
+  );
+  if (!anexo) {
+    throw new AppError({
+      statusCode: 404,
+      code: "CHAT_ANEXO_NAO_ENCONTRADO",
+      message: "Anexo não encontrado nesta conversa.",
+    });
+  }
+  return { conta, anexo };
+}
+
+export async function chatAnexoController(req: Request, res: Response) {
+  const { conta, anexo } = await anexoChatDaQuery(req);
+  const bytes = await baixarAnexoChat(conta, anexo.resourceName);
+  // O mime vem do metadado: o download do Chat responde octet-stream para tudo.
+  res.setHeader("Content-Type", anexo.mime);
+  res.setHeader("Content-Length", String(bytes.length));
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename*=UTF-8''${encodeURIComponent(anexo.nome)}`,
+  );
+  res.status(200).send(bytes);
+}
+
+export async function chatAnexoPreviaController(req: Request, res: Response) {
+  const { conta, anexo } = await anexoChatDaQuery(req);
+  const conversao = tipoConversao(anexo.mime, anexo.nome);
+  if (!conversao) {
+    throw new AppError({
+      statusCode: 422,
+      code: "ANEXO_SEM_PREVIA",
+      message: `Não há pré-visualização para "${anexo.nome}".`,
+    });
+  }
+  const bytes = await baixarAnexoChat(conta, anexo.resourceName);
+  const previa =
+    conversao === "planilha"
+      ? await previaPlanilha(bytes, qs(req, "aba") || undefined)
+      : conversao === "apresentacao"
+        ? await previaApresentacao(bytes)
+        : await previaDocumento(bytes);
+
+  res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
+}
+
 export async function chatCriarController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
   const spaceId = getOptionalString(body, "spaceId") || "";
@@ -498,6 +761,8 @@ export async function chatCriarController(req: Request, res: Response) {
   const chave =
     getOptionalString(body, "chaveChat") ||
     (spaceId && messageIds.length ? chaveDaSelecao(spaceId, messageIds) : "");
+  // So os identificadores trafegam: os bytes vao do Google direto ao backend.
+  const anexosEscolhidos = listaDeStrings(body.anexosEscolhidos);
 
   await fluxoCriarChamado({
     res,
@@ -508,6 +773,15 @@ export async function chatCriarController(req: Request, res: Response) {
     fonteCusto: "chat",
     logTag: "chat:criar",
     msgJaExistia: (p) => `Chamado ja existente para estas mensagens: ${p}`,
+    anexos: anexosEscolhidos.length
+      ? () =>
+          resolverAnexosChatEscolhidos(
+            anexosEscolhidos,
+            chave,
+            spaceId,
+            messageIds,
+          )
+      : undefined,
     // Marcar as mensagens como "ja viraram chamado" e compartilhado entre
     // atendentes, entao so vale quando o chamado existe de verdade.
     depois: async ({ dryRun, protocolo }) => {
