@@ -53,6 +53,8 @@ import {
   gravacaoPreviewController,
 } from "../controllers/gravacao.controller";
 import {
+  chatAnexoController,
+  chatAnexoPreviaController,
   chatCriarController,
   chatMessagesController,
   chatPreviewController,
@@ -146,6 +148,8 @@ apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
 apiRouter.get("/chat/status", asyncHandler(chatStatusController));
 apiRouter.get("/chat/spaces", asyncHandler(chatSpacesController));
 apiRouter.get("/chat/messages", asyncHandler(chatMessagesController));
+apiRouter.get("/chat/anexo", asyncHandler(chatAnexoController));
+apiRouter.get("/chat/anexo/previa", asyncHandler(chatAnexoPreviaController));
 apiRouter.post("/chat/chamado/preview", asyncHandler(chatPreviewController));
 apiRouter.post("/chat/chamado/criar", asyncHandler(chatCriarController));
 
