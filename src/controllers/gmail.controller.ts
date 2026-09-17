@@ -183,6 +183,59 @@ async function resolverAnexosEscolhidos(
   return saida;
 }
 
+// GET /gmail/anexo — devolve os bytes de UM anexo, para o app pre-visualizar
+// antes de criar o chamado.
+//
+// Rota separada da criacao de proposito: olhar o arquivo nao pode depender de
+// estar criando nada, e a pessoa pode abrir e fechar o visualizador varias vezes
+// antes de decidir. Nao grava nem marca nada — so le.
+export async function gmailAnexoController(req: Request, res: Response) {
+  const q = (nome: string) => String(req.query[nome] ?? "").trim();
+  const id = q("id");
+  const threadId = q("threadId");
+  const messageId = q("messageId");
+
+  if (!id) {
+    throw new AppError({
+      statusCode: 400,
+      code: "ANEXO_ID_REQUIRED",
+      message: "Informe o id do anexo.",
+    });
+  }
+  if (!threadId && !messageId) {
+    throw new AppError({
+      statusCode: 400,
+      code: "MESSAGE_ID_REQUIRED",
+      message: "Informe o threadId ou messageId do e-mail.",
+    });
+  }
+
+  const email = await resolverContaGoogle(q("profileToken"), q("email"));
+  // Resolve pela lista do proprio e-mail, e nao pelo id cru da query: assim um
+  // id qualquer nao vira um GET arbitrario na caixa da pessoa.
+  const anexo = (
+    await anexosDoEmail(email, threadId || undefined, messageId || undefined)
+  ).find((a) => a.id === id);
+  if (!anexo) {
+    throw new AppError({
+      statusCode: 404,
+      code: "GMAIL_ANEXO_NAO_ENCONTRADO",
+      message: "Anexo não encontrado neste e-mail.",
+    });
+  }
+
+  const bytes = await baixarAnexo(email, anexo.messageId, anexo.attachmentId);
+  res.setHeader("Content-Type", anexo.mime);
+  res.setHeader("Content-Length", String(bytes.length));
+  // inline: o visualizador do app so exibe. O nome vai codificado porque nome de
+  // anexo tem acento e aspas, e header nao aceita.
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename*=UTF-8''${encodeURIComponent(anexo.nome)}`,
+  );
+  res.status(200).send(bytes);
+}
+
 // ---------------------------------------------------------------------------
 // OAuth (por usuario) — o app abre estas paginas numa janela e captura o token
 // ---------------------------------------------------------------------------
