@@ -25,7 +25,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-09-14";
+export const PROMPT_VERSION = "2026-09-22";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -102,6 +102,11 @@ export type ResumoInput = {
   // escolhido DCTFWEB, certificado, duvidas gerais...). E as regras "nao inclua
   // quem esta registrando" citavam uma pessoa que o modelo nao conhecia.
   quemRegistra?: { nome?: string; setor?: string };
+  // Ligacao ENTRE RAMAIS (tipo "interno" no relatorio do GoTo), com os nomes de
+  // quem participou ("NOME - SETOR"). Sem isto o prompt so dizia "atendimento
+  // telefonico" e o modelo chamava o colega do outro ramal de "cliente" —
+  // reclamado no feedback de 15/09/2026. Ausente = externa ou desconhecida.
+  ligacaoInterna?: { participantes: string[] };
   // Lista de setores do Suite, para a IA sugerir setores ADICIONAIS ao do
   // perfil de quem registra (mesma mecanica da lista de assuntos).
   setoresDisponiveis?: Array<{ id: string; nome: string }>;
@@ -410,13 +415,16 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
   // Chat e e-mail compartilham o formato de conversa (varias mensagens com
   // separador); a instrucao de "nao perca nenhum pedido" vale para os dois.
   const ehConversa = (origem === "email" || ehChat) && qtdMsgs > 1;
+  const ehLigacaoInterna = origem === "ligacao" && !!input.ligacaoInterna;
   const contexto = ehChat
     ? `Voce registra chamados de atendimento de um escritorio de contabilidade a partir de MENSAGENS DO GOOGLE CHAT selecionadas manualmente por um COLABORADOR do escritorio (${qtdMsgs} mensagem(ns), em ordem cronologica, separadas por linhas como \"--- Mensagem 1/${qtdMsgs} — de Fulano em DATA ---\").`
     : ehConversa
       ? `Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de uma CONVERSA por e-mail (thread) com ${qtdMsgs} mensagens, recebida de um cliente. As mensagens vem em ordem cronologica, separadas por linhas como "--- Mensagem 1/${qtdMsgs} — de Fulano ---".`
       : origem === "email"
         ? "Voce registra chamados de atendimento de um escritorio de contabilidade, a partir de um E-MAIL recebido de um cliente."
-        : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
+        : ehLigacaoInterna
+          ? "Voce registra chamados de um escritorio de contabilidade, a partir da transcricao de uma LIGACAO INTERNA entre colaboradores do escritorio."
+          : "Voce registra chamados de atendimento telefonico de um escritorio de contabilidade, a partir da transcricao de uma ligacao.";
   const fontePalavra = ehChat
     ? "na conversa"
     : origem === "email"
@@ -452,6 +460,31 @@ PARTICULARIDADES DO GOOGLE CHAT — siga a risca:
 4) Mensagens de APP/BOT (alertas de sistema) sao CONTEXTO, nao pedido do cliente.
 `
     : "";
+  // Ligacao entre ramais: mesmo erro do Chat, agora na voz. Os nomes vem do
+  // relatorio do GoTo ("NOME - SETOR"), nao da transcricao — por isso da para
+  // afirmar que sao colegas em vez de pedir ao modelo que adivinhe.
+  const participantesInternos = (input.ligacaoInterna?.participantes || [])
+    .map((n) => n.trim())
+    .filter(Boolean);
+  const blocoLigacaoInterna = ehLigacaoInterna
+    ? `
+LIGACAO INTERNA — siga a risca:
+1) QUEM FALA: esta ligacao foi ENTRE RAMAIS do proprio escritorio${
+        participantesInternos.length
+          ? ` (${participantesInternos.join("; ")})`
+          : ""
+      }. TODOS que falam sao COLABORADORES de ${NOME_ESCRITORIO}. NENHUM deles e cliente.
+2) NUNCA chame quem fala de "cliente" — nem no titulo, nem no resumo, nem nos pontos ou
+   providencias. Use o nome da pessoa ou "o colaborador"/"a colaboradora" (ex.: "Maria, do
+   Fiscal, pediu ajuda para acessar o Onvio" — e NAO "A cliente pediu ajuda...").
+   So ligue uma fala a um nome da lista acima quando isso for CLARO (a pessoa se apresenta,
+   e chamada pelo nome, ou so ha duas pessoas e uma e quem registra). Na duvida, "o colaborador".
+3) Se a conversa tratar da demanda de um cliente (colega repassando ou discutindo um caso), o
+   cliente e a EMPRESA CITADA na conversa: so ela pode ser chamada de cliente e ir para
+   cliente_mencionado. Se nenhuma empresa for citada com seguranca, cliente_mencionado fica
+   vazio — e melhor vazio do que o nome de um colega.
+`
+    : "";
   // Sem a data de hoje o modelo nao tem como resolver "ate sexta" nem julgar se
   // uma competencia faz sentido. Fuso do escritorio, nao UTC.
   //
@@ -472,7 +505,7 @@ PARTICULARIDADES DO GOOGLE CHAT — siga a risca:
         } — colaborador de ${NOME_ESCRITORIO}, NUNCA o cliente. Mensagens ou falas dessa pessoa sao do escritorio.\n`
       : "";
 
-  const prompt = `${blocoData}${blocoQuemRegistra}${contexto}${blocoConversa}${blocoChat}
+  const prompt = `${blocoData}${blocoQuemRegistra}${contexto}${blocoConversa}${blocoChat}${blocoLigacaoInterna}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
 *** NAO REPITA A MESMA INFORMACAO ***
