@@ -661,6 +661,16 @@ export async function suitePreviewController(req: Request, res: Response) {
                 ? nomeUsuario.slice(nomeUsuario.lastIndexOf(" - ") + 3).trim()
                 : ""),
           },
+          // Interna = todos sao colegas. Sem isto a IA chamava o outro ramal
+          // de "cliente" (feedback de 15/09/2026).
+          ligacaoInterna:
+            analise?.tipo === "interno"
+              ? {
+                  participantes: [analise.caller, ...analise.answerers]
+                    .map((p) => p?.nome || "")
+                    .filter(Boolean),
+                }
+              : undefined,
           ramal: ramalUsuario,
           usuario: nomeUsuario,
           fonte: "ligacao",
