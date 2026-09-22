@@ -1114,15 +1114,24 @@ export async function resolverOrigemEmail(): Promise<RefResolvida> {
 }
 
 // Origem para chamados do GOOGLE CHAT. Cadeia de fallback deliberada:
-// Chat -> mensageria (WhatsApp) -> E-mail -> Telefone. Nunca devolve vazio, e o
-// dropdown "Origem" do modal permite corrigir em 1 clique — ou seja, faltar a
-// origem "Chat" cadastrada no Suite nunca bloqueia a criacao do chamado.
+// Chat -> Interna -> mensageria (WhatsApp) -> E-mail -> Telefone. Nunca devolve
+// vazio, e o dropdown "Origem" do modal permite corrigir em 1 clique — ou seja,
+// faltar a origem "Chat" cadastrada no Suite nunca bloqueia a criacao do chamado.
+//
+// "Interna" vem antes de WhatsApp porque o Chat e a ferramenta INTERNA do
+// escritorio. O Suite de producao nao tem origem "Chat" (so E-mail, Interna,
+// Ligacao, Presencial, WhatsApp), entao todo chamado do Chat caia em WhatsApp
+// — reclamado no feedback de 15/09/2026.
 export async function resolverOrigemChat(): Promise<RefResolvida> {
   const envVal = envId("SUITE360_ORIGEM_CHAT_ID");
   if (envVal) return { id: envVal, fonte: "env" };
   try {
     let r = await lookupPrimeiro("/origens-chamado", (o) =>
       /chat|hangout/i.test(pickStr(o, ["descricao", "nome", "name"]) || ""),
+    );
+    if (r.id) return { ...r, fonte: "lookup" };
+    r = await lookupPrimeiro("/origens-chamado", (o) =>
+      /intern/i.test(pickStr(o, ["descricao", "nome", "name"]) || ""),
     );
     if (r.id) return { ...r, fonte: "lookup" };
     r = await lookupPrimeiro("/origens-chamado", (o) =>
