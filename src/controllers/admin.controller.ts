@@ -150,7 +150,11 @@ export async function adminFeedbackController(req: Request, res: Response) {
     res.status(401).json({ ok: false, message: "Nao autorizado." });
     return;
   }
-  const itens = await listarFeedback(500).catch(() => []);
+  // Tudo, sem teto: o export daqui e a base de analise do prompt.
+  const itens = await listarFeedback().catch((err) => {
+    console.error("[admin:feedback] falha ao ler o feedback:", err);
+    return [];
+  });
   res.status(200).json({ ok: true, itens });
 }
 
