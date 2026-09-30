@@ -3,7 +3,10 @@ import { Redis } from "@upstash/redis";
 // Feedback dos resumos/decisoes da IA, para refinar o prompt com DADO REAL.
 // Privacidade: NUNCA guarda transcricao, texto do resumo, nem nome/CNPJ do
 // cliente — apenas metadados, divergencias (sugerido x escolhido) e rating/tags.
-// Lista capada no Redis (padrao dos "events"); fallback em memoria (dev).
+// Lista SEM teto no Redis: o feedback e a base para medir o prompt e, no
+// futuro, treinar sugestoes — apagar o antigo joga fora justamente esse dado.
+// ~150 registros/semana de ~0,7 KB cabem folgados no plano gratuito do Upstash.
+// Fallback em memoria (dev).
 
 let redis: Redis | null = null;
 function getRedis(): Redis | null {
@@ -16,7 +19,9 @@ function getRedis(): Redis | null {
 }
 
 const KEY = "feedback:list";
-const MAX = 1000; // guarda os ultimos 1000 feedbacks
+// Leitura em lotes: um LRANGE da lista inteira cresceria sem limite numa
+// unica resposta do Upstash.
+const LOTE_LEITURA = 1000;
 let mem: string[] = [];
 
 export interface FeedbackEntry {
@@ -73,18 +78,26 @@ export async function registrarFeedback(entry: FeedbackEntry): Promise<void> {
   const r = getRedis();
   if (r) {
     await r.lpush(KEY, json);
-    await r.ltrim(KEY, 0, MAX - 1);
     return;
   }
   mem.unshift(json);
-  mem = mem.slice(0, MAX);
 }
 
-export async function listarFeedback(limit = 500): Promise<FeedbackEntry[]> {
+// Sem `limit`, devolve tudo (mais recente primeiro).
+export async function listarFeedback(limit?: number): Promise<FeedbackEntry[]> {
   const r = getRedis();
-  const raw = r
-    ? (await r.lrange<string>(KEY, 0, limit - 1)) || []
-    : mem.slice(0, limit);
+  let raw: string[] = [];
+  if (!r) {
+    raw = limit ? mem.slice(0, limit) : mem.slice();
+  } else {
+    for (let inicio = 0; !limit || inicio < limit; inicio += LOTE_LEITURA) {
+      const fim = inicio + LOTE_LEITURA - 1;
+      const lote =
+        (await r.lrange<string>(KEY, inicio, limit ? Math.min(fim, limit - 1) : fim)) || [];
+      raw.push(...lote);
+      if (lote.length < LOTE_LEITURA) break;
+    }
+  }
   return raw
     .map((item) => {
       try {
