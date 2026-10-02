@@ -521,7 +521,8 @@ LIGACAO INTERNA — siga a risca:
 `
     : "";
   const blocoSuporteRegistroPosterior = ehSuporte
-    ? `  REGISTRO DEPOIS DO ATENDIMENTO: quem registra e do suporte e costuma abrir o chamado DEPOIS
+    ? `  REGISTRO DEPOIS DO ATENDIMENTO (EXCECAO a PROMESSA NAO E ENTREGA, so para este caso): quem
+  registra e do suporte e costuma abrir o chamado DEPOIS
   de resolver — a conversa termina antes da solucao aparecer. Por isso, se ELE MESMO assumiu a
   acao no conteudo para fazer na hora ("vou acessar sua maquina", "vou ai na sua mesa", "ja vejo",
   "me passa o AnyDesk"), responda "sim" — e essa acao nao vira providencia. No resumo, NAO afirme
@@ -626,6 +627,10 @@ ${blocoSuporteProvidencia}- cliente_mencionado: objeto { nome: string, cnpj: str
   Conta como atendido DENTRO deste atendimento quando a resposta do escritorio (de quem registra ou
   de um colega) esta no proprio conteudo, ja entregou o que foi pedido e o cliente nao voltou com
   pedido novo depois dela. Se so aparece o pedido, sem a resposta, NAO e "sim".
+  PROMESSA NAO E ENTREGA: "vou emitir e te mando", "vou verificar e retorno", "te envio a tarde"
+  dizem o que AINDA vai ser feito — isso e "nao", e a acao prometida vira providencia. No resumo,
+  escreva no FUTURO ("sera emitida e enviada"); NUNCA afirme que algo "foi emitido/enviado/feito"
+  se o conteudo so mostra a promessa.
 ${blocoSuporteRegistroPosterior}- assunto_interno: "sim" | "nao" | "indefinido". "sim" quando a demanda e do PROPRIO escritorio
   (colega falando com colega, processo interno, sem cliente externo envolvido); "nao" quando ha
   um cliente sendo atendido; "indefinido" se nao der para saber.
