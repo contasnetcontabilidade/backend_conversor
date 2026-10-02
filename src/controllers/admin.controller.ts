@@ -26,7 +26,8 @@ function isAdmin(req: Request): boolean {
 }
 
 // POST /api/feedback — registra feedback do resumo da IA (explicito/implicito).
-// Aceita SO campos conhecidos e limitados (nunca transcricao/conteudo do resumo).
+// Aceita SO campos conhecidos e limitados (nunca a transcricao/conteudo; do
+// resumo, so a parte da IA e a versao editada).
 export async function feedbackController(req: Request, res: Response) {
   const b = (
     req.body && typeof req.body === "object" ? req.body : {}
@@ -85,6 +86,10 @@ export async function feedbackController(req: Request, res: Response) {
     descTamSistema: inteiroOpc(b.descTamSistema),
     descTamFinal: inteiroOpc(b.descTamFinal),
     descPalavrasMantidas: fracaoOpc(b.descPalavrasMantidas),
+    // Teto folgado: o resumo (resumo + pontos + providencias) fica em ~1-3 mil
+    // caracteres; o corte so existe para um corpo anormal nao inchar a lista.
+    descTextoIa: str(b.descTextoIa).slice(0, 8000) || undefined,
+    descTextoFinal: str(b.descTextoFinal).slice(0, 8000) || undefined,
     iaOk: b.iaOk === undefined ? undefined : bool(b.iaOk),
   };
   await registrarFeedback(entry).catch(() => undefined);
