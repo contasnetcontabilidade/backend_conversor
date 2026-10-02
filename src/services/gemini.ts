@@ -27,7 +27,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-09-22";
+export const PROMPT_VERSION = "2026-10-02";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -509,6 +509,29 @@ LIGACAO INTERNA — siga a risca:
         } — colaborador de ${NOME_ESCRITORIO}, NUNCA o cliente. Mensagens ou falas dessa pessoa sao do escritorio.\n`
       : "";
 
+  // Suporte registra o chamado DEPOIS de resolver e a conversa acaba antes da
+  // solucao: entre 22/09 e 02/10, a IA disse "nao finalizado" e o suporte
+  // finalizou em 35 de 37 casos. A regra so entra para o suporte: no teste,
+  // posta para todos, ela fez o Fiscal marcar "sim" num "vou emitir e te
+  // mando" e escrever que a certidao "foi emitida" — que e o erro inverso.
+  const ehSuporte = /suporte|tecnologia|\bti\b|inform[aá]tica/i.test(regSetor);
+  const blocoSuporteProvidencia = ehSuporte
+    ? `  Tambem NAO vira providencia a acao que quem registra ja assumiu no proprio conteudo para fazer
+  na hora ("vou acessar sua maquina", "vou ai ver", "ja vejo") — ver ja_resolvido.
+`
+    : "";
+  const blocoSuporteRegistroPosterior = ehSuporte
+    ? `  REGISTRO DEPOIS DO ATENDIMENTO: quem registra e do suporte e costuma abrir o chamado DEPOIS
+  de resolver — a conversa termina antes da solucao aparecer. Por isso, se ELE MESMO assumiu a
+  acao no conteudo para fazer na hora ("vou acessar sua maquina", "vou ai na sua mesa", "ja vejo",
+  "me passa o AnyDesk"), responda "sim" — e essa acao nao vira providencia. No resumo, NAO afirme
+  um resultado que nao aparece no conteudo: diga o que foi pedido e que o suporte assumiu.
+  Continua "nao" quando: a solucao depende de TERCEIRO (fornecedor, suporte de outro sistema,
+  outro setor, o cliente), ficou para OUTRO DIA ("amanha", "semana que vem", peca a chegar), ou a
+  tentativa FALHOU ou foi escalada.
+`
+    : "";
+
   const prompt = `${blocoData}${blocoQuemRegistra}${contexto}${blocoConversa}${blocoChat}${blocoLigacaoInterna}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
@@ -539,7 +562,7 @@ Campos obrigatorios:
   Se a RESPOSTA do escritorio aparece no proprio conteudo e ja entregou o que foi pedido
   (orientacao dada, acesso liberado, senha redefinida, arquivo/guia enviado, duvida
   respondida), isso NAO vira providencia — nem "confirmar com o cliente se deu certo".
-- cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique QUEM E ATENDIDO — a empresa
+${blocoSuporteProvidencia}- cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique QUEM E ATENDIDO — a empresa
   (ou a pessoa fisica) do outro lado do atendimento. Ordem de prioridade: (1) o CNPJ/CPF, se aparecer;
   (2) a ASSINATURA ${fontePalavra}; (3) quando houver e-mail do remetente, o DOMINIO dele
   (ex.: "joao@transportesluz.com.br" -> "Transportes Luz"), IGNORANDO dominios genericos (gmail, hotmail,
@@ -603,7 +626,7 @@ Campos obrigatorios:
   Conta como atendido DENTRO deste atendimento quando a resposta do escritorio (de quem registra ou
   de um colega) esta no proprio conteudo, ja entregou o que foi pedido e o cliente nao voltou com
   pedido novo depois dela. Se so aparece o pedido, sem a resposta, NAO e "sim".
-- assunto_interno: "sim" | "nao" | "indefinido". "sim" quando a demanda e do PROPRIO escritorio
+${blocoSuporteRegistroPosterior}- assunto_interno: "sim" | "nao" | "indefinido". "sim" quando a demanda e do PROPRIO escritorio
   (colega falando com colega, processo interno, sem cliente externo envolvido); "nao" quando ha
   um cliente sendo atendido; "indefinido" se nao der para saber.
 - setores_sugeridos: array de { id, nome } (maximo 3). SOMENTE setores citados explicitamente ou
