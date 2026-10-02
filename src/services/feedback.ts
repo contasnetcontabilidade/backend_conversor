@@ -1,8 +1,9 @@
 import { Redis } from "@upstash/redis";
 
 // Feedback dos resumos/decisoes da IA, para refinar o prompt com DADO REAL.
-// Privacidade: NUNCA guarda transcricao, texto do resumo, nem nome/CNPJ do
-// cliente — apenas metadados, divergencias (sugerido x escolhido) e rating/tags.
+// Privacidade: NUNCA guarda transcricao nem os dados do atendimento (nome/CNPJ
+// do cliente) — guarda metadados, divergencias (sugerido x escolhido),
+// rating/tags e o texto do RESUMO (o da IA e, se editado, o final).
 // Lista SEM teto no Redis: o feedback e a base para medir o prompt e, no
 // futuro, treinar sugestoes — apagar o antigo joga fora justamente esse dado.
 // ~150 registros/semana de ~0,7 KB cabem folgados no plano gratuito do Upstash.
@@ -70,6 +71,11 @@ export interface FeedbackEntry {
   descTamSistema?: number; // caracteres do texto que o sistema montou
   descTamFinal?: number; // caracteres do texto enviado
   descPalavrasMantidas?: number; // 0..1: palavras distintas do sistema que ficaram
+  // O texto do resumo, para melhorar o prompt com o que a IA errou de fato.
+  // So a parte editavel (resumo, pontos, providencias), nunca o cabecalho com
+  // cliente/CNPJ nem a transcricao. O final so vem quando difere do da IA.
+  descTextoIa?: string;
+  descTextoFinal?: string;
   iaOk?: boolean;
 }
 
