@@ -13,6 +13,7 @@
 import type { Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { registrarCustoChamado } from "./custoChamados";
+import { registrarErro } from "./erros";
 import {
   getChamadoCriado,
   liberarCriacao,
@@ -176,6 +177,7 @@ export async function fluxoCriarChamado(opts: FluxoCriarOpts): Promise<void> {
     resultado = await criarChamado(chamado as ChamadoBody);
   } catch (error) {
     if (chave) await liberarCriacao(chave, ns).catch(() => undefined);
+    await reportarFalhaCriacao(opts, error);
     throw error;
   }
 
@@ -283,6 +285,48 @@ export async function fluxoCriarChamado(opts: FluxoCriarOpts): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+
+// Falha ao criar no Suite vai para a aba "Erros do app" do /admin.
+//
+// Por que existe: para qualquer 5xx o app so mostra "O servico esta
+// indisponivel", e a falha de criacao nao era reportada em lugar nenhum alem do
+// log da Vercel. Em 13/10 a criacao pela ligacao falhava na 1a tentativa e
+// passava na 2a, e sem o codigo nao deu para separar "a conexao com o Suite
+// caiu" (SUITE_UNREACHABLE) de "o Suite respondeu 500" (SUITE_REQUEST_FAILED).
+// Sem conteudo do chamado: so codigo, status, mensagem e os ids da requisicao.
+async function reportarFalhaCriacao(
+  opts: FluxoCriarOpts,
+  error: unknown,
+): Promise<void> {
+  const appError = error instanceof AppError ? error : null;
+  const code = appError?.code || "";
+  const status = appError?.statusCode || 0;
+  // requestId cruza com a linha do log da Vercel; details traz o
+  // upstreamStatus/cause que diferencia as hipoteses acima.
+  const detalhes =
+    `req=${opts.requestId} chave=${opts.chave || "-"}` +
+    (appError?.details !== undefined
+      ? ` details=${JSON.stringify(appError.details)}`
+      : "");
+  await registrarErro({
+    ts: new Date().toISOString(),
+    origem: "backend",
+    tipo: "criar",
+    mensagem: (
+      `criar de ${opts.fonteCusto} falhou: ${code || "sem code"}` +
+      (status ? ` (HTTP ${status})` : "") +
+      ` — ${getErrorMessage(error)}`
+    ).slice(0, 500),
+    stack: detalhes.slice(0, 2000),
+    contexto: `${opts.fonteCusto}:criar:${code || status || "desconhecido"}`,
+    ramal: strOpcional(opts.body, "ramal"),
+    usuario: strOpcional(opts.body, "usuario"),
+  }).catch((erro) => {
+    console.warn(
+      `[${opts.logTag}] req=${opts.requestId} falha de criacao nao registrada no /admin: ${getErrorMessage(erro)}`,
+    );
+  });
+}
 
 // Le string sem lancar (getOptionalString do utils lanca em valor nao-string, o
 // que aqui derrubaria a criacao por causa de um campo de telemetria).
