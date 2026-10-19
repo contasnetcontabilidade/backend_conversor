@@ -257,6 +257,7 @@ src/
 - Se o Claude falhar (fora do ar, chave recusada, crédito esgotado), o **Gemini assume** aquele resumo e o motivo vai para o `/admin/erros`.
 - **O Claude não transcreve áudio**: a API só aceita texto, imagem e PDF (testado em 19/10/2026). A transcrição continua no Deepgram/Gemini.
 - **A Anthropic não informa saldo por API** (e conta individual não acessa a Admin API de custos). O cartão "Claude" do painel mostra um saldo **estimado**: `CLAUDE_CREDITO_MENSAL_USD` menos o gasto em Claude registrado no mês.
+- **Preço conferido no site todo dia** (`precoClaude.ts`): no máximo 1x/dia o backend lê `https://claude.com/pricing` (ao abrir o `/admin` e, em segundo plano, depois de um resumo do Claude). O Redis guarda uma entrada por **mudança** de preço (`preco:claude-haiku-5-5:historico`, "vale desde o dia X") e **cada dia é calculado com o preço vigente naquele dia**, como na fatura — uma mudança não reescreve o passado. Dias antes da primeira leitura usam a tabela do `pricing.ts`. Se a leitura falhar (site fora, layout novo), segue valendo o último preço lido, o cartão mostra "preço não conferido desde dd/mm", o motivo vai para o `/admin/erros` e o backend tenta de novo em 6 h. Mudança de preço também vira aviso no `/admin/erros`.
 
 ### Gemini (`@google/genai`)
 
@@ -454,7 +455,7 @@ Valores em **USD por 1 milhão de tokens**, exatamente como estão no código (`
 >
 > A fórmula usada (`custoUsd`): `custo = (tokens_entrada/1M × preço_entrada) + (tokens_saída/1M × preço_saída)`.
 
-**Claude Haiku 5.5 (resumo)** — preço oficial conferido em 19/10/2026 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)): US$ 0,10 de entrada e US$ 0,50 de saída por 1M de tokens quando o prompt tem até 100 mil tokens. Acima disso a chamada inteira custa US$ 0,50 / US$ 2,50 e é gravada como `claude-haiku-5-5-acima-100k`, para o custo continuar exato. Os tokens vêm do `usage` da própria resposta; o thinking já está somado na saída. O uso é gravado antes de validar a resposta, porque a Anthropic cobra também as respostas recusadas ou cortadas. No teste de 19/10/2026 um resumo saiu por ~US$ 0,001, contra ~US$ 0,0017 do `gemini-2.5-flash`.
+**Claude Haiku 5.5 (resumo)** — preço oficial conferido em 19/10/2026 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing); depois disso o backend confere `claude.com/pricing` todo dia e usa o preço de cada dia — ver "Claude" na seção 5): US$ 0,10 de entrada e US$ 0,50 de saída por 1M de tokens quando o prompt tem até 100 mil tokens. Acima disso a chamada inteira custa US$ 0,50 / US$ 2,50 e é gravada como `claude-haiku-5-5-acima-100k`, para o custo continuar exato. Os tokens vêm do `usage` da própria resposta; o thinking já está somado na saída. O uso é gravado antes de validar a resposta, porque a Anthropic cobra também as respostas recusadas ou cortadas. No teste de 19/10/2026 um resumo saiu por ~US$ 0,001, contra ~US$ 0,0017 do `gemini-2.5-flash`.
 
 ### 7.2 Estimativa por ligação (ordem de grandeza)
 
