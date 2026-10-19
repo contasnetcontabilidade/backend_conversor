@@ -35,6 +35,8 @@ const PRECOS: Record<string, Preco> = {
   // em 19/10/2026. A tabela depende do tamanho do prompt: acima de 100 mil tokens
   // de entrada a chamada inteira custa 5x — o claude.ts grava essas chamadas com
   // o nome "-acima-100k". O thinking ja vem somado nos tokens de saida.
+  // Depois disso o preco e conferido no site todo dia (precoClaude.ts); estes
+  // valores so valem para os dias antes da primeira leitura do site.
   "claude-haiku-5-5": { input: 0.1, output: 0.5 },
   "claude-haiku-5-5-acima-100k": { input: 0.5, output: 2.5 },
 };
@@ -64,16 +66,59 @@ export function ehModeloPorMinuto(model: string): boolean {
   return /^deepgram/i.test(model || "");
 }
 
+// Preco do Claude Haiku 5.5 lido do site (USD / 1M tokens), nas duas faixas de
+// tamanho de prompt.
+export interface PrecoClaude {
+  input: number;
+  output: number;
+  inputLongo: number; // prompt acima de 100 mil tokens
+  outputLongo: number;
+}
+// Uma entrada por MUDANCA de preco, ordenada por `desde` (AAAA-MM-DD). Vale do
+// dia `desde` ate a proxima entrada.
+export type HistoricoPrecoClaude = Array<PrecoClaude & { desde: string }>;
+
+// Preco do Claude vigente em `dia`. O custo de cada dia usa o preco daquele dia
+// (decisao do dono, 19/10/2026): igual a fatura da Anthropic, uma mudanca de
+// preco nao reescreve os meses passados. null = antes da primeira leitura do
+// site, ou modelo que nao e o Haiku — vale a tabela PRECOS.
+export function precoClaudeNoDia(
+  model: string,
+  dia: string,
+  historico: HistoricoPrecoClaude,
+): Preco | null {
+  const longo = model === "claude-haiku-5-5-acima-100k";
+  if (model !== "claude-haiku-5-5" && !longo) return null;
+  let vigente: (PrecoClaude & { desde: string }) | null = null;
+  for (const h of historico) if (h.desde <= dia) vigente = h;
+  if (!vigente) return null;
+  return longo
+    ? { input: vigente.inputLongo, output: vigente.outputLongo }
+    : { input: vigente.input, output: vigente.output };
+}
+
 // Custo de uma linha de uso, escolhendo a base certa: Deepgram = segundos de
-// audio; demais (Gemini) = tokens.
+// audio; demais = tokens. Com `historicoClaude`, o Claude usa o preco do `dia`
+// (sem dia = hoje, UTC como as chaves de uso).
 export function custoLinha(
   model: string,
   inputTokens: number,
   outputTokens: number,
   audioSec: number,
+  opts: { dia?: string; historicoClaude?: HistoricoPrecoClaude } = {},
 ): number {
   if (ehModeloPorMinuto(model)) {
     return (Math.max(0, audioSec) / 60) * DEEPGRAM_USD_POR_MIN;
+  }
+  const doDia = opts.historicoClaude
+    ? precoClaudeNoDia(
+        model,
+        opts.dia || new Date().toISOString().slice(0, 10),
+        opts.historicoClaude,
+      )
+    : null;
+  if (doDia) {
+    return (inputTokens / 1e6) * doDia.input + (outputTokens / 1e6) * doDia.output;
   }
   return custoUsd(model, inputTokens, outputTokens);
 }
