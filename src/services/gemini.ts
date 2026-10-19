@@ -12,6 +12,8 @@ import {
 } from "../utils/datas";
 import { recordUsage } from "./usage";
 import { thinkingConfigFor } from "./geminiThinking";
+import { claudeConfigurado, gerarJsonClaude } from "./claude";
+import { registrarErro } from "./erros";
 
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
@@ -165,7 +167,9 @@ function resolveSrtPath(input: ResumoInput): string {
   return `${audioPath}.srt`;
 }
 
-function parseResumoJson(rawText: string): ResumoJson {
+// `provedor` so entra nas mensagens: o mesmo parse valida o Claude e o Gemini,
+// e o /admin/erros precisa dizer qual dos dois devolveu a resposta ruim.
+function parseResumoJson(rawText: string, provedor = "Gemini"): ResumoJson {
   // Alguns modelos podem devolver JSON em bloco markdown.
   // Aqui removemos o bloco para fazer parse limpo.
   const normalized = rawText.trim();
@@ -180,7 +184,7 @@ function parseResumoJson(rawText: string): ResumoJson {
     throw new AppError({
       statusCode: 502,
       code: "GEMINI_INVALID_JSON",
-      message: "Gemini retornou JSON invalido.",
+      message: `${provedor} retornou JSON invalido.`,
       details: { cause: getErrorMessage(error), raw: rawText.slice(0, 500) },
     });
   }
@@ -189,7 +193,7 @@ function parseResumoJson(rawText: string): ResumoJson {
     throw new AppError({
       statusCode: 502,
       code: "GEMINI_INVALID_PAYLOAD",
-      message: "Gemini retornou payload inesperado.",
+      message: `${provedor} retornou payload inesperado.`,
       details: { raw: rawText.slice(0, 500) },
     });
   }
@@ -234,7 +238,7 @@ function parseResumoJson(rawText: string): ResumoJson {
     throw new AppError({
       statusCode: 502,
       code: "GEMINI_MISSING_FIELDS",
-      message: "Gemini retornou JSON sem o campo resumo.",
+      message: `${provedor} retornou JSON sem o campo resumo.`,
       details: { raw: rawText.slice(0, 500) },
     });
   }
@@ -644,6 +648,8 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         .join("\n")}`
     : "";
 
+  // O modelo que o desktop manda (seletor "geminiModel") so vale para o Gemini
+  // de reserva: o Claude e sempre o mesmo (ver claude.ts).
   const modelUsado = input.model?.trim() || DEFAULT_GEMINI_MODEL;
 
   const responseJsonSchema = {
@@ -707,6 +713,60 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
     },
   };
 
+  const conteudo = `${prompt}${blocoAssuntos}${blocoSetores}\n\n${
+    origem === "chat"
+      ? "CONVERSA (GOOGLE CHAT)"
+      : origem === "email"
+        ? "E-MAIL"
+        : "TRANSCRICAO"
+  }:\n${transcricao}`;
+
+  // O Claude Haiku 5.5 faz o resumo; o Gemini abaixo e a RESERVA (decisao de
+  // 19/10/2026): se a Anthropic falhar — fora do ar, chave recusada, credito
+  // esgotado — o chamado nao fica sem resumo. O motivo vai para o /admin/erros:
+  // sem isso, o credito acabando viraria "tudo no Gemini" sem ninguem ver o porque.
+  if (claudeConfigurado()) {
+    try {
+      const r = await gerarJsonClaude(conteudo, responseJsonSchema);
+      // Grava ANTES de validar: a Anthropic cobra os tokens mesmo quando a
+      // resposta foi recusada, cortada ou veio sem resumo.
+      await recordUsage({
+        model: r.modeloCusto,
+        op: "resumo",
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        ramal: input.ramal,
+        usuario: input.usuario,
+        fonte: input.fonte,
+        itemId: input.itemId,
+      });
+      if (r.stopReason === "refusal" || r.stopReason === "max_tokens") {
+        throw new AppError({
+          statusCode: 502,
+          code: "CLAUDE_INCOMPLETO",
+          message: `Claude encerrou sem resposta completa (${r.stopReason}).`,
+        });
+      }
+      return { srtPath, resumo: parseResumoJson(r.text, "Claude") };
+    } catch (error) {
+      // So a mensagem: nunca o texto da resposta (pode ter conteudo do cliente).
+      const motivo = getErrorMessage(error);
+      console.warn(`[claude] resumo falhou, usando o Gemini de reserva: ${motivo}`);
+      await registrarErro({
+        ts: new Date().toISOString(),
+        origem: "backend",
+        tipo: "resumo",
+        mensagem: `resumo no Claude falhou, Gemini assumiu — ${motivo}`.slice(
+          0,
+          500,
+        ),
+        contexto: `${input.fonte || origem}:resumo:claude`,
+        ramal: input.ramal,
+        usuario: input.usuario,
+      }).catch(() => undefined);
+    }
+  }
+
   // Retry robusto: queremos SEMPRE gerar o resumo quando a transcricao tem
   // conteudo, mesmo que demore um pouco mais. 1a tentativa com thinking desligado
   // (barato); as seguintes com o thinking padrao (mais confiavel). Re-tenta em
@@ -717,13 +777,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
     try {
       const response = await getGeminiClient().models.generateContent({
         model: modelUsado,
-        contents: `${prompt}${blocoAssuntos}${blocoSetores}\n\n${
-          origem === "chat"
-            ? "CONVERSA (GOOGLE CHAT)"
-            : origem === "email"
-              ? "E-MAIL"
-              : "TRANSCRICAO"
-        }:\n${transcricao}`,
+        contents: conteudo,
         config: {
           thinkingConfig:
             tentativa === 1 ? thinkingConfigFor(modelUsado) : undefined,
