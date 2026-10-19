@@ -2,6 +2,7 @@ import { Redis } from "@upstash/redis";
 import { getErrorMessage } from "../lib/errors";
 import { getUsoDoItem } from "./usage";
 import { custoLinha } from "./pricing";
+import { lerHistoricoPrecoClaude } from "./precoClaude";
 import { buscarClientePorId, buscarTipos } from "./suite360";
 
 // Custo de IA por CHAMADO criado — o que permite responder "quanto custou
@@ -94,6 +95,9 @@ export async function registrarCustoChamado(params: {
     // cache, ou chamado criado sem passar pela IA). Nao inventa linha zerada.
     if (!linhas.length) return;
 
+    // O custo fica gravado nesta linha: tem de ser o preco de HOJE, o mesmo da
+    // fatura, e nao o da tabela do codigo (ver precoClaude.ts).
+    const historicoClaude = await lerHistoricoPrecoClaude();
     const total = linhas.reduce(
       (acc, l) => {
         acc.inputTokens += l.inputTokens;
@@ -105,6 +109,7 @@ export async function registrarCustoChamado(params: {
           l.inputTokens,
           l.outputTokens,
           l.audioSec,
+          { historicoClaude },
         );
         return acc;
       },
