@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { agendarConferenciaPrecoClaude } from "./precoClaude";
 
 // Modelo FIXO por decisao do dono (19/10/2026): sempre o Claude Haiku 5.5, o
 // Claude mais barato. Nao e configuravel por env de proposito — trocar de
@@ -66,6 +67,9 @@ export async function gerarJsonClaude(
     },
     messages: [{ role: "user", content: prompt }],
   });
+  // Quem usa o Claude confere o preco no site (no maximo 1x/dia): assim o
+  // preco acompanha o site mesmo nos dias em que ninguem abre o painel.
+  agendarConferenciaPrecoClaude();
 
   // Le por tipo, nao por posicao: com thinking ligado a resposta pode comecar
   // com blocos "thinking" antes do texto.
