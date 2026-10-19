@@ -1,8 +1,8 @@
 # Instruções do projeto (humano ou IA)
 
 **Backend do Assistente de Reuniões.** API HTTP que recebe o áudio, transcreve
-com **Whisper** e resume com **Gemini**. É o par do aplicativo desktop
-(`conversor_WAV_txt`).
+com **Whisper** e resume com **Claude Haiku 5.5** (Gemini de reserva). É o par
+do aplicativo desktop (`conversor_WAV_txt`).
 
 Há um `DOCS.md` neste repositório — leia-o antes de mexer.
 
