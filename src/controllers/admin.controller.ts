@@ -15,6 +15,13 @@ import {
 } from "../services/erros";
 import { PROMPT_VERSION } from "../services/gemini";
 import { listarCustoChamados } from "../services/custoChamados";
+import {
+  conferirPrecoClaudeSeVencido,
+  lerEstadoPrecoClaude,
+  lerHistoricoPrecoClaude,
+  precoClaudeVigente,
+} from "../services/precoClaude";
+import { getErrorMessage } from "../lib/errors";
 
 function senhaAdmin(): string {
   return process.env.ADMIN_PASSWORD || "Contas@2074";
@@ -170,27 +177,52 @@ export async function adminUsoController(req: Request, res: Response) {
     return;
   }
 
-  const [relatorio, cotacao, deepgramSaldoUsd, chamados] = await Promise.all([
+  // Abrir o painel tambem confere o preco do Claude no site (no maximo 1x/dia),
+  // ANTES de ler o historico, para o calculo ja sair com o preco de hoje.
+  await conferirPrecoClaudeSeVencido().catch((error) =>
+    console.warn("[admin] conferencia do preco do Claude falhou:", getErrorMessage(error)),
+  );
+  const [
+    relatorio,
+    cotacao,
+    deepgramSaldoUsd,
+    chamados,
+    historicoClaude,
+    estadoPrecoClaude,
+  ] = await Promise.all([
     getRelatorioUso(),
     getUsdBrl(),
     getSaldoDeepgramUsd(), // null se a key nao tiver billing:read
     listarCustoChamados().catch(() => []), // custo por cliente/assunto
+    lerHistoricoPrecoClaude(),
+    lerEstadoPrecoClaude(),
   ]);
 
-  // Agregado por modelo+operacao (todo o periodo), com custo.
+  // Detalhe por dia+modelo+op, ja com custo por linha (precificado por modelo).
+  // O frontend agrega/filtra por periodo em cima disto. O Claude usa o preco
+  // vigente em cada dia (historico lido do site).
+  const porDiaModelo = relatorio.porDiaModelo.map((d) => ({
+    ...d,
+    custoUsd: custoLinha(d.model, d.inputTokens, d.outputTokens, d.audioSec, {
+      dia: d.dia,
+      historicoClaude,
+    }),
+  }));
+
+  // Agregado por modelo+operacao (todo o periodo). Soma o custo ja calculado
+  // dia a dia: com o preco mudando no tempo, precificar o total do periodo com
+  // um preco so daria errado.
+  const custoPorModeloOp = new Map<string, number>();
+  for (const d of porDiaModelo) {
+    const chave = `${d.model}::${d.op}`;
+    custoPorModeloOp.set(chave, (custoPorModeloOp.get(chave) || 0) + d.custoUsd);
+  }
   const linhas = relatorio.linhas
     .map((l) => ({
       ...l,
-      custoUsd: custoLinha(l.model, l.inputTokens, l.outputTokens, l.audioSec),
+      custoUsd: custoPorModeloOp.get(`${l.model}::${l.op}`) || 0,
     }))
     .sort((a, b) => b.custoUsd - a.custoUsd);
-
-  // Detalhe por dia+modelo+op, ja com custo por linha (precificado por modelo).
-  // O frontend agrega/filtra por periodo em cima disto.
-  const porDiaModelo = relatorio.porDiaModelo.map((d) => ({
-    ...d,
-    custoUsd: custoLinha(d.model, d.inputTokens, d.outputTokens, d.audioSec),
-  }));
 
   // Detalhe por dia+ramal+op (colapsa o modelo apos precificar).
   const ramalMap = new Map<
@@ -226,7 +258,10 @@ export async function adminUsoController(req: Request, res: Response) {
     cur.outputTokens += it.outputTokens;
     cur.calls += it.calls;
     cur.audioSec += it.audioSec;
-    cur.custoUsd += custoLinha(it.model, it.inputTokens, it.outputTokens, it.audioSec);
+    cur.custoUsd += custoLinha(it.model, it.inputTokens, it.outputTokens, it.audioSec, {
+      dia: it.dia,
+      historicoClaude,
+    });
     if (!cur.usuario && it.usuario) cur.usuario = it.usuario;
     ramalMap.set(chave, cur);
   }
@@ -265,7 +300,10 @@ export async function adminUsoController(req: Request, res: Response) {
     cur.outputTokens += it.outputTokens;
     cur.calls += it.calls;
     cur.audioSec += it.audioSec;
-    cur.custoUsd += custoLinha(it.model, it.inputTokens, it.outputTokens, it.audioSec);
+    cur.custoUsd += custoLinha(it.model, it.inputTokens, it.outputTokens, it.audioSec, {
+      dia: it.dia,
+      historicoClaude,
+    });
     fonteMap.set(chave, cur);
   }
   const porFonte = Array.from(fonteMap.values());
@@ -305,6 +343,13 @@ export async function adminUsoController(req: Request, res: Response) {
       creditoMensalUsd,
       gastoMesUsd,
       saldoEstimadoUsd: creditoMensalUsd - gastoMesUsd,
+    },
+    // De onde vem o preco do Claude: "site" depois da 1a leitura de
+    // claude.com/pricing; "codigo" antes disso (tabela do pricing.ts).
+    claudePreco: {
+      ...precoClaudeVigente(historicoClaude),
+      fonte: historicoClaude.length ? "site" : "codigo",
+      ...estadoPrecoClaude,
     },
     totais: {
       ...totais,
@@ -1171,7 +1216,21 @@ function render(){
   var cs=DADOS&&DADOS.claudeSaldo;
   if(clSaldo){clSaldo.textContent=cs?("US$ "+cs.saldoEstimadoUsd.toFixed(2).replace(".",",")):"—";
     clSaldo.title=cs?("Estimado: franquia de US$ "+cs.creditoMensalUsd+" menos o gasto em Claude registrado por este backend no mês ("+fmtUSD(cs.gastoMesUsd)+"). Uso da mesma conta fora do backend não entra."):"";}
-  if(clSub)clSub.innerHTML="saldo estimado do mês · "+fmtBRL.format((t.claudeUsd||0)*c)+" no período";
+  // Preco do Claude conferido em claude.com/pricing (1x/dia). Falha de leitura
+  // aparece aqui em destaque: o painel segue no ultimo preco lido.
+  var cp=DADOS&&DADOS.claudePreco;
+  var diaMes=function(iso){return new Date(iso).toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})};
+  var precoTx="";
+  if(cp){
+    if(cp.falhaDesde)precoTx=' · <span class="delta up">preço não conferido desde '+diaMes(cp.falhaDesde)+'</span>';
+    else if(cp.verificadoEm)precoTx=" · preço conferido "+diaMes(cp.verificadoEm);
+    else precoTx=" · preço da tabela do código";
+    if(clSaldo)clSaldo.title+="\\n\\nPreço: US$ "+cp.input+" entrada / US$ "+cp.output+" saída por milhão de tokens (prompt acima de 100 mil: "+cp.inputLongo+" / "+cp.outputLongo+"). "+
+      (cp.fonte==="site"?"Lido de claude.com/pricing":"Tabela do código (site ainda não lido)")+
+      (cp.verificadoEm?", conferido em "+new Date(cp.verificadoEm).toLocaleString("pt-BR")+".":".")+
+      (cp.falhaDesde?"\\nLeitura do site falhando desde "+new Date(cp.falhaDesde).toLocaleString("pt-BR")+": "+(cp.motivoFalha||""):"");
+  }
+  if(clSub)clSub.innerHTML="saldo estimado do mês · "+fmtBRL.format((t.claudeUsd||0)*c)+" no período"+precoTx;
 
   // Projecao do mes (#4) — media por DIA UTIL decorrido x dias uteis do mes.
   var mesDe=primeiroDiaMes(),mesAte=hojeUTC();
