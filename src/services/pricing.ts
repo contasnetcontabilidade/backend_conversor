@@ -13,8 +13,8 @@ function getRedisFx(): Redis | null {
   return redisFx;
 }
 
-// Precos do Gemini em USD por 1 milhao de tokens (input/output).
-// ATENCAO: valores de referencia — CONFIRMAR os precos atuais em
+// Precos por modelo em USD por 1 milhao de tokens (input/output).
+// ATENCAO: os do Gemini sao valores de referencia — CONFIRMAR os precos atuais em
 // https://ai.google.dev/gemini-api/docs/pricing e ajustar aqui se mudar.
 export interface Preco {
   input: number; // USD / 1M tokens de entrada
@@ -31,6 +31,12 @@ const PRECOS: Record<string, Preco> = {
   "gemini-1.5-flash-8b": { input: 0.0375, output: 0.15 },
   "gemini-1.5-pro": { input: 1.25, output: 5.0 },
   "gemini-1.0-pro": { input: 0.5, output: 1.5 },
+  // Claude Haiku 5.5, conferido em platform.claude.com/docs/en/about-claude/pricing
+  // em 19/10/2026. A tabela depende do tamanho do prompt: acima de 100 mil tokens
+  // de entrada a chamada inteira custa 5x — o claude.ts grava essas chamadas com
+  // o nome "-acima-100k". O thinking ja vem somado nos tokens de saida.
+  "claude-haiku-5-5": { input: 0.1, output: 0.5 },
+  "claude-haiku-5-5-acima-100k": { input: 0.5, output: 2.5 },
 };
 
 // Preco padrao quando o modelo nao esta na tabela (usa o do 2.5-flash).
