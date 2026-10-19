@@ -11,6 +11,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
     "@google/genai": "^1.47.0",
     "@upstash/redis": "^1.38.0",
     "@vercel/functions": "^3.7.5",
