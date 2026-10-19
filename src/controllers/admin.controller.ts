@@ -285,11 +285,27 @@ export async function adminUsoController(req: Request, res: Response) {
   );
   const custoBrl = totais.custoUsd * cotacao;
 
+  // Saldo do Claude ESTIMADO: a Anthropic nao tem API de saldo, e conta
+  // individual nem acessa a Admin API de custos (testado em 19/10/2026). Entao e
+  // a franquia mensal menos o gasto em Claude que ESTE backend registrou no mes
+  // (UTC, o mesmo dia das chaves de uso). Uso da mesma conta fora daqui nao entra.
+  const creditoMensalUsd =
+    Number(process.env.CLAUDE_CREDITO_MENSAL_USD) || 200;
+  const mesAtual = new Date().toISOString().slice(0, 7);
+  const gastoMesUsd = porDiaModelo
+    .filter((d) => d.dia.startsWith(mesAtual) && /^claude-/.test(d.model))
+    .reduce((s, d) => s + d.custoUsd, 0);
+
   res.status(200).json({
     ok: true,
     configurado: relatorio.configurado,
     cotacao,
     deepgramSaldoUsd, // creditos restantes no Deepgram (null se indisponivel)
+    claudeSaldo: {
+      creditoMensalUsd,
+      gastoMesUsd,
+      saldoEstimadoUsd: creditoMensalUsd - gastoMesUsd,
+    },
     totais: {
       ...totais,
       tokens: totais.inputTokens + totais.outputTokens,
@@ -501,7 +517,7 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
 
   <h1>Custos de Inteligência Artificial</h1>
-  <div class="sub" id="status">Consumo de tokens do Gemini (transcrição + resumo) e custo estimado.</div>
+  <div class="sub" id="status">Consumo de IA (transcrição + resumo) e custo estimado.</div>
 
   <div class="seg" id="nav-view" style="margin:0 0 16px">
     <button data-v="custos" class="on"><i data-lucide="wallet"></i> Custos</button>
@@ -535,6 +551,7 @@ body.win-max .titlebar .ic-restore{display:inline}
     <div class="card"><div class="k"><i data-lucide="hash"></i> Tokens (período)</div><div class="v" id="c-tok">—</div><div class="s" id="c-tok-s"></div></div>
     <div class="card"><div class="k"><i data-lucide="zap"></i> Chamadas de IA</div><div class="v" id="c-calls">—</div><div class="s">transcrição + resumo</div></div>
     <div class="card teal"><div class="k"><i data-lucide="mic"></i> Deepgram</div><div class="v" id="dg-cred">—</div><div class="s" id="dg-cred-s">créditos restantes</div></div>
+    <div class="card brand"><div class="k"><i data-lucide="bot"></i> Claude (resumo)</div><div class="v" id="cl-saldo">—</div><div class="s" id="cl-saldo-s">saldo estimado do mês</div></div>
   </div>
 
   <div class="panel">
@@ -843,9 +860,10 @@ function ligacoesNoPeriodo(de,ate){
     .filter(function(r){return r.fonte==="ligacao"&&r.op==="resumo"})
     .reduce(function(a,r){return a+(r.calls||0)},0);
 }
-function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0,audioSec:0,deepgramUsd:0};
+function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0,audioSec:0,deepgramUsd:0,claudeUsd:0};
   rows.forEach(function(r){t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;t.audioSec+=r.audioSec||0;
     if(/^deepgram/i.test(r.model||""))t.deepgramUsd+=r.custoUsd;
+    if(/^claude-/i.test(r.model||""))t.claudeUsd+=r.custoUsd;
     if(r.op==="resumo"){t.ligacoes+=r.calls;t.resumoUsd+=r.custoUsd}if(r.op==="transcricao")t.transcUsd+=r.custoUsd});
   return t;}
 function porDiaAgg(rows){var m={};
@@ -872,7 +890,7 @@ async function carregar(){
   document.getElementById("app").classList.remove("hidden");
   if(CAMBIO==null){var ci=document.getElementById("cambio");if(ci&&!ci.value)ci.value=Number(d.cotacao||0).toFixed(2);}
   if(!d.configurado){document.getElementById("status").textContent="Storage (Upstash) ainda não configurado — os contadores começam a somar após configurar.";}
-  else{document.getElementById("status").textContent="Consumo de tokens do Gemini (transcrição + resumo) e custo estimado.";}
+  else{document.getElementById("status").textContent="Consumo de IA (transcrição + resumo) e custo estimado.";}
   var agora=new Date();
   document.getElementById("atualizado").textContent="atualizado "+String(agora.getHours()).padStart(2,"0")+":"+String(agora.getMinutes()).padStart(2,"0");
   render();
@@ -883,9 +901,10 @@ async function carregar(){
 
 // ---- Novidades do painel de custos (changelog proprio, so deste painel) ----
 // Bump PAINEL_NOV_VER quando adicionar novidades -> reaparece 1x ao acessar.
-var PAINEL_NOV_VER="2026-07c";
+var PAINEL_NOV_VER="2026-10a";
 // ic = nome do icone no lucide (mesma biblioteca do app).
 var PAINEL_NOV=[
+  {ic:"bot",tx:"O resumo agora é feito pelo <b>Claude Haiku 5.5</b> (o Gemini fica de reserva). Novo cartão <b>Claude</b> com o <b>saldo estimado do mês</b> — a Anthropic não informa saldo, então é a franquia menos o gasto registrado aqui."},
   {ic:"file-text",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
   {ic:"file-spreadsheet",tx:"Exportação em <b>Excel com abas</b> (uma aba por seção), com números de verdade — dá pra somar e ordenar."},
   {ic:"calendar-days",tx:"Seção <b>Por mês</b>: comparativo mês a mês com variação % em relação ao mês anterior."},
@@ -1145,6 +1164,14 @@ function render(){
   var temSaldo=DADOS&&typeof DADOS.deepgramSaldoUsd==='number';
   if(dgCred)dgCred.textContent=temSaldo?("US$ "+DADOS.deepgramSaldoUsd.toFixed(2).replace(".",",")):"—";
   if(dgSub)dgSub.innerHTML=fmtInt.format(Math.round((t.audioSec||0)/60))+" min · "+fmtBRL.format((t.deepgramUsd||0)*c)+" no período"+(temSaldo?"":" · saldo indisponível");
+
+  // Card do Claude: saldo ESTIMADO do mes (a Anthropic nao tem API de saldo;
+  // o backend calcula franquia - gasto registrado aqui) + uso do periodo.
+  var clSaldo=document.getElementById("cl-saldo"),clSub=document.getElementById("cl-saldo-s");
+  var cs=DADOS&&DADOS.claudeSaldo;
+  if(clSaldo){clSaldo.textContent=cs?("US$ "+cs.saldoEstimadoUsd.toFixed(2).replace(".",",")):"—";
+    clSaldo.title=cs?("Estimado: franquia de US$ "+cs.creditoMensalUsd+" menos o gasto em Claude registrado por este backend no mês ("+fmtUSD(cs.gastoMesUsd)+"). Uso da mesma conta fora do backend não entra."):"";}
+  if(clSub)clSub.innerHTML="saldo estimado do mês · "+fmtBRL.format((t.claudeUsd||0)*c)+" no período";
 
   // Projecao do mes (#4) — media por DIA UTIL decorrido x dias uteis do mes.
   var mesDe=primeiroDiaMes(),mesAte=hojeUTC();
