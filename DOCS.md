@@ -1,6 +1,6 @@
 # Documentação — Backend (`backend_conversor`)
 
-Backend em **Node.js + TypeScript + Express 5**, publicado na **Vercel** (serverless). Ele é o cérebro do sistema: recebe eventos de ligações do **GoTo Connect**, baixa a gravação, **transcreve e resume com o Gemini**, avisa o desktop em **tempo real (Ably)** e cria **chamados no Suite360/SuiteWeb** — sempre com um passo de revisão antes de criar de verdade.
+Backend em **Node.js + TypeScript + Express 5**, publicado na **Vercel** (serverless). Ele é o cérebro do sistema: recebe eventos de ligações do **GoTo Connect**, baixa a gravação, **transcreve**, **resume com o Claude Haiku 5.5** (Gemini de reserva), avisa o desktop em **tempo real (Ably)** e cria **chamados no Suite360/SuiteWeb** — sempre com um passo de revisão antes de criar de verdade.
 
 > Este é o documento mais importante do projeto. O app desktop (`conversor_WAV_txt`) é só a "cara" — quase toda a lógica vive aqui.
 
@@ -143,7 +143,8 @@ src/
 │   └── admin.controller.ts      Painel de custos (/admin e /admin/uso)
 │
 ├── services/
-│   ├── gemini.ts            Resumo estruturado (JSON) + retry + normalização de erro
+│   ├── gemini.ts            Prompt + schema do resumo; Claude primeiro, Gemini de reserva
+│   ├── claude.ts            Chamada ao Claude Haiku 5.5 (JSON estruturado + tokens)
 │   ├── geminiThinking.ts    Config de "thinking" por família de modelo (custo)
 │   ├── transcricao.ts       Transcrição: Whisper local OU Gemini; ffmpeg; retries
 │   ├── gotoAuth.ts          OAuth 2.0 do GoTo (authorize, troca de code, refresh)
@@ -152,7 +153,7 @@ src/
 │   ├── store.ts             Redis/KV (Upstash) + fallback memória; idempotência
 │   ├── suite360.ts          Cliente da API Suite + TODOS os resolvers + criarChamado
 │   ├── usage.ts             Contadores de uso de tokens (por dia/modelo/operação)
-│   └── pricing.ts           Tabela de preço do Gemini (USD) + cotação USD→BRL
+│   └── pricing.ts           Tabela de preço (Gemini, Claude, Deepgram) + cotação USD→BRL
 │
 ├── middlewares/
 │   ├── appAuth.ts           Auth por token compartilhado (x-app-token)
@@ -250,9 +251,16 @@ src/
 - Guarda: tokens/canal/accountKey do GoTo, fila de eventos, flags "chamado aberto", **registros e locks de idempotência** e contadores de uso de tokens.
 - Sem storage → **fallback em memória volátil** (não persiste entre invocações serverless). Ok para dev local; **inaceitável em produção**.
 
+### Claude (`@anthropic-ai/sdk`)
+
+- Chave `ANTHROPIC_API_KEY`. Com ela, o **resumo** é feito pelo **Claude Haiku 5.5** (`claude-haiku-5-5`, fixo no código por decisão do dono — o Claude mais barato), com o mesmo prompt e o mesmo schema JSON do Gemini, esforço `low`. Sem a chave, o resumo fica todo no Gemini (é o rollback, sem deploy).
+- Se o Claude falhar (fora do ar, chave recusada, crédito esgotado), o **Gemini assume** aquele resumo e o motivo vai para o `/admin/erros`.
+- **O Claude não transcreve áudio**: a API só aceita texto, imagem e PDF (testado em 19/10/2026). A transcrição continua no Deepgram/Gemini.
+- **A Anthropic não informa saldo por API** (e conta individual não acessa a Admin API de custos). O cartão "Claude" do painel mostra um saldo **estimado**: `CLAUDE_CREDITO_MENSAL_USD` menos o gasto em Claude registrado no mês.
+
 ### Gemini (`@google/genai`)
 
-- Chave `GEMINI_API_KEY` (ou `GOOGLE_API_KEY`). Usado para **transcrição** (upload do áudio + `generateContent`) e **resumo** (`generateContent` com schema JSON forçado).
+- Chave `GEMINI_API_KEY` (ou `GOOGLE_API_KEY`). Usado para **transcrição** (upload do áudio + `generateContent`) e como **reserva do resumo** (`generateContent` com schema JSON forçado) quando o Claude falha ou não está configurado.
 - Custo do "thinking" é minimizado via `geminiThinking.ts`. O uso de tokens é gravado no Redis e precificado em `pricing.ts` (tabela USD + cotação USD→BRL com cache de 6h; fallback `GEMINI_USD_BRL`).
 
 ### Suite360 / SuiteWeb
@@ -446,6 +454,8 @@ Valores em **USD por 1 milhão de tokens**, exatamente como estão no código (`
 >
 > A fórmula usada (`custoUsd`): `custo = (tokens_entrada/1M × preço_entrada) + (tokens_saída/1M × preço_saída)`.
 
+**Claude Haiku 5.5 (resumo)** — preço oficial conferido em 19/10/2026 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)): US$ 0,10 de entrada e US$ 0,50 de saída por 1M de tokens quando o prompt tem até 100 mil tokens. Acima disso a chamada inteira custa US$ 0,50 / US$ 2,50 e é gravada como `claude-haiku-5-5-acima-100k`, para o custo continuar exato. Os tokens vêm do `usage` da própria resposta; o thinking já está somado na saída. O uso é gravado antes de validar a resposta, porque a Anthropic cobra também as respostas recusadas ou cortadas. No teste de 19/10/2026 um resumo saiu por ~US$ 0,001, contra ~US$ 0,0017 do `gemini-2.5-flash`.
+
 ### 7.2 Estimativa por ligação (ordem de grandeza)
 
 Uma ligação gera **duas** chamadas ao Gemini: transcrever o áudio e resumir a transcrição. O áudio é tokenizado a **~32 tokens por segundo** (referência do Gemini). Exemplo para uma **ligação de ~5 minutos** com o modelo padrão `gemini-2.5-flash`:
@@ -498,11 +508,18 @@ Hoje, no volume atual, quase tudo cabe na **faixa gratuita**. A tabela abaixo mo
 >
 > Legenda: **🔒 = segredo** (nunca commitar/expor) · **Obrig.** = quebra sem ela · **Opc.** = tem default no código.
 
+### IA / Claude
+
+| Chave                         | Para que serve                                                                                          | Obrig./Opc. (default)                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `ANTHROPIC_API_KEY` 🔒        | Chave da Anthropic. Com ela o **resumo** é feito pelo Claude Haiku 5.5 e o Gemini vira reserva.          | Opc. — vazia = resumo só no Gemini.                    |
+| `CLAUDE_CREDITO_MENSAL_USD`   | Franquia mensal de crédito da Anthropic, usada no **saldo estimado** do cartão "Claude" do `/admin`.    | Opc. (`200`)                                           |
+
 ### IA / Gemini
 
 | Chave                                        | Para que serve                                                                    | Obrig./Opc. (default)                                                                     |
 | -------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `GEMINI_API_KEY` 🔒                        | Chave da API Gemini (transcrição + resumo).                                     | **Obrig.** — sem ela, toda chamada ao Gemini falha com `GEMINI_API_KEY_MISSING`. |
+| `GEMINI_API_KEY` 🔒                        | Chave da API Gemini (transcrição + reserva do resumo).                          | **Obrig.** — sem ela, toda chamada ao Gemini falha com `GEMINI_API_KEY_MISSING`. |
 | `GOOGLE_API_KEY` 🔒                        | Alias de fallback: usado se`GEMINI_API_KEY` estiver vazia.                      | Opc.                                                                                      |
 | `GEMINI_MODEL`                             | Modelo do Gemini para o**resumo**.                                          | Opc. (`gemini-2.5-flash`)                                                               |
 | `GEMINI_TRANSCRIPTION_MODEL`               | Modelo do Gemini para a**transcrição** (2.5-pro = mais preciso com nomes). | Opc. (`gemini-2.5-pro`)                                                               |
