@@ -5,6 +5,7 @@ import { getSaldoDeepgramUsd } from "../services/deepgramSpeech";
 import {
   registrarFeedback,
   listarFeedback,
+  modeloDoResumo,
   type FeedbackEntry,
 } from "../services/feedback";
 import {
@@ -57,6 +58,16 @@ export async function feedbackController(req: Request, res: Response) {
       : Math.round(Math.min(Math.max(n, 0), 1) * 100) / 100;
   };
   const ratingRaw = str(b.rating);
+  // O "modelo" que o app manda e o do seletor, nao o que fez o resumo; vale o
+  // que o backend anotou ao gerar este texto (feedback.ts). Sem anotacao
+  // (feedback explicito, resumo antigo) fica vazio — melhor que um modelo errado.
+  const descTextoIa = str(b.descTextoIa).slice(0, 8000) || undefined;
+  const modeloReal = descTextoIa
+    ? await modeloDoResumo(descTextoIa).catch((error) => {
+        console.warn("[admin:feedback] falha ao achar o modelo:", getErrorMessage(error));
+        return undefined;
+      })
+    : undefined;
   const dv = (
     b.divergencias && typeof b.divergencias === "object" ? b.divergencias : {}
   ) as Record<string, unknown>;
@@ -67,7 +78,7 @@ export async function feedbackController(req: Request, res: Response) {
     origem: str(b.origem).slice(0, 20) || "ligacao",
     id: str(b.id).slice(0, 120),
     promptVersion: PROMPT_VERSION, // carimbo do prompt vigente (autoritativo)
-    modelo: str(b.modelo).slice(0, 60) || undefined,
+    modelo: modeloReal,
     ramal: str(b.ramal).slice(0, 40) || undefined,
     usuario: str(b.usuario).slice(0, 120) || undefined,
     rating: ratingRaw === "up" || ratingRaw === "down" ? ratingRaw : null,
@@ -95,7 +106,7 @@ export async function feedbackController(req: Request, res: Response) {
     descPalavrasMantidas: fracaoOpc(b.descPalavrasMantidas),
     // Teto folgado: o resumo (resumo + pontos + providencias) fica em ~1-3 mil
     // caracteres; o corte so existe para um corpo anormal nao inchar a lista.
-    descTextoIa: str(b.descTextoIa).slice(0, 8000) || undefined,
+    descTextoIa,
     descTextoFinal: str(b.descTextoFinal).slice(0, 8000) || undefined,
     iaOk: b.iaOk === undefined ? undefined : bool(b.iaOk),
   };
