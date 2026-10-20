@@ -41,6 +41,7 @@ import {
   isDryRun,
   montarDescricaoChat,
   resolverAssuntoPorTexto,
+  resolverClienteInterno,
   resolverClientePorMencao,
   resolverOrigemChat,
   type AnexoChamado,
@@ -580,9 +581,24 @@ export async function chatPreviewController(req: Request, res: Response) {
     resumo.cliente_mencionado,
     resumo.cliente_alternativas,
   );
+  // Chat INTERNO sem empresa citada (colega pedindo ajuda ao suporte) leva o
+  // cliente do escritorio, como a ligacao interna. No feedback de 22/09 a 20/10,
+  // 194 chats chegaram sem cliente e a pessoa escolhia na mao; ao menos 35 eram
+  // so entre colegas. Com empresa citada (mesmo sem casar no cadastro), nao
+  // chuta: e melhor vazio do que o escritorio no lugar do cliente.
+  const internoSemEmpresa =
+    !porMencao &&
+    resumo.assunto_interno === "sim" &&
+    !(resumo.cliente_mencionado?.nome || "").trim();
   const cliente = porMencao
     ? { status: "encontrado" as const, cliente: porMencao, via: "ia_mencao" }
-    : { status: "nao_encontrado" as const };
+    : internoSemEmpresa
+      ? {
+          status: "encontrado" as const,
+          cliente: await resolverClienteInterno(),
+          via: "padrao_interno",
+        }
+      : { status: "nao_encontrado" as const };
   const clienteEncontrado =
     cliente.status === "encontrado" ? cliente.cliente : undefined;
 
