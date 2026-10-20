@@ -12,8 +12,17 @@ import {
 } from "../utils/datas";
 import { recordUsage } from "./usage";
 import { thinkingConfigFor } from "./geminiThinking";
-import { claudeConfigurado, gerarJsonClaude } from "./claude";
+import { CLAUDE_MODEL, claudeConfigurado, gerarJsonClaude } from "./claude";
 import { registrarErro } from "./erros";
+import { registrarModeloDoResumo } from "./feedback";
+
+// Guarda qual modelo escreveu o resumo, para o feedback saber (ver feedback.ts).
+// Best-effort: sem isso o feedback so fica sem o modelo; o resumo segue.
+async function anotarModelo(textoResumo: string, modelo: string) {
+  await registrarModeloDoResumo(textoResumo, modelo).catch((error) =>
+    console.warn("[feedback] falha ao anotar o modelo do resumo:", getErrorMessage(error)),
+  );
+}
 
 const DEFAULT_AUDIO_FILE =
   process.env.DEFAULT_AUDIO_FILE ?? "audio_reuniao.WAV";
@@ -782,7 +791,9 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
           message: `Claude encerrou sem resposta completa (${r.stopReason}).`,
         });
       }
-      return { srtPath, resumo: parseResumoJson(r.text, "Claude") };
+      const resumo = parseResumoJson(r.text, "Claude");
+      await anotarModelo(resumo.resumo, CLAUDE_MODEL);
+      return { srtPath, resumo };
     } catch (error) {
       // So a mensagem: nunca o texto da resposta (pode ter conteudo do cliente).
       const motivo = getErrorMessage(error);
@@ -842,6 +853,7 @@ Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
         fonte: input.fonte,
         itemId: input.itemId,
       });
+      await anotarModelo(resumo.resumo, modelUsado);
 
       return { srtPath, resumo };
     } catch (error) {
