@@ -27,7 +27,10 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // olhe so o feedback do prompt ATUAL (o feedback antigo e do prompt anterior e
 // provavelmente ja foi tratado). Use a data da alteracao (AAAA-MM-DD).
 // ============================================================================
-export const PROMPT_VERSION = "2026-10-02";
+// 2026-10-20: regras de 02/10 (suporte que assumiu a acao = resolvido; promessa
+// nao e entrega) + ATUALIZACAO DO SUITEWEB. Tambem marca o inicio do feedback
+// da era Claude Haiku 5.5 (o resumo saiu do Gemini em 19/10).
+export const PROMPT_VERSION = "2026-10-20";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -612,6 +615,10 @@ ${blocoSuporteProvidencia}- cliente_mencionado: objeto { nome: string, cnpj: str
       generico.
     * "DUVIDAS GERAIS DO CLIENTE" e "PROCESSOS INTERNOS" sao a ultima opcao: so quando nada mais
       especifico servir.
+    * Erro, falha ou ajuste no PROPRIO SuiteWeb (o sistema de gestao do escritorio: tela que nao
+      salva, relatorio que traz dado errado, card, permissao ou modulo novo ou que mudou depois de
+      uma atualizacao) e "ATUALIZACAO DO SUITEWEB", quando ele estiver na lista. Ajudar alguem a USAR
+      ou ACESSAR o Suite (senha, login, onde fica uma tela) continua sendo suporte a sistemas.
 - competencia: string "AAAA-MM" ou "". SO quando o conteudo indicar explicitamente o mes/ano de
   REFERENCIA da obrigacao ("folha de julho", "DAS 08/2026", "competencia 07/25", "faturamento de
   junho"). NAO use a data de hoje como competencia: sem mencao clara, devolva "".
