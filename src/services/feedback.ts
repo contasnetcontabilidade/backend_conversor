@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { Redis } from "@upstash/redis";
 
 // Feedback dos resumos/decisoes da IA, para refinar o prompt com DADO REAL.
@@ -31,6 +32,9 @@ export interface FeedbackEntry {
   origem: string; // "ligacao" | "email" | "resumo" | "chat"
   id: string; // conversationSpaceId / messageId / "" (gravador)
   promptVersion?: string; // versao do prompt vigente quando o feedback foi dado
+  // Modelo que ESCREVEU o resumo, achado pelo texto (modeloDoResumo). Ate
+  // 20/10/2026 era o valor do seletor "Modelo Gemini" do app — errado desde que
+  // o Claude assumiu o resumo em 19/10. Vazio = nao deu para saber.
   modelo?: string;
   ramal?: string;
   usuario?: string;
@@ -113,4 +117,47 @@ export async function listarFeedback(limit?: number): Promise<FeedbackEntry[]> {
       }
     })
     .filter((e): e is FeedbackEntry => e !== null);
+}
+
+// ---- Qual modelo escreveu cada resumo ----
+// O app manda no feedback o valor do seletor "Modelo Gemini", nao o modelo que
+// fez o resumo. E o id do feedback nao bate com a chave de uso de IA no chat
+// (o app usa "spaces/X#msg1..msgN", o backend um hash da selecao) nem sempre no
+// e-mail (thread x mensagem). O que volta IGUAL e o texto: o app monta
+// descTextoIa como "Resumo:\n<resumo da IA>\n\nPontos principais:...". Entao o
+// backend guarda "este texto foi escrito por tal modelo" ao gerar o resumo e
+// procura pelo mesmo texto quando o feedback chega — sem precisar de release.
+const MODELO_TTL_SEG = 30 * 24 * 3600; // o feedback chega minutos depois
+const memModelo = new Map<string, string>();
+const chaveModelo = (textoResumo: string) =>
+  "feedback:modelo:" +
+  createHash("sha1")
+    .update(textoResumo.replace(/\s+/g, " ").trim())
+    .digest("hex");
+
+export async function registrarModeloDoResumo(
+  textoResumo: string,
+  modelo: string,
+): Promise<void> {
+  if (!textoResumo.trim() || !modelo) return;
+  const chave = chaveModelo(textoResumo);
+  const r = getRedis();
+  if (!r) {
+    memModelo.set(chave, modelo);
+    return;
+  }
+  await r.set(chave, modelo, { ex: MODELO_TTL_SEG });
+}
+
+// Acha o modelo pelo trecho "Resumo:" do descTextoIa. undefined quando o texto
+// nao tem esse formato ou o resumo nao foi registrado (anterior a 20/10/2026).
+export async function modeloDoResumo(
+  descTextoIa: string,
+): Promise<string | undefined> {
+  const m = /^Resumo:\n([\s\S]*?)\n\nPontos principais:/.exec(descTextoIa);
+  if (!m || !m[1].trim()) return undefined;
+  const chave = chaveModelo(m[1]);
+  const r = getRedis();
+  if (!r) return memModelo.get(chave);
+  return (await r.get<string>(chave)) || undefined;
 }
