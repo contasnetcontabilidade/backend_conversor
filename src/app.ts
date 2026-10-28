@@ -3,6 +3,7 @@ import { errorHandler } from "./middlewares/errorHandler";
 import { notFoundHandler } from "./middlewares/notFound";
 import { requestLogger } from "./middlewares/requestLogger";
 import { apiRouter } from "./routes/api.routes";
+import { addonRouter } from "./routes/addon.routes";
 
 export const app = express();
 
@@ -30,6 +31,10 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "5mb" }));
 app.use(requestLogger);
+
+// Painel do Gmail: ANTES do apiRouter, para o appAuth (x-app-token) nao pegar
+// os pedidos do Google. A autenticacao dele e propria — ver addon.routes.ts.
+app.use("/api/addon", addonRouter);
 
 // Main API routes.
 app.use(apiRouter);
