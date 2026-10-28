@@ -27,6 +27,42 @@ export interface ItemLista {
 export interface Secao {
   titulo?: string;
   widgets: Widget[];
+  // Secao recolhida, mostrando so os N primeiros widgets. So para secao SEM
+  // campo de formulario: o que fica escondido nao e garantido no evento.
+  recolhida?: number;
+}
+
+// Cor de botao (0..1 por canal, como o Google espera).
+export interface Cor {
+  red: number;
+  green: number;
+  blue: number;
+}
+
+export interface Botao {
+  texto: string;
+  acao: Acao;
+  cor?: Cor;
+}
+
+// Icones prontos do Google (knownIcon). So os que o painel usa.
+export type Icone =
+  | "EMAIL"
+  | "PERSON"
+  | "MULTIPLE_PEOPLE"
+  | "BOOKMARK"
+  | "CLOCK"
+  | "DESCRIPTION"
+  | "STAR"
+  | "STORE"
+  | "CONFIRMATION_NUMBER_ICON";
+
+function botaoJson(b: Botao): Widget {
+  return {
+    text: b.texto,
+    onClick: { action: b.acao },
+    ...(b.cor ? { color: b.cor } : {}),
+  };
 }
 
 // O textParagraph interpreta um HTML minimo (<b>, <br>, <font>). Assunto e nome
@@ -57,9 +93,25 @@ export function paragrafo(html: string): Widget {
   return { textParagraph: { text: html } };
 }
 
-export function rotuloValor(rotulo: string, valor: string): Widget {
+// Linha com icone: rotulo pequeno em cima, valor, rodape e um botao opcional a
+// direita. E o "jeito Google" de mostrar um dado escolhido. `texto` ja vem em
+// HTML (quem chama escapa o que for dado de fora).
+export function item(p: {
+  icone?: Icone;
+  rotulo?: string;
+  texto: string;
+  rodape?: string;
+  botao?: Botao;
+}): Widget {
   return {
-    decoratedText: { topLabel: rotulo, text: esc(valor || "-"), wrapText: true },
+    decoratedText: {
+      ...(p.icone ? { startIcon: { knownIcon: p.icone } } : {}),
+      ...(p.rotulo ? { topLabel: p.rotulo } : {}),
+      text: p.texto,
+      ...(p.rodape ? { bottomLabel: p.rodape } : {}),
+      wrapText: true,
+      ...(p.botao ? { button: botaoJson(p.botao) } : {}),
+    },
   };
 }
 
@@ -142,45 +194,42 @@ export function interruptor(p: {
   };
 }
 
-export function botoes(
-  lista: Array<{ texto: string; acao: Acao }>,
-): Widget {
-  return {
-    buttonList: {
-      buttons: lista.map((b) => ({ text: b.texto, onClick: { action: b.acao } })),
-    },
-  };
-}
-
-export function divisor(): Widget {
-  return { divider: {} };
+export function botoes(lista: Botao[]): Widget {
+  return { buttonList: { buttons: lista.map(botaoJson) } };
 }
 
 export function cartao(p: {
   titulo: string;
   subtitulo?: string;
+  // Imagem pequena ao lado do titulo (o logo).
+  imagem?: string;
   secoes: Secao[];
-  botaoPrincipal?: { texto: string; acao: Acao };
-  botaoSecundario?: { texto: string; acao: Acao };
+  botaoPrincipal?: Botao;
+  botaoSecundario?: Botao;
 }): Record<string, unknown> {
-  const botao = (b: { texto: string; acao: Acao }) => ({
-    text: b.texto,
-    onClick: { action: b.acao },
-  });
   return {
-    header: { title: p.titulo, ...(p.subtitulo ? { subtitle: p.subtitulo } : {}) },
+    header: {
+      title: p.titulo,
+      ...(p.subtitulo ? { subtitle: p.subtitulo } : {}),
+      ...(p.imagem
+        ? { imageUrl: p.imagem, imageType: "SQUARE", imageAltText: "Contas" }
+        : {}),
+    },
     sections: p.secoes
       .filter((s) => s.widgets.length)
       .map((s) => ({
         ...(s.titulo ? { header: s.titulo } : {}),
+        ...(s.recolhida !== undefined && s.widgets.length > s.recolhida
+          ? { collapsible: true, uncollapsibleWidgetsCount: s.recolhida }
+          : {}),
         widgets: s.widgets,
       })),
     ...(p.botaoPrincipal
       ? {
           fixedFooter: {
-            primaryButton: botao(p.botaoPrincipal),
+            primaryButton: botaoJson(p.botaoPrincipal),
             ...(p.botaoSecundario
-              ? { secondaryButton: botao(p.botaoSecundario) }
+              ? { secondaryButton: botaoJson(p.botaoSecundario) }
               : {}),
           },
         }
