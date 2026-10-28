@@ -69,11 +69,15 @@ const TTL_LISTA_SEG = 600;
 // numero: no teste real de 28/10/2026 o Gmail deu 504 ("Tempo limite ao
 // receber o conteudo HTTP") esperando 20 s, e de novo esperando 8 s. Somando o
 // arranque a frio da Vercel, nenhuma resposta do painel pode depender da IA.
-const ESPERA_PREVIEW_MS = 4_000;
-const ESPERA_REGENERAR_MS = 4_000;
+const ESPERA_PREVIEW_MS = 3_000;
+const ESPERA_REGENERAR_MS = 3_000;
 // O "Atualizar" espera um pouco a IA terminar antes de responder, para a
 // pessoa nao precisar clicar varias vezes — com o mesmo teto curto.
-const ESPERA_ATUALIZAR_MS = 4_000;
+const ESPERA_ATUALIZAR_MS = 3_000;
+// Teto de qualquer resposta do painel. Passou disso, o servidor responde "tente
+// de novo" em vez de deixar o Google dar 504, e o que estava em andamento
+// termina em segundo plano. As esperas acima cabem nele com folga.
+const ORCAMENTO_RESPOSTA_MS = 4_500;
 // Formato do rascunho. Rascunho de outra versao (de um deploy anterior) e
 // tratado como vencido: ler um formato velho quebraria a tela.
 const VERSAO_RASCUNHO = 2;
@@ -1886,8 +1890,9 @@ async function acaoInicio(ctx: Ctx) {
   return C.resposta.empurrar(telaInicio());
 }
 
-// E-mail aberto: nada de IA aqui (abrir e-mail nao pode custar dinheiro); so
-// mostra se ja tem chamado, se ha revisao em andamento ou o botao de preparar.
+// E-mail aberto: so mostra se ja tem chamado ou o "Abrir no app". Nada de IA
+// (abrir e-mail nao pode custar dinheiro) e nada pesado: este cartao aparece a
+// cada e-mail aberto, e o Google corta em poucos segundos.
 async function acaoEmail(ctx: Ctx) {
   const { threadId, messageId } = idsDoEvento(ctx.evento);
   if (!threadId && !messageId) return C.resposta.empurrar(telaInicio());
@@ -1905,14 +1910,11 @@ async function acaoEmail(ctx: Ctx) {
       : null);
   if (ja) return C.resposta.empurrar(telaJaTem(ja.protocolo || ""));
 
-  // Revisao feita aqui no painel (a saida "Revisar aqui no Gmail") continua de
-  // onde parou.
-  const idRasc = await cacheGet<string>(chaveItem(ctx.conta, item)).catch(() => null);
-  const r = await rascunhoValido(idRasc, ctx.conta);
-  if (r && r.status !== "erro" && !r.criado) {
-    return C.resposta.empurrar(await telaDoRascunho(r, ctx));
-  }
-
+  // SEMPRE o "Abrir no app", mesmo que exista revisao feita aqui no painel. Ir
+  // direto para ela (como era) montava o formulario inteiro e consultava o
+  // Suite a cada e-mail aberto: no teste de 28/10/2026 isso ora mostrava o
+  // formulario em vez do botao, ora dava 504. Quem usa a saida "Revisar aqui no
+  // Gmail" continua de onde parou ao clicar nela (o preparar reaproveita).
   return C.resposta.empurrar(telaAbrirNoApp(threadId, messageId, ctx));
 }
 
@@ -2508,6 +2510,55 @@ export async function gmailAddonController(req: Request, res: Response) {
     return;
   }
 
+  const inicio = Date.now();
+  let timer: NodeJS.Timeout | undefined;
+  const tratamento = tratarPedido(req, nome, acao);
+  const estouro = new Promise<Resposta>((ok) => {
+    timer = setTimeout(
+      () =>
+        ok({
+          status: 200,
+          corpo: C.resposta.empurrar(
+            telaMensagem(
+              "Demorou mais que o normal",
+              "O Google só espera alguns segundos pela resposta, e desta vez passou. Tente de novo.",
+            ),
+          ),
+          estourou: true,
+        }),
+      ORCAMENTO_RESPOSTA_MS,
+    );
+  });
+  const resposta = await Promise.race([tratamento, estouro]);
+  if (timer) clearTimeout(timer);
+
+  const ms = Date.now() - inicio;
+  if (resposta.estourou) {
+    // O que estava em andamento (um "criar", por exemplo) termina mesmo assim;
+    // a idempotencia do fluxo segura um segundo clique.
+    emSegundoPlano(tratamento);
+    console.error(
+      `[addon:gmail:${nome}] passou de ${ORCAMENTO_RESPOSTA_MS}ms: respondeu "tente de novo" no lugar do 504`,
+    );
+  } else if (ms > 2000) {
+    console.warn(`[addon:gmail:${nome}] lento: ${ms}ms`);
+  }
+  res.status(resposta.status).json(resposta.corpo);
+}
+
+interface Resposta {
+  status: number;
+  corpo: unknown;
+  estourou?: boolean;
+}
+
+// Identidade + acao, devolvendo a resposta em vez de escrever no `res`: e o que
+// permite o teto de tempo acima responder sozinho quando isto demora.
+async function tratarPedido(
+  req: Request,
+  nome: string,
+  acao: (ctx: Ctx) => Promise<unknown>,
+): Promise<Resposta> {
   let conta: string;
   try {
     conta = await identificar(req);
@@ -2518,13 +2569,14 @@ export async function gmailAddonController(req: Request, res: Response) {
         `${JSON.stringify(e?.details ?? getErrorMessage(error))}`,
     );
     if (e?.code === "ADDON_TOKEN_INVALIDO") {
-      res.status(401).json({ ok: false, error: { code: e.code, message: e.message } });
-      return;
+      return { status: 401, corpo: { ok: false, error: { code: e.code, message: e.message } } };
     }
-    res
-      .status(200)
-      .json(C.resposta.empurrar(telaMensagem("Não foi possível abrir o painel", e?.message || MSG_INESPERADO)));
-    return;
+    return {
+      status: 200,
+      corpo: C.resposta.empurrar(
+        telaMensagem("Não foi possível abrir o painel", e?.message || MSG_INESPERADO),
+      ),
+    };
   }
 
   const simular = req.query.simular === "1";
@@ -2537,14 +2589,15 @@ export async function gmailAddonController(req: Request, res: Response) {
   };
 
   try {
-    res.status(200).json(await acao(ctx));
+    return { status: 200, corpo: await acao(ctx) };
   } catch (error) {
     console.error(
       `[addon:gmail:${nome}] conta=${conta} falhou: ` +
         `${error instanceof AppError ? error.code : "sem code"} ${getErrorMessage(error)}`,
     );
-    res
-      .status(200)
-      .json(C.resposta.empurrar(telaMensagem("Algo deu errado", mensagemParaPessoa(error))));
+    return {
+      status: 200,
+      corpo: C.resposta.empurrar(telaMensagem("Algo deu errado", mensagemParaPessoa(error))),
+    };
   }
 }
