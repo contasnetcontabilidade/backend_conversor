@@ -563,6 +563,12 @@ function normalizarMensagem(
   // Assistente…" que o proprio complemento responde ao /chamado e ao "Abrir
   // chamado": e aviso de interface, nao parte da conversa.
   if (bruta.privateMessageViewer) return null;
+  // Comando de barra puro ("/chamado"): e um clique em forma de mensagem, nao
+  // fala de ninguem. Se a pessoa escreveu algo depois do comando, o
+  // argumentText traz esse texto e a mensagem fica.
+  if (bruta.slashCommand && !String(bruta.argumentText || "").trim()) {
+    return null;
+  }
 
   const texto = String(bruta.text || "").trim();
   const anexos = Array.isArray(bruta.attachment) ? bruta.attachment : [];
