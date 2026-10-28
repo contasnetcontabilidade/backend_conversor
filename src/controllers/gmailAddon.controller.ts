@@ -130,6 +130,7 @@ interface Rascunho {
   status: "gerando" | "pronto" | "erro";
   iniciadoEm: number;
   erro?: string;
+  simular?: boolean;
   usuario?: UsuarioSuite;
   preview?: PreviewGmail;
   form?: FormRascunho;
@@ -451,6 +452,10 @@ async function gerarRascunho(r: Rascunho): Promise<void> {
     const { corpo } = await chamar(gmailPreviewController, {
       email: r.conta,
       ...(r.threadId ? { threadId: r.threadId } : { messageId: r.messageId }),
+      // A versao de teste chama a IA de verdade, mas nunca vira chamado: o
+      // gasto entra no /admin com o ramal de teste, para nao aparecer como
+      // "IA sem chamado" de uso real.
+      ramal: r.simular ? ramalDeTeste() : undefined,
       usuario: usuario?.nome || r.conta,
       executorId: usuario?.id,
       executorNome: usuario?.nome,
@@ -556,6 +561,11 @@ async function gerarRascunho(r: Rascunho): Promise<void> {
       `[addon:gmail:preparar] rasc=${r.id} NAO salvou o rascunho: ${getErrorMessage(error)}`,
     );
   });
+}
+
+// Mesma lista que o /admin usa para separar o gasto de teste (admin.controller).
+function ramalDeTeste(): string {
+  return (process.env.RAMAIS_TESTE || "258").split(",")[0].trim() || "258";
 }
 
 // Espera a tarefa ate `ms`; devolve se ela terminou a tempo.
@@ -1275,6 +1285,7 @@ async function acaoPreparar(ctx: Ctx) {
     messageId,
     status: "gerando",
     iniciadoEm: Date.now(),
+    simular: ctx.simular,
   };
   await salvarRascunho(r);
   await cacheSet(chaveItem(ctx.conta, item), r.id, TTL_RASCUNHO_SEG);
