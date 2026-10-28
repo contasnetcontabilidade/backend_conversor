@@ -4,9 +4,9 @@
 // componentes fixos (texto, campo, lista, interruptor, botao). Estas funcoes so
 // montam esse JSON; a regra de negocio fica no controller.
 //
-// Formato: Card v2 do Google Workspace, resposta em `renderActions`. Tudo que
-// fala com o formato do Google mora aqui, para um ajuste de formato (o Google
-// recusa campo desconhecido) ser em um lugar so.
+// Formato: Card v2 do Google Workspace, resposta como RenderActions (ver
+// `resposta`). Tudo que fala com o formato do Google mora aqui, para um ajuste
+// de formato (o Google recusa campo desconhecido) ser em um lugar so.
 
 import { isRecord } from "../lib/errors";
 
@@ -194,15 +194,20 @@ export function cartao(p: {
 
 // pushCard abre uma tela nova (o "voltar" do Gmail retorna a anterior);
 // updateCard troca a tela atual (usado quando a pessoa so buscou um cliente).
+//
+// O corpo da resposta JA E o RenderActions: `{ action: ... }` na raiz. Os
+// exemplos da documentacao embrulham em `{ renderActions: ... }`, mas o Gmail
+// recusou assim no 1o teste real (28/10/2026): "Cannot find field: renderActions
+// in message google.apps.card.v1.RenderActions".
 export const resposta = {
   empurrar: (card: Record<string, unknown>) => ({
-    renderActions: { action: { navigations: [{ pushCard: card }] } },
+    action: { navigations: [{ pushCard: card }] },
   }),
   atualizar: (card: Record<string, unknown>) => ({
-    renderActions: { action: { navigations: [{ updateCard: card }] } },
+    action: { navigations: [{ updateCard: card }] },
   }),
   aviso: (texto: string) => ({
-    renderActions: { action: { notification: { text: texto } } },
+    action: { notification: { text: texto } },
   }),
 };
 
