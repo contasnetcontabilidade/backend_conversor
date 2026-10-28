@@ -714,3 +714,76 @@ implementação (`garantirSecaoChamado` espelha `garantirMarcador`).
 Todas documentadas no `.env.example`, seção "Integracao Google Chat". As principais:
 `CHAT_SCOPES_ENABLED` (rollback de 1 variável), `CHAT_SECAO`, `CHAT_PAGE_SIZE`,
 `CHAT_RPS_ESPACO`, `CHAT_MSG_CACHE_TTL_SEG`, `SUITE360_ORIGEM_CHAT_ID`.
+
+---
+
+## Painel do Gmail (complemento do Google Workspace) — PILOTO
+
+Abre chamado sem sair do Gmail. A pessoa abre o e-mail, clica em **Preparar
+chamado** no painel lateral, confere os campos e cria. O resultado é o mesmo da
+aba E-mails do app: mesmo preview, mesma criação, mesmo marcador removido.
+
+### Como funciona
+
+- O Google chama `POST /api/addon/gmail/<acao>` e desenha o cartão (JSON) que a
+  rota devolve. Ações: `inicio`, `email`, `preparar`, `atualizar`, `buscar`,
+  `assunto`, `criar`, `feedback`.
+- **Reaproveita os controllers do Gmail** (`gmailPreviewController`,
+  `gmailCriarController`) por um adaptador, sem copiar regra. Idempotência,
+  anexos, custo e falhas no `/admin` valem igual.
+- **Abrir e-mail não chama IA.** Só o botão *Preparar chamado* chama. Reabrir o
+  mesmo e-mail reaproveita a revisão.
+- **O Google espera ~30 s.** O preview espera 20 s; se passar disso, segue em
+  segundo plano (`waitUntil`) e a tela mostra *Atualizar*.
+- **Rascunho no Redis** (`addon:gmail:rasc:<id>`, 6 h): o cartão não guarda nada
+  entre um clique e outro, então o que a pessoa escolheu fica lá.
+- **Lê o e-mail com os tokens que o app guardou.** A conta Google precisa estar
+  conectada no app (aba E-mails); senão o painel pede para conectar.
+- **Executor** = usuário do Suite com o mesmo e-mail (só se for único).
+  **Setor** = o último usado no painel, ou o único setor da pessoa.
+- `?simular=1` na URL: mostra o que iria ao Suite e **não cria nada**. É a
+  implantação de teste (`addon/gmail-addon-teste.json`).
+
+Fora do piloto (continua no app): competência, prioridade, prazo, visibilidade,
+várias empresas, processos, modo "responsável da empresa", pré-visualizar anexo e
+regenerar o resumo.
+
+### Identidade (rotas fora do `x-app-token`)
+
+As rotas ficam antes do `apiRouter` (ver `addon.routes.ts`). Cada pedido prova
+duas coisas:
+
+1. **Veio do Google, em nome deste complemento**: o `Authorization` traz um ID
+   token da conta de serviço do complemento (`ADDON_SERVICE_ACCOUNT`).
+2. **Quem é a pessoa**: o `authorizationEventObject.userIdToken`, com audiência
+   `ADDON_OAUTH_CLIENT_ID` e domínio em `ADDON_DOMINIOS`.
+
+Sem as duas variáveis o painel fica **fechado**. Token inválido recebe 401.
+A verificação é feita em `googleIdToken.ts` (RS256 com as chaves públicas do
+Google, sem biblioteca).
+
+### Arquivos
+
+| Arquivo | Papel |
+|---|---|
+| `src/controllers/gmailAddon.controller.ts` | Identidade, rascunho, telas e ações |
+| `src/services/gmailAddonCards.ts` | JSON dos cartões e leitura do evento do Google |
+| `src/services/googleIdToken.ts` | Verificação dos ID tokens do Google |
+| `src/routes/addon.routes.ts` | `POST /api/addon/gmail/:acao` |
+| `addon/gmail-addon-teste.json` | Implantação de teste (simulação) |
+| `addon/gmail-addon.json` | Implantação do piloto |
+
+### Publicar
+
+1. No projeto do Google Cloud do OAuth, habilitar a **Google Workspace Add-ons API**.
+2. `gcloud workspace-add-ons get-authorization --project=<projeto>` → copiar
+   `serviceAccountEmail` e `oauthClientId` para `ADDON_SERVICE_ACCOUNT` e
+   `ADDON_OAUTH_CLIENT_ID` na Vercel. Publicar o backend.
+3. Teste (não cria chamado):
+   `gcloud workspace-add-ons deployments create abrir-chamado-teste --deployment-file=addon/gmail-addon-teste.json --project=<projeto>`
+   e `gcloud workspace-add-ons deployments install abrir-chamado-teste --project=<projeto>`.
+   O `install` vale só para a conta de quem rodou.
+4. Piloto: o mesmo com `addon/gmail-addon.json` (nome `abrir-chamado`). Para
+   instalar para outras pessoas: Marketplace SDK no mesmo projeto, ficha
+   **privada** (só a empresa, sem revisão do Google) e o admin instala para um grupo.
+5. Mudou o JSON? `gcloud workspace-add-ons deployments replace <nome> --deployment-file=...`.
