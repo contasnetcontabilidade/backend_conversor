@@ -1,0 +1,24 @@
+{
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Abrir chamado",
+      "logoUrl": "https://www.gstatic.com/images/icons/material/system/2x/assignment_black_48dp.png",
+      "homepageTrigger": {
+        "runFunction": "https://backend-conversor.vercel.app/api/addon/gmail/inicio"
+      }
+    },
+    "gmail": {
+      "contextualTriggers": [
+        {
+          "unconditional": {},
+          "onTriggerFunction": "https://backend-conversor.vercel.app/api/addon/gmail/email"
+        }
+      ]
+    }
+  }
+}
