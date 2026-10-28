@@ -85,7 +85,10 @@ export async function feedbackController(req: Request, res: Response) {
     tags: Array.isArray(b.tags)
       ? b.tags.map((t) => String(t).slice(0, 60)).slice(0, 10)
       : [],
-    comentario: str(b.comentario).slice(0, 1000) || undefined,
+    // Era 1000 e cortava sem avisar: a avaliacao de 21/10 com as dicas para o
+    // prompt (1000 caracteres cravados) perdeu o final. 5000 cabe uma critica
+    // detalhada e continua barato no Redis.
+    comentario: str(b.comentario).slice(0, 5000) || undefined,
     divergencias: {
       clienteMudou: bool(dv.clienteMudou),
       clienteTinhaSugestao: bool(dv.clienteTinhaSugestao),
