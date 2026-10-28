@@ -48,6 +48,7 @@ import {
   gmailOAuthStartController,
   gmailPreviewController,
 } from "../controllers/gmail.controller";
+import { addonVinculoController } from "../controllers/gmailAddon.controller";
 import {
   gravacaoCriarController,
   gravacaoPreviewController,
@@ -141,6 +142,9 @@ apiRouter.get("/gmail/anexo", asyncHandler(gmailAnexoController));
 apiRouter.get("/gmail/anexo/previa", asyncHandler(gmailAnexoPreviaController));
 apiRouter.post("/gmail/chamado/preview", asyncHandler(gmailPreviewController));
 apiRouter.post("/gmail/chamado/criar", asyncHandler(gmailCriarController));
+// O app avisa em qual ramal esta a conta Google dele: e para onde o "Abrir no
+// app" do painel do Gmail manda o pedido (ver gmailAddon.controller).
+apiRouter.post("/gmail/vinculo", asyncHandler(addonVinculoController));
 
 // --- Integracao Google Chat (chamados a partir de conversas do Chat) ---
 // Usa o MESMO OAuth do Gmail (a conta Google e a mesma); o que muda sao os
