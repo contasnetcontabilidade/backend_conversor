@@ -719,9 +719,31 @@ Todas documentadas no `.env.example`, seção "Integracao Google Chat". As princ
 
 ## Painel do Gmail (complemento do Google Workspace) — PILOTO
 
-Abre chamado sem sair do Gmail. A pessoa abre o e-mail, clica em **Preparar
-chamado** no painel lateral, confere os campos e cria. O resultado é o mesmo da
-aba E-mails do app: mesmo preview, mesma criação, mesmo marcador removido.
+A pessoa abre o e-mail no Gmail e clica em **Abrir no app** no painel lateral: o
+app desktop dela aparece com a revisão daquele e-mail (o mesmo formulário da aba
+E-mails). Se o app não for encontrado, o painel oferece **Revisar aqui no Gmail**,
+a revisão completa dentro do próprio painel (descrita abaixo).
+
+### Abrir no app (o caminho principal)
+
+**Por que não revisar no painel:** o Google corta qualquer resposta do painel em
+poucos segundos (no teste real de 28/10/2026, 504 já com 8 s de espera), e a IA
+leva mais que isso. No painel a pessoa ficava clicando em "Atualizar". O app não
+tem esse limite.
+
+1. **O app registra onde está.** Ao assinar o canal do ramal (e ao conectar uma
+   conta Google), o app chama `POST /api/gmail/vinculo { profileToken, ramal }`.
+   O backend resolve o `profileToken` para a conta e grava
+   `addon:gmail:ramal:<conta>` (180 dias).
+2. **O painel pede.** "Abrir no app" (`/api/addon/gmail/abrir`) lê esse ramal e
+   publica `abrir-email { conta, threadId, messageId }` no canal `ramal:<ramal>`
+   do Ably — o mesmo do popup de chamada.
+3. **O app abre.** `callWatcher` recebe, o main traz a janela para frente e o
+   renderer abre `abrirRevisaoEmail(threadId)`. Antes, confere se a conta ativa é a
+   do pedido (máquina compartilhada) e não atropela uma revisão já aberta.
+
+Precisa da versão do app que tem esse "ouvido". App antigo, fechado ou com outra
+conta ativa: o painel mostra "App não encontrado" ou a pessoa vê o aviso no app.
 
 ### Como funciona
 
