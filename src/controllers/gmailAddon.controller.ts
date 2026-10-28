@@ -42,6 +42,7 @@ import {
 import { montarChamadoBodyDaRequisicao } from "../services/chamadoPayload";
 import { gerarResumoGemini } from "../services/gemini";
 import { publishAbrirEmail } from "../services/ably";
+import { listarMensagensDaThread, type MensagemDaThread } from "../services/gmailApi";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
 import {
   buscarCamposDoTipo,
@@ -78,6 +79,14 @@ const ESPERA_ATUALIZAR_MS = 3_000;
 // de novo" em vez de deixar o Google dar 504, e o que estava em andamento
 // termina em segundo plano. As esperas acima cabem nele com folga.
 const ORCAMENTO_RESPOSTA_MS = 4_500;
+// Ler a lista de e-mails da conversa (para escolher qual vira chamado) tem um
+// teto proprio: passou disso, o painel mostra so o "Abrir no app" da conversa.
+const ESPERA_LISTA_CONVERSA_MS = 2_500;
+// Guarda a lista por pouco tempo: o cartao do e-mail e pedido de novo a cada
+// vez que a pessoa volta nele, e e-mail novo na conversa aparece em ate 1 min.
+const TTL_LISTA_CONVERSA_SEG = 60;
+// E-mails listados para escolher. Conversa maior mostra os mais recentes.
+const MAX_EMAILS_ESCOLHA = 15;
 // Formato do rascunho. Rascunho de outra versao (de um deploy anterior) e
 // tratado como vencido: ler um formato velho quebraria a tela.
 const VERSAO_RASCUNHO = 2;
@@ -1105,6 +1114,84 @@ function telaAbrirNoApp(threadId: string, messageId: string, ctx: Ctx) {
   });
 }
 
+interface EmailDaConversa extends MensagemDaThread {
+  // Presente quando este e-mail sozinho ja virou chamado (o "Separar
+  // mensagens" do app). Protocolo pode vir vazio em dry-run.
+  chamado?: { protocolo: string };
+}
+
+const quandoCurto = (ms: number) =>
+  ms
+    ? new Intl.DateTimeFormat("pt-BR", {
+        timeZone: "America/Sao_Paulo",
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(ms))
+    : "";
+
+// O snippet do Gmail vem com entidades HTML (&#39;); o cartao escapa de novo.
+const textoDoSnippet = (s: string) =>
+  s
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// Conversa com mais de um e-mail: um chamado com a conversa inteira (botao
+// principal, como sempre) ou com UM e-mail so — o "Separar mensagens" da aba
+// E-mails do app, aqui no Gmail. O app 1.7.5 ja abre um e-mail sozinho
+// (pedido so com messageId), entao isto nao precisou de versao nova do app.
+function telaEscolherEmail(
+  threadId: string,
+  messageId: string,
+  conversa: { emails: EmailDaConversa[]; total: number },
+  ctx: Ctx,
+) {
+  const { emails, total } = conversa;
+  const linhas: C.Widget[] = emails.map((m) =>
+    C.item({
+      icone: "EMAIL",
+      rotulo: quandoCurto(m.quando),
+      texto: `<b>${C.esc(m.fromNome || m.fromEmail || "(sem remetente)")}</b>`,
+      rodape: m.chamado
+        ? `Já virou chamado${m.chamado.protocolo ? ` ${m.chamado.protocolo}` : ""}`
+        : curto(textoDoSnippet(m.snippet), 90),
+      ...(m.chamado
+        ? {}
+        : { botao: { texto: "Abrir", acao: C.acao(ctx.url("abrir"), { messageId: m.id }) } }),
+    }),
+  );
+  if (total > emails.length) {
+    linhas.unshift(C.paragrafo(cinza(`Mostrando os ${emails.length} mais recentes de ${total}.`)));
+  }
+  return cartaoContas({
+    titulo: "Abrir chamado",
+    subtitulo: `Conversa com ${total} e-mails`,
+    secoes: [
+      {
+        widgets: [
+          C.paragrafo(
+            cinza(
+              "O botão de baixo abre a conversa inteira num chamado só. Para um e-mail só, use o Abrir dele.",
+            ),
+          ),
+        ],
+      },
+      { titulo: "Ou só um e-mail", widgets: linhas },
+    ],
+    botaoPrincipal: {
+      texto: "Abrir conversa inteira",
+      acao: C.acao(ctx.url("abrir"), { threadId, messageId }),
+      cor: AZUL,
+    },
+  });
+}
+
 function telaAbrindo(threadId: string, messageId: string, ctx: Ctx) {
   return cartaoContas({
     titulo: "Abrindo no app…",
@@ -1910,6 +1997,15 @@ async function acaoEmail(ctx: Ctx) {
       : null);
   if (ja) return C.resposta.empurrar(telaJaTem(ja.protocolo || ""));
 
+  // Conversa com mais de um e-mail: a pessoa escolhe qual vira chamado, ou a
+  // conversa inteira (o "Separar mensagens" da aba E-mails do app).
+  if (threadId) {
+    const conversa = await emailsDaConversa(ctx.conta, threadId);
+    if (conversa.total > 1) {
+      return C.resposta.empurrar(telaEscolherEmail(threadId, messageId, conversa, ctx));
+    }
+  }
+
   // SEMPRE o "Abrir no app", mesmo que exista revisao feita aqui no painel. Ir
   // direto para ela (como era) montava o formulario inteiro e consultava o
   // Suite a cada e-mail aberto: no teste de 28/10/2026 isso ora mostrava o
@@ -1918,8 +2014,57 @@ async function acaoEmail(ctx: Ctx) {
   return C.resposta.empurrar(telaAbrirNoApp(threadId, messageId, ctx));
 }
 
+// Os e-mails da conversa, marcando os que ja viraram chamado sozinhos. Falhou
+// ou demorou: devolve lista vazia, e o painel cai no "Abrir no app" da conversa
+// inteira — o que ja funcionava. Nunca pode derrubar o cartao do e-mail.
+async function emailsDaConversa(
+  conta: string,
+  threadId: string,
+): Promise<{ emails: EmailDaConversa[]; total: number }> {
+  const vazio = { emails: [], total: 0 };
+  const chave = `addon:gmail:conversa:${conta}:${threadId}`;
+  try {
+    let lista = await cacheGet<MensagemDaThread[]>(chave).catch(() => null);
+    if (!Array.isArray(lista)) {
+      const busca = listarMensagensDaThread(conta, threadId);
+      let timer: NodeJS.Timeout | undefined;
+      const limite = new Promise<null>((ok) => {
+        timer = setTimeout(() => ok(null), ESPERA_LISTA_CONVERSA_MS);
+      });
+      lista = await Promise.race([busca, limite]);
+      if (timer) clearTimeout(timer);
+      if (!lista) {
+        busca.catch(() => undefined);
+        console.warn(
+          `[addon:gmail:email] lista da conversa passou de ${ESPERA_LISTA_CONVERSA_MS}ms; mostrando so a conversa inteira`,
+        );
+        return vazio;
+      }
+      await cacheSet(chave, lista, TTL_LISTA_CONVERSA_SEG).catch(() => undefined);
+    }
+    const recentes = lista.slice(-MAX_EMAILS_ESCOLHA);
+    const criados = await Promise.all(
+      recentes.map((m) => getChamadoCriado(m.id, "gmail").catch(() => null)),
+    );
+    return {
+      emails: recentes.map((m, i) => ({
+        ...m,
+        ...(criados[i] ? { chamado: { protocolo: criados[i]!.protocolo || "" } } : {}),
+      })),
+      total: lista.length,
+    };
+  } catch (error) {
+    console.warn(
+      `[addon:gmail:email] lista da conversa falhou: ${getErrorMessage(error)}; mostrando so a conversa inteira`,
+    );
+    return vazio;
+  }
+}
+
 // "Abrir no app": pede ao app desktop desta conta, pelo canal em tempo real do
-// ramal dele (o mesmo do popup de chamada), que abra a revisao do e-mail.
+// ramal dele (o mesmo do popup de chamada), que abra a revisao do e-mail. Com
+// so o messageId (escolhido na lista da conversa), o app abre aquele e-mail
+// sozinho; com o threadId, a conversa inteira.
 async function acaoAbrir(ctx: Ctx) {
   const threadId = C.lerParametro(ctx.evento, "threadId");
   const messageId = C.lerParametro(ctx.evento, "messageId");
