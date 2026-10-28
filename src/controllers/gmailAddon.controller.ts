@@ -63,14 +63,15 @@ const TTL_USUARIO_SEG = 3600;
 const TTL_USUARIO_AUSENTE_SEG = 600;
 const TTL_LISTA_SEG = 600;
 // Quanto esperar a IA antes de responder "Preparando… Atualizar". O Google
-// corta bem antes dos 30 s que a documentacao sugere: com 20 s de espera o
-// Gmail deu 504 ("Tempo limite ao receber o conteudo HTTP") no teste real de
-// 28/10/2026. Toda resposta do painel precisa sair em poucos segundos.
-const ESPERA_PREVIEW_MS = 8_000;
-const ESPERA_REGENERAR_MS = 8_000;
+// corta muito antes dos 30 s que a documentacao sugere, e nao publica o
+// numero: no teste real de 28/10/2026 o Gmail deu 504 ("Tempo limite ao
+// receber o conteudo HTTP") esperando 20 s, e de novo esperando 8 s. Somando o
+// arranque a frio da Vercel, nenhuma resposta do painel pode depender da IA.
+const ESPERA_PREVIEW_MS = 4_000;
+const ESPERA_REGENERAR_MS = 4_000;
 // O "Atualizar" espera um pouco a IA terminar antes de responder, para a
-// pessoa nao precisar clicar varias vezes.
-const ESPERA_ATUALIZAR_MS = 6_000;
+// pessoa nao precisar clicar varias vezes — com o mesmo teto curto.
+const ESPERA_ATUALIZAR_MS = 4_000;
 // Formato do rascunho. Rascunho de outra versao (de um deploy anterior) e
 // tratado como vencido: ler um formato velho quebraria a tela.
 const VERSAO_RASCUNHO = 2;
