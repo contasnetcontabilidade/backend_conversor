@@ -63,6 +63,16 @@ export async function publishAbrirEmail(
   await channel.publish("abrir-email", payload);
 }
 
+// Mesmo pedido, vindo do Google Chat: abrir a conversa na aba Chat do app, com
+// a mensagem ja marcada quando a pessoa usou "Abrir chamado" numa mensagem.
+export async function publishAbrirChat(
+  ramal: string,
+  payload: { conta: string; spaceId: string; nome: string; messageId?: string },
+): Promise<void> {
+  const channel = getRest().channels.get(channelForRamal(ramal));
+  await channel.publish("abrir-chat", payload);
+}
+
 // Gera um TokenRequest com capacidade limitada a assinar o canal do ramal.
 // O desktop usa isso (via authUrl) para conectar sem ver a root key.
 export async function createRamalTokenRequest(
