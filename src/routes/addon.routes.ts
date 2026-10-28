@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { gmailAddonController } from "../controllers/gmailAddon.controller";
+import { chatAddonController } from "../controllers/chatAddon.controller";
 
-// Rotas do painel do Gmail (complemento do Google Workspace).
+// Rotas do complemento do Google Workspace (painel do Gmail e o mesmo app no
+// Google Chat).
 //
 // Ficam FORA do apiRouter de proposito: quem chama e o Google, que nao manda o
 // x-app-token. A autenticacao daqui e propria (ID tokens do Google, conferidos
@@ -9,3 +11,4 @@ import { gmailAddonController } from "../controllers/gmailAddon.controller";
 export const addonRouter = Router();
 
 addonRouter.post("/gmail/:acao", gmailAddonController);
+addonRouter.post("/chat", chatAddonController);
