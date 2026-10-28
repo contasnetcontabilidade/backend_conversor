@@ -62,9 +62,18 @@ const TTL_PERFIL_SEG = 180 * 24 * 3600;
 const TTL_USUARIO_SEG = 3600;
 const TTL_USUARIO_AUSENTE_SEG = 600;
 const TTL_LISTA_SEG = 600;
-// Folga para o Google (~30 s) ainda receber e desenhar a resposta.
-const ESPERA_PREVIEW_MS = 20_000;
-const ESPERA_REGENERAR_MS = 20_000;
+// Quanto esperar a IA antes de responder "Preparando… Atualizar". O Google
+// corta bem antes dos 30 s que a documentacao sugere: com 20 s de espera o
+// Gmail deu 504 ("Tempo limite ao receber o conteudo HTTP") no teste real de
+// 28/10/2026. Toda resposta do painel precisa sair em poucos segundos.
+const ESPERA_PREVIEW_MS = 8_000;
+const ESPERA_REGENERAR_MS = 8_000;
+// O "Atualizar" espera um pouco a IA terminar antes de responder, para a
+// pessoa nao precisar clicar varias vezes.
+const ESPERA_ATUALIZAR_MS = 6_000;
+// Formato do rascunho. Rascunho de outra versao (de um deploy anterior) e
+// tratado como vencido: ler um formato velho quebraria a tela.
+const VERSAO_RASCUNHO = 2;
 // Preparacao "gerando" ha mais que isto morreu no caminho (a funcao da Vercel
 // caiu, por exemplo): a tela deixa tentar de novo em vez de esperar para sempre.
 const PREVIEW_ABANDONADO_MS = 4 * 60_000;
@@ -153,6 +162,7 @@ interface PreviewGmail {
 }
 
 interface Rascunho {
+  versao: number;
   id: string;
   conta: string;
   threadId: string;
@@ -340,10 +350,16 @@ async function salvarRascunho(r: Rascunho): Promise<void> {
   await cacheSet(chaveRascunho(r.id), r, TTL_RASCUNHO_SEG);
 }
 
+// Rascunho desta conta e deste formato, ou null. A conta confere de proposito:
+// o id do rascunho viaja no cartao.
+async function rascunhoValido(id: string | null, conta: string): Promise<Rascunho | null> {
+  const r = id ? await cacheGet<Rascunho>(chaveRascunho(id)).catch(() => null) : null;
+  return r && r.conta === conta && r.versao === VERSAO_RASCUNHO ? r : null;
+}
+
 async function lerRascunho(id: string, conta: string): Promise<Rascunho> {
-  const r = id ? await cacheGet<Rascunho>(chaveRascunho(id)) : null;
-  // A conta confere de proposito: o id do rascunho viaja no cartao.
-  if (!r || r.conta !== conta) {
+  const r = await rascunhoValido(id, conta);
+  if (!r) {
     throw new AppError({
       statusCode: 410,
       code: "ADDON_RASCUNHO_EXPIROU",
@@ -1826,8 +1842,8 @@ async function acaoEmail(ctx: Ctx) {
   if (ja) return C.resposta.empurrar(telaJaTem(ja.protocolo || ""));
 
   const idRasc = await cacheGet<string>(chaveItem(ctx.conta, item)).catch(() => null);
-  const r = idRasc ? await cacheGet<Rascunho>(chaveRascunho(idRasc)).catch(() => null) : null;
-  if (r && r.conta === ctx.conta && r.status !== "erro" && !r.criado) {
+  const r = await rascunhoValido(idRasc, ctx.conta);
+  if (r && r.status !== "erro" && !r.criado) {
     return C.resposta.empurrar(await telaDoRascunho(r, ctx));
   }
 
@@ -1849,23 +1865,16 @@ async function acaoPreparar(ctx: Ctx) {
   // Reabrir o mesmo e-mail reaproveita a revisao: cada preparo e uma chamada
   // de IA paga.
   const idExistente = await cacheGet<string>(chaveItem(ctx.conta, item)).catch(() => null);
-  const existente = idExistente
-    ? await cacheGet<Rascunho>(chaveRascunho(idExistente)).catch(() => null)
-    : null;
+  const existente = await rascunhoValido(idExistente, ctx.conta);
   const abandonado =
     existente?.status === "gerando" &&
     Date.now() - existente.iniciadoEm > PREVIEW_ABANDONADO_MS;
-  if (
-    existente &&
-    existente.conta === ctx.conta &&
-    existente.status !== "erro" &&
-    !existente.criado &&
-    !abandonado
-  ) {
+  if (existente && existente.status !== "erro" && !existente.criado && !abandonado) {
     return C.resposta.atualizar(await telaDoRascunho(existente, ctx));
   }
 
   const r: Rascunho = {
+    versao: VERSAO_RASCUNHO,
     id: randomUUID(),
     conta: ctx.conta,
     threadId,
@@ -1886,7 +1895,15 @@ async function acaoPreparar(ctx: Ctx) {
 }
 
 async function acaoAtualizar(ctx: Ctx) {
-  const r = await lerRascunho(C.lerParametro(ctx.evento, "rascunho"), ctx.conta);
+  const id = C.lerParametro(ctx.evento, "rascunho");
+  let r = await lerRascunho(id, ctx.conta);
+  // Ainda gerando: espera um pouco aqui mesmo (sempre dentro do tempo do
+  // Google), em vez de devolver o "Atualizar" de novo na hora.
+  const limite = Date.now() + ESPERA_ATUALIZAR_MS;
+  while (r.status === "gerando" && Date.now() < limite) {
+    await new Promise((ok) => setTimeout(ok, 1000));
+    r = (await rascunhoValido(id, ctx.conta)) || r;
+  }
   return C.resposta.atualizar(await telaDoRascunho(r, ctx));
 }
 
