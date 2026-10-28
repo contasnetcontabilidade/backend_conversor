@@ -753,6 +753,27 @@ lista vem de uma chamada leve ao Gmail (`threads.get?format=metadata`), guardada
 por 1 min, com teto de 2,5 s; se falhar ou demorar, o painel mostra só a conversa
 inteira. E-mail que já virou chamado sozinho aparece com o protocolo, sem botão.
 
+### O mesmo complemento no Google Chat
+
+Uma instalação só serve ao Gmail e ao Chat. No Chat há dois jeitos de acionar,
+configurados na página da Google Chat API no Console (não no `addon/*.json`):
+
+- **Ação de mensagem "Abrir chamado"** (comando id **2**), no menu ⋮ de uma
+  mensagem: abre a conversa na aba Chat do app com aquela mensagem já marcada.
+- **`/chamado`** (comando id **1**): abre a conversa sem nada marcado.
+
+Os eventos chegam em `POST /api/addon/chat` (`chatAddon.controller.ts`), que acha o
+ramal da conta (o mesmo registro do Gmail) e publica `abrir-chat { conta, spaceId,
+nome, messageId? }` no Ably. A resposta é uma mensagem **privada** (só quem acionou
+vê). Ser adicionado a uma conversa não gera mensagem: seria pública.
+
+Identidade: o token de sistema é conferido como no Gmail. Sem `userIdToken`, vale o
+`chat.user.email` do evento — só depois de o token de sistema provar a origem.
+
+Precisa do app 1.7.6+ (o "ouvido" `abrir-chat`). Para o Chat acionar, o app do Chat
+precisa estar na conversa: em grupo e espaço ele é adicionado (todos veem); em
+conversa a dois, confirmar no primeiro teste.
+
 ### Como funciona
 
 - O Google chama `POST /api/addon/gmail/<acao>` e desenha o cartão (JSON) que a
