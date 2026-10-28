@@ -742,8 +742,16 @@ tem esse limite.
    renderer abre `abrirRevisaoEmail(threadId)`. Antes, confere se a conta ativa é a
    do pedido (máquina compartilhada) e não atropela uma revisão já aberta.
 
-Precisa da versão do app que tem esse "ouvido". App antigo, fechado ou com outra
-conta ativa: o painel mostra "App não encontrado" ou a pessoa vê o aviso no app.
+Precisa da versão do app que tem esse "ouvido" (1.7.5+). App antigo, fechado ou com
+outra conta ativa: o painel mostra "App não encontrado" ou a pessoa vê o aviso no app.
+
+**Conversa com vários e-mails:** o painel lista cada e-mail (remetente, data e
+trecho) com o próprio **Abrir**, e o botão principal vira **Abrir conversa inteira**
+— o "Separar mensagens" da aba E-mails, aqui no Gmail. "Abrir" de um e-mail manda
+só o `messageId`, e o app abre aquele e-mail sozinho (`abrirRevisaoEmailUnico`). A
+lista vem de uma chamada leve ao Gmail (`threads.get?format=metadata`), guardada
+por 1 min, com teto de 2,5 s; se falhar ou demorar, o painel mostra só a conversa
+inteira. E-mail que já virou chamado sozinho aparece com o protocolo, sem botão.
 
 ### Como funciona
 
