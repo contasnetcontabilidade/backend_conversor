@@ -52,6 +52,17 @@ export async function publishChamadoCriado(
   await channel.publish("chamado-criado", payload);
 }
 
+// Pede ao app desktop deste ramal que abra a revisao de um e-mail. Vem do
+// botao "Abrir no app" do painel do Gmail: a IA roda no app, que nao tem o
+// limite de poucos segundos que o Google impoe ao painel.
+export async function publishAbrirEmail(
+  ramal: string,
+  payload: { conta: string; threadId?: string; messageId?: string },
+): Promise<void> {
+  const channel = getRest().channels.get(channelForRamal(ramal));
+  await channel.publish("abrir-email", payload);
+}
+
 // Gera um TokenRequest com capacidade limitada a assinar o canal do ramal.
 // O desktop usa isso (via authUrl) para conectar sem ver a root key.
 export async function createRamalTokenRequest(
