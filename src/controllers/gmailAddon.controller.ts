@@ -246,7 +246,14 @@ function urlBase(req: Request): string {
 //  - userIdToken (token do USUARIO): quem esta com o Gmail aberto? Confere o
 //    client ID do complemento e o dominio da empresa.
 // Sem as duas variaveis configuradas o painel fica FECHADO, nunca aberto.
-async function identificar(req: Request): Promise<string> {
+//
+// No Chat (`usuarioDoChat`), o evento traz quem acionou em `chat.user.email`.
+// Sem userIdToken, vale esse e-mail — mas SO depois de o token de sistema provar
+// que o evento veio do Google para este complemento.
+export async function identificar(
+  req: Request,
+  opts: { usuarioDoChat?: boolean } = {},
+): Promise<string> {
   // Teste local: so fora da Vercel, para um esquecimento no .env de producao
   // nunca abrir a porta.
   if (process.env.ADDON_SEM_VERIFICACAO === "1" && !process.env.VERCEL) {
@@ -289,9 +296,17 @@ async function identificar(req: Request): Promise<string> {
     ? evento.authorizationEventObject
     : {};
   const tokenUsuario = typeof aut.userIdToken === "string" ? aut.userIdToken : "";
-  const usuario = await verificarIdTokenGoogle(tokenUsuario, {
-    audiencia: (aud) => aud === clientId,
-  });
+  const chat = isRecord(evento.chat) ? evento.chat : {};
+  const userChat = isRecord(chat.user) ? chat.user : {};
+  const emailDoChat =
+    opts.usuarioDoChat && !tokenUsuario && typeof userChat.email === "string"
+      ? userChat.email
+      : "";
+  const usuario = emailDoChat
+    ? { email: emailDoChat, email_verified: true }
+    : await verificarIdTokenGoogle(tokenUsuario, {
+        audiencia: (aud) => aud === clientId,
+      });
   const email = (usuario.email || "").trim().toLowerCase();
   if (!email || !usuario.email_verified) {
     throw new AppError({
@@ -360,7 +375,12 @@ const chaveItem = (conta: string, item: string) =>
   `addon:gmail:item:${conta}:${item}`;
 const chavePerfil = (conta: string) => `addon:gmail:perfil:${conta}`;
 // Em qual ramal esta o app desktop desta conta Google (o app grava ao iniciar).
+// Vale para o Gmail e para o Chat: a conta e a mesma.
 const chaveRamalDaConta = (conta: string) => `addon:gmail:ramal:${conta}`;
+export async function ramalDaConta(conta: string): Promise<string> {
+  const r = await cacheGet<string>(chaveRamalDaConta(conta)).catch(() => null);
+  return r ? String(r) : "";
+}
 const TTL_RAMAL_SEG = 180 * 24 * 3600;
 const itemDo = (r: { threadId: string; messageId: string }) =>
   r.threadId || r.messageId;
