@@ -39,7 +39,10 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // 2026-10-20: regras de 02/10 (suporte que assumiu a acao = resolvido; promessa
 // nao e entrega) + ATUALIZACAO DO SUITEWEB. Tambem marca o inicio do feedback
 // da era Claude Haiku 5.5 (o resumo saiu do Gemini em 19/10).
-export const PROMPT_VERSION = "2026-10-20";
+// 2026-10-28: feedback de 20-28/10 (93 chamados). Finalizado do suporte vira
+// "sim" por padrao; assunto do suporte pelo trabalho feito (nunca vazio);
+// varios pedidos viram lista; sem AnyDesk nem comentario sobre anexo.
+export const PROMPT_VERSION = "2026-10-28";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -526,22 +529,49 @@ LIGACAO INTERNA — siga a risca:
   // finalizou em 35 de 37 casos. A regra so entra para o suporte: no teste,
   // posta para todos, ela fez o Fiscal marcar "sim" num "vou emitir e te
   // mando" e escrever que a certidao "foi emitida" — que e o erro inverso.
+  //
+  // A 1a versao (2026-10-20) so valia quando o suporte "assumiu a acao" no
+  // texto. Nao bastou: de 20 a 28/10 a IA disse "nao" 55 vezes ao suporte e ele
+  // finalizou 53 — a maioria das conversas so tem o PEDIDO (a resposta foi por
+  // AnyDesk, na mesa, por telefone). Por isso o padrao virou "sim". A excecao de
+  // correcao/melhoria de sistema protege quem mexe no Suite (6 de 6 chamados
+  // assim ficaram abertos de verdade).
   const ehSuporte = /suporte|tecnologia|\bti\b|inform[aá]tica/i.test(regSetor);
   const blocoSuporteProvidencia = ehSuporte
-    ? `  Tambem NAO vira providencia a acao que quem registra ja assumiu no proprio conteudo para fazer
-  na hora ("vou acessar sua maquina", "vou ai ver", "ja vejo") — ver ja_resolvido.
+    ? `  Quem registra e do suporte e abre o chamado DEPOIS de atender: o pedido que ele mesmo atende
+  NAO vira providencia ("vou acessar sua maquina", "ja vejo", ou so o pedido) — ver ja_resolvido.
+  Providencia, aqui, so para o que continua pendente pelos motivos listados la. "Aguardar o
+  retorno" ou "aguardar a conferencia" de quem pediu tambem NAO e providencia.
+`
+    : "";
+  const blocoSuporteResumo = ehSuporte
+    ? `  Quem registra e do suporte e ja atendeu: NAO escreva o que falta no registro ("nao ha
+  resposta registrada", "sem desfecho", "ainda nao confirmado", "a ser executado pelo suporte").
 `
     : "";
   const blocoSuporteRegistroPosterior = ehSuporte
-    ? `  REGISTRO DEPOIS DO ATENDIMENTO (EXCECAO a PROMESSA NAO E ENTREGA, so para este caso): quem
-  registra e do suporte e costuma abrir o chamado DEPOIS
-  de resolver — a conversa termina antes da solucao aparecer. Por isso, se ELE MESMO assumiu a
-  acao no conteudo para fazer na hora ("vou acessar sua maquina", "vou ai na sua mesa", "ja vejo",
-  "me passa o AnyDesk"), responda "sim" — e essa acao nao vira providencia. No resumo, NAO afirme
-  um resultado que nao aparece no conteudo: diga o que foi pedido e que o suporte assumiu.
-  Continua "nao" quando: a solucao depende de TERCEIRO (fornecedor, suporte de outro sistema,
-  outro setor, o cliente), ficou para OUTRO DIA ("amanha", "semana que vem", peca a chegar), ou a
-  tentativa FALHOU ou foi escalada.
+    ? `  REGISTRO DEPOIS DO ATENDIMENTO (EXCECAO, so para este caso, as regras "se so aparece o pedido"
+  e "PROMESSA NAO E ENTREGA" acima): quem registra e do suporte e abre o chamado DEPOIS de
+  atender. A conversa quase sempre termina antes da solucao aparecer, e muitas vezes so mostra o
+  PEDIDO — a resposta foi por acesso remoto, na mesa ou por telefone. Por isso o PADRAO e "sim":
+  vale para o pedido sem resposta, para "vou acessar sua maquina", "me passa o AnyDesk", "ja vejo",
+  e para a entrega que termina com "confere e me avisa se faltar algo" (pedir conferencia nao e
+  pendencia). Responda "nao" SO quando o proprio conteudo mostrar que a demanda nao fecha no atendimento:
+    * depende de TERCEIRO: fornecedor, suporte de outro sistema, outro setor, ou o cliente
+      precisar mandar algo que ainda nao mandou;
+    * ficou para OUTRO DIA ("amanha", "semana que vem", peca a chegar);
+    * a tentativa FALHOU ou foi escalada;
+    * e CORRECAO ou MELHORIA de sistema: erro numa tela ou automacao do Suite, funcionalidade
+      nova, ajuste de robo/bot — trabalho de desenvolvimento, que nao fecha na conversa. Sistema
+      se comportando errado (tela que abre o lugar errado, erro que comecou depois de uma
+      atualizacao) e "nao" MESMO que o suporte diga "vou verificar" ou "ja vejo".
+      Configurar algo que o proprio suporte faz no sistema (incluir uma atividade, obrigacao,
+      usuario ou opcao num cadastro) NAO e desenvolvimento: continua "sim".
+  No resumo: diga o que foi pedido e o que o suporte fez ou assumiu, sem afirmar um resultado
+  que nao aparece no conteudo. E NAO escreva sobre o que falta no registro ("sem desfecho
+  registrado", "nao ha resposta", "nao confirmou se foi concluido", "pendente de execucao",
+  "sem resultado ainda"): quem le e o proprio suporte, que ja resolveu — essas frases sao as
+  que ele mais apaga.
 `
     : "";
 
@@ -553,6 +583,20 @@ sem markdown e sem texto fora do JSON.
 colados NUM UNICO TEXTO na descricao do chamado, um logo abaixo do outro. Quem abre o chamado le
 os tres de uma vez. Entao cada informacao aparece UMA VEZ SO, no campo mais adequado — repetir o
 mesmo fato em dois campos deixa o chamado arrastado e e o que mais incomoda quem revisa.
+*** O QUE NAO ENTRA NO CHAMADO ***
+- Numero/ID de AnyDesk, codigo de acesso remoto, codigo de verificacao ou token: so servem na
+  hora do atendimento. Nem diga que o codigo "foi informado/enviado na conversa".
+- Comentario sobre o que voce nao conseguiu ver: nada de "o conteudo do video nao esta
+  disponivel", "imagem sem descricao textual", "sem transcricao". Anexo vira so o fato ("enviou
+  dois videos mostrando o problema", "enviou print do erro").
+- Nome de arquivo GENERICO (image.png, UserRecording_123.mp4, Captura de tela 2026-...). Nome que
+  diz algo ("ENTRADAS GOLFARMA 2025.zip") pode entrar.
+TRANSCRICAO COM ERROS: ligacao vem de transcricao automatica, que erra termos tecnicos. Corrija pelo
+contexto, quando for claro, com este glossario do escritorio: CBS, IBS, pro-labore, percentual de
+presuncao, lucro presumido, Simples Nacional, DCTFWeb, eSocial, e-CAC, SIEG, Dominio, Onvio,
+Acessorias, Suite/SuiteWeb (tambem chamado de Switch), CertProtect, AnyDesk, GoTo. Ex.: "CDS" nao
+existe como tributo — e "CBS" (o tributo novo da reforma); "CIEG" e "SIEG". Escreva sempre a forma
+corrigida. Nunca "corrija" nome de cliente.
 
 Campos obrigatorios:
 - titulo: string (assunto curto do chamado, ate ~80 caracteres)
@@ -560,9 +604,15 @@ Campos obrigatorios:
   Comece pelo FATO, sem preambulo — nada de "O cliente entrou em contato para...", "Trata-se de
   um e-mail em que...", "Neste atendimento o cliente...". Prefira "Solicitou a segunda via da
   guia de novembro; enviada no mesmo dia." a uma frase de abertura que nao informa nada.
-- pontos_principais: string[] — SO o que NAO cabe no resumo: dados objetivos que valem ficar
+${blocoSuporteResumo}- pontos_principais: string[] — SO o que NAO cabe no resumo: dados objetivos que valem ficar
   destacados (numeros, valores, competencias, prazos, documentos, matriculas, nomes de arquivos).
   Se o resumo ja disse tudo, devolva array VAZIO. NAO reescreva o resumo em topicos.
+  EXCECAO — VARIOS PEDIDOS: quando o conteudo trouxer 2 ou mais pedidos ou problemas DISTINTOS
+  (tipico de reuniao ou ligacao com uma lista de ajustes), os pontos_principais passam a ser a
+  LISTA DOS PEDIDOS, um por item, no formato "assunto: como esta hoje -> como deve ficar" quando
+  der. O resumo entao so da o contexto em 1 ou 2 frases, sem repetir os pedidos. Detalhe solto
+  (um codigo, um percentual citado de passagem) entra DENTRO do pedido a que pertence, nao como
+  ponto proprio.
 - providencias_sugeridas: string[] — SO acoes FUTURAS, o que ainda precisa ser feito.
   Nao transforme em "providencia" um fato ja narrado no resumo apenas reformulando a frase.
   Sugira uma acao SEMPRE que o conteudo indicar algo que mereca ser tratado, MESMO que
@@ -575,6 +625,10 @@ Campos obrigatorios:
   Se a RESPOSTA do escritorio aparece no proprio conteudo e ja entregou o que foi pedido
   (orientacao dada, acesso liberado, senha redefinida, arquivo/guia enviado, duvida
   respondida), isso NAO vira providencia — nem "confirmar com o cliente se deu certo".
+  Com VARIOS PEDIDOS: uma providencia CONCRETA por pedido ainda em aberto ("Corrigir o travamento
+  do campo X", "Separar Y de Z") — nunca generica ("analisar as alteracoes", "verificar os
+  pontos"). AGORA x DEPOIS: so trate como "para depois"/"projeto futuro" o que foi combinado ASSIM,
+  de forma explicita, e so aquele item; o resto e para agora.
 ${blocoSuporteProvidencia}- cliente_mencionado: objeto { nome: string, cnpj: string }. Identifique QUEM E ATENDIDO — a empresa
   (ou a pessoa fisica) do outro lado do atendimento. Ordem de prioridade: (1) o CNPJ/CPF, se aparecer;
   (2) a ASSINATURA ${fontePalavra}; (3) quando houver e-mail do remetente, o DOMINIO dele
@@ -620,6 +674,27 @@ ${blocoSuporteProvidencia}- cliente_mencionado: objeto { nome: string, cnpj: str
       variante "... - SUPORTE" do tema quando ela existir (ex.: "CERTIFICADO DIGITAL - SUPORTE").
       Se o pedido NAO foi tecnico (ex.: cliente pedindo para trocar o e-mail cadastrado), mantenha
       o assunto do tema.
+    * Para o SUPORTE, o TEMA da guia, obrigacao ou documento (GNRE, DARE, alvara, certidao,
+      intimacao, Webiss, DCTFWeb) NAO e o assunto: o suporte nao emite guia nem tira alvara — ele
+      mexe no SISTEMA. Cadastrar, configurar, incluir ou corrigir algo num sistema (empresa,
+      atividade, obrigacao, e-mail, usuario) e trabalho de suporte. Duvida de como fazer algo no
+      sistema tambem: "em qual obrigacao anexo a GNRE-SP?" e SUPORTE A SISTEMAS, e NAO "GNRE".
+      Escolha nesta ordem:
+      (1) a variante "<TRABALHO FEITO> - SUPORTE" da lista, quando existir (ficam na categoria
+          dos chamados do suporte; procure la primeiro):
+          - baixar/enviar notas, DF-e ou XML (mesmo que seja para uma intimacao) -> "NOTAS
+            FISCAIS (XML) - SUPORTE";
+          - procuracao -> "PROCURACOES - SUPORTE";
+          - incluir ou trocar o e-mail CADASTRADO de uma empresa -> "ALTERACAO DE E-MAIL -
+            SUPORTE" (o chamado ter vindo por e-mail NAO conta);
+          - login/senha -> "USUARIOS, SENHAS E ACESSOS - SUPORTE";
+          - cadastrar empresa NOVA -> "CADASTRO DE CLIENTES - SUPORTE";
+      (2) senao, "SUPORTE A SISTEMAS".
+      Para o suporte o assunto NUNCA fica vazio: na duvida, "SUPORTE A SISTEMAS".
+    * Certificado digital, para o suporte: problema no PROGRAMA (CertProtect/Protect nao abre, nao
+      instala, a sessao expirou e precisa logar de novo) e "SUPORTE A SISTEMAS"; problema no
+      CERTIFICADO em si (vencido, senha errada ou desatualizada, arquivo novo enviado pelo cliente,
+      cadastrar certificado novo) e "CERTIFICADO DIGITAL - SUPORTE".
     * Havendo um assunto da categoria do setor de quem registra que sirva, ele ganha do equivalente
       generico.
     * "DUVIDAS GERAIS DO CLIENTE" e "PROCESSOS INTERNOS" sao a ultima opcao: so quando nada mais
@@ -628,6 +703,14 @@ ${blocoSuporteProvidencia}- cliente_mencionado: objeto { nome: string, cnpj: str
       salva, relatorio que traz dado errado, card, permissao ou modulo novo ou que mudou depois de
       uma atualizacao) e "ATUALIZACAO DO SUITEWEB", quando ele estiver na lista. Ajudar alguem a USAR
       ou ACESSAR o Suite (senha, login, onde fica uma tela) continua sendo suporte a sistemas.
+      O Suite tambem aparece como "Switch" e pelas telas dele: OS (ordem de servico), cartao/card e
+      capa do processo, tela de conformidade, status de paralisadas, automacoes que abrem chamado ou
+      mandam e-mail. Erro nessas telas e "ATUALIZACAO DO SUITEWEB" mesmo sem a palavra "Suite".
+      Se quem registra e do DESENVOLVIMENTO, pedido de melhoria ou ajuste numa tela do sistema do
+      escritorio tambem e "ATUALIZACAO DO SUITEWEB" — nao o tema da tela (ex.: ajustes na pagina do
+      estudo tributario NAO sao "ESTUDO TRIBUTARIO").
+    * Pedido de automacao NOVA ou de mudar o que um robo/bot faz (incluir tarefas num bot de alerta,
+      criar uma rotina automatica) e "SOLICITACAO DE AUTOMACAO", quando estiver na lista.
 - competencia: string "AAAA-MM" ou "". SO quando o conteudo indicar explicitamente o mes/ano de
   REFERENCIA da obrigacao ("folha de julho", "DAS 08/2026", "competencia 07/25", "faturamento de
   junho"). NAO use a data de hoje como competencia: sem mencao clara, devolva "".
@@ -667,7 +750,9 @@ O escritorio que registra o chamado se chama "Contas Contabilidade". Se na trans
 escritorio vier com grafia claramente errada por falha de transcricao (ex.: "Contos Contabilidade",
 "Pontas Contabilidade", "Contas Contabil"), use a forma correta "Contas Contabilidade" no resumo. Isso vale
 SO para o nome do proprio escritorio — NUNCA corrija nem invente nomes de clientes.
-Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.`;
+Nao invente informacoes. Se algo nao aparece no conteudo, deixe vazio.
+ANTES DE RESPONDER, releia o conteudo e confira: com varios pedidos, cada um virou um ponto, e cada
+um ainda em aberto tem a sua providencia.`;
 
   // Lista de assuntos do Suite para a IA escolher UM (quando fornecida pelo controller).
   const assuntos = input.assuntosDisponiveis || [];
