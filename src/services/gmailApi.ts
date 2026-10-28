@@ -306,6 +306,40 @@ export async function obterEmail(
   };
 }
 
+export interface MensagemDaThread {
+  id: string;
+  fromNome: string;
+  fromEmail: string;
+  quando: number; // internalDate do Gmail, em ms
+  snippet: string; // como o Gmail manda: texto com entidades HTML (&#39;)
+}
+
+// Os e-mails de uma conversa so com o remetente (sem corpo nem anexos), numa
+// unica chamada leve. E o que o painel do Gmail precisa para a pessoa escolher
+// qual e-mail vira chamado sem estourar os poucos segundos que o Google espera.
+export async function listarMensagensDaThread(
+  email: string,
+  threadId: string,
+): Promise<MensagemDaThread[]> {
+  const t = await gmailGet(
+    email,
+    `/threads/${encodeURIComponent(threadId)}?format=metadata&metadataHeaders=From`,
+  );
+  const msgs: any[] = Array.isArray(t?.messages) ? t.messages : [];
+  return msgs
+    .map((m) => {
+      const { nome, email: fromEmail } = parseFrom(header(m?.payload?.headers || [], "From"));
+      return {
+        id: String(m?.id || ""),
+        fromNome: nome,
+        fromEmail,
+        quando: Number(m?.internalDate) || 0,
+        snippet: String(m?.snippet || ""),
+      };
+    })
+    .filter((m) => m.id);
+}
+
 export interface ThreadCompleta {
   threadId: string;
   subject: string; // assunto (mensagem mais recente)
