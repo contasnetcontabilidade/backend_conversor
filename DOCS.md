@@ -749,9 +749,19 @@ aba E-mails do app: mesmo preview, mesma criação, mesmo marcador removido.
 - `?simular=1` na URL: mostra o que iria ao Suite e **não cria nada**. É a
   implantação de teste (`addon/gmail-addon-teste.json`).
 
-Fora do piloto (continua no app): competência, prioridade, prazo, visibilidade,
-várias empresas, processos, modo "responsável da empresa", pré-visualizar anexo e
-regenerar o resumo.
+**A revisão segue o formulário "Abrir chamado" do app campo a campo**
+(`renderer/app-revisao.js`): várias empresas e o modo de criação, setores e
+usuários vinculados (com "Todo o setor"), executor entre as pessoas do setor,
+competência (sempre o mês corrente), prioridade, prazo (7 dias úteis), visibilidade,
+interno (só vai quando alguém decidiu), e-mails de notificação, processos (saem ao
+trocar o setor), campos do assunto, regenerar o resumo e o feedback. Mudou o
+formulário do app? Confira se o painel precisa acompanhar.
+
+Só não existe a pré-visualização de anexo: o e-mail está aberto ao lado do painel.
+
+Campo de formulário nunca vai em seção recolhida: o Google não garante que o valor
+escondido volte no evento. Por isso "Mais opções" fica aberta, e só as seções de
+leitura (dados do e-mail, conteúdo, cabeçalho) recolhem.
 
 ### Identidade (rotas fora do `x-app-token`)
 
