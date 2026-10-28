@@ -726,8 +726,13 @@ aba E-mails do app: mesmo preview, mesma criação, mesmo marcador removido.
 ### Como funciona
 
 - O Google chama `POST /api/addon/gmail/<acao>` e desenha o cartão (JSON) que a
-  rota devolve. Ações: `inicio`, `email`, `preparar`, `atualizar`, `buscar`,
-  `assunto`, `criar`, `feedback`.
+  rota devolve. Ações: `inicio`, `email`, `preparar`, `atualizar`, `editar`,
+  `buscar`, `escolher`, `criar`, `feedback`.
+- **A resposta é o RenderActions na raiz** (`{ action: ... }`). Com o embrulho
+  `{ renderActions: ... }` dos exemplos da documentação, o Gmail recusa.
+- **Na revisão, cliente, assunto, executor, setor e origem são linhas com
+  "Trocar".** Só o campo aberto mostra busca/lista (`editar` → `buscar` →
+  `escolher`); eles não vêm no formulário, mudam só pelo `escolher`.
 - **Reaproveita os controllers do Gmail** (`gmailPreviewController`,
   `gmailCriarController`) por um adaptador, sem copiar regra. Idempotência,
   anexos, custo e falhas no `/admin` valem igual.
