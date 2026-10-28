@@ -6,6 +6,12 @@
 // validadas (idempotencia, anexos conferidos no Gmail, marcador removido, custo
 // e falhas no /admin) valem aqui sem copia, e os dois caminhos nao divergem.
 //
+// A tela de revisao segue o formulario "Abrir chamado" do app
+// (renderer/app-revisao.js) campo a campo: varias empresas, setores e pessoas
+// vinculadas, "Todo o setor", competencia, prioridade, prazo, visibilidade,
+// interno, e-mails, processos, campos do assunto, regenerar resumo e feedback.
+// Mudou algo la? Confira se precisa mudar aqui.
+//
 // O que muda em relacao ao desktop:
 //  - Quem e a pessoa vem do Google (ID token verificado), nao do perfil do app.
 //    Executor e setor saem do usuario do Suite com o MESMO e-mail.
@@ -16,9 +22,8 @@
 //    "Atualizar".
 //  - O cartao do Google nao guarda estado entre cliques. O que a pessoa ja
 //    escolheu fica num rascunho no Redis, e cada clique manda so o id dele.
-//
-// Fora do piloto (continua no app): competencia, prioridade, prazo,
-// visibilidade, varias empresas, processos e o modo "responsavel da empresa".
+//  - Nao ha pre-visualizacao de anexo nem "conteudo" separado: o e-mail esta
+//    aberto ao lado do painel.
 
 import { randomUUID } from "crypto";
 import type { Request, Response } from "express";
@@ -35,10 +40,12 @@ import {
   salvarContaDoEmail,
 } from "../services/store";
 import { montarChamadoBodyDaRequisicao } from "../services/chamadoPayload";
+import { gerarResumoGemini } from "../services/gemini";
 import {
   buscarCamposDoTipo,
   buscarClientes,
   buscarOrigens,
+  buscarProcessos,
   buscarSetores,
   buscarTipos,
   buscarUsuarios,
@@ -47,6 +54,7 @@ import {
   type CampoPersonalizado,
   type ItemLista,
 } from "../services/suite360";
+import { competenciaAtual, hojeSaoPaulo } from "../utils/datas";
 import * as C from "../services/gmailAddonCards";
 
 const TTL_RASCUNHO_SEG = 6 * 3600;
@@ -56,10 +64,15 @@ const TTL_USUARIO_AUSENTE_SEG = 600;
 const TTL_LISTA_SEG = 600;
 // Folga para o Google (~30 s) ainda receber e desenhar a resposta.
 const ESPERA_PREVIEW_MS = 20_000;
+const ESPERA_REGENERAR_MS = 20_000;
 // Preparacao "gerando" ha mais que isto morreu no caminho (a funcao da Vercel
 // caiu, por exemplo): a tela deixa tentar de novo em vez de esperar para sempre.
 const PREVIEW_ABANDONADO_MS = 4 * 60_000;
-const MAX_OPCOES = 30;
+// Itens numa lista de escolha. Busca devolve mais? A tela pede para refinar.
+const MAX_OPCOES = 50;
+// Conteudo do e-mail guardado no rascunho (para regenerar o resumo e para a
+// secao "Conteudo do e-mail"). Thread enorme nao pode estourar o Redis.
+const MAX_CONTEUDO = 60_000;
 const DOMINIOS_PADRAO = "contas.com.br,contasnet.com.br";
 const PREFIXO_ROTAS = "/api/addon/gmail/";
 
@@ -77,6 +90,7 @@ interface Opcao {
   id: string;
   nome: string;
   cnpj?: string;
+  extra?: string;
 }
 
 interface UsuarioSuite {
@@ -85,18 +99,33 @@ interface UsuarioSuite {
   setorIds: string[];
 }
 
+type ModoEmpresas = "independente" | "agrupado_sincronizado";
+
 interface FormRascunho {
   titulo: string;
   clienteId: string;
+  empresas: Opcao[]; // outras empresas, alem do cliente principal
+  modoEmpresas: ModoEmpresas;
   assuntoId: string;
   origemId: string;
   setorId: string;
+  setoresExtra: Opcao[];
   executorId: string;
+  pessoas: Opcao[];
+  // Quem entrou pelo "Todo o setor": o segundo clique (e a troca de setor) tira
+  // SO essa gente — quem a IA sugeriu, quem foi adicionado a mao e o executor
+  // ficam. Mesma regra do app (usuariosAutoSetor).
+  pessoasDoSetor: string[];
+  processos: Opcao[];
+  competencia: string; // AAAA-MM
+  prioridade: string; // "" = padrao do Suite
+  prazo: string; // AAAA-MM-DD
+  visibilidade: "publico" | "restrito";
+  interno: boolean;
+  enviarEmails: boolean;
   finalizado: boolean;
   corpo: string; // so a parte editavel da descricao (ver partesDescricao)
   anexos: string[];
-  setoresExtra: string[];
-  pessoas: string[];
   campos: Record<string, string | boolean>;
 }
 
@@ -111,6 +140,7 @@ interface PreviewGmail {
     atendente?: string;
   };
   ia: { resumo: string; pontos: string[]; providencias: string[] };
+  conteudo: string;
   anexos: Array<{
     id: string;
     nome: string;
@@ -118,8 +148,8 @@ interface PreviewGmail {
     bloqueado: boolean;
     motivo: string;
   }>;
-  setoresSugeridos: Opcao[];
-  pessoasSugeridas: Opcao[];
+  // O que a IA citou e o Suite nao reconheceu: aparece para a pessoa decidir.
+  naoResolvidos: string[];
 }
 
 interface Rascunho {
@@ -137,10 +167,14 @@ interface Rascunho {
   corpoSistema?: string;
   opcoes?: { clientes: Opcao[]; assuntos: Opcao[]; executores: Opcao[] };
   camposDef?: CampoPersonalizado[];
-  // Campo que a pessoa esta trocando agora (so ele abre busca/lista) e o
-  // resultado da ultima busca desse campo.
+  camposFalharam?: boolean;
+  // Campo/lista que a pessoa esta mexendo agora (so ele abre busca ou lista)
+  // e o que aparece para escolher.
   editando?: string;
   resultados?: Opcao[];
+  resultadosTotal?: number;
+  // Feedback do resumo dado ainda na revisao (o "O resumo ficou bom?" do app).
+  feedbackRevisao?: "up" | "down" | "abrindo";
   // O que a IA/sistema sugeriu ao abrir, nunca sobrescrito: e a base do
   // feedback implicito (sugerido x escolhido).
   sugestao?: {
@@ -152,6 +186,8 @@ interface Rascunho {
     assuntoNome: string;
     finalizado: boolean;
     finalizadoMotivo?: string;
+    interno: boolean;
+    internoFonte: string;
   };
   criado?: {
     protocolo: string;
@@ -322,21 +358,38 @@ async function lerRascunho(id: string, conta: string): Promise<Rascunho> {
 // Dados de apoio (Suite)
 // ---------------------------------------------------------------------------
 
+const paraOpcao = (i: ItemLista): Opcao => ({
+  id: String(i.id),
+  nome: i.nome || String(i.id),
+  ...(i.extra ? { extra: i.extra } : {}),
+});
+
 async function listaCacheada(
   chave: string,
   buscar: () => Promise<ItemLista[]>,
 ): Promise<Opcao[]> {
   const cache = await cacheGet<Opcao[]>(chave).catch(() => null);
   if (Array.isArray(cache) && cache.length) return cache;
-  const itens = (await buscar())
-    .filter((i) => i.id)
-    .map((i) => ({ id: String(i.id), nome: i.nome || String(i.id) }));
+  const itens = (await buscar()).filter((i) => i.id).map(paraOpcao);
   await cacheSet(chave, itens, TTL_LISTA_SEG).catch(() => undefined);
   return itens;
 }
 
 const listaSetores = () => listaCacheada("addon:lista:setores", buscarSetores);
 const listaOrigens = () => listaCacheada("addon:lista:origens", buscarOrigens);
+
+// Pessoas de um setor. Vazio quando o Suite nao conseguiu filtrar: ai a base
+// inteira viria junto, e o app tambem nao despeja ninguem nesse caso.
+async function pessoasDoSetor(setorId: string): Promise<Opcao[]> {
+  if (!setorId) return [];
+  const chave = `addon:lista:pessoas-setor:${setorId}`;
+  const cache = await cacheGet<Opcao[]>(chave).catch(() => null);
+  if (Array.isArray(cache)) return cache;
+  const { itens, filtradoPorSetor } = await buscarUsuarios(undefined, setorId);
+  const lista = filtradoPorSetor === false ? [] : itens.filter((u) => u.id).map(paraOpcao);
+  await cacheSet(chave, lista, TTL_LISTA_SEG).catch(() => undefined);
+  return lista;
+}
 
 // Usuario do Suite com o MESMO e-mail da conta Google. E o equivalente do
 // "Configurar Perfil" do app. Dois usuarios com o mesmo e-mail nao viram
@@ -393,6 +446,55 @@ async function setorInicial(
 }
 
 // ---------------------------------------------------------------------------
+// Datas (mesmas regras do app)
+// ---------------------------------------------------------------------------
+
+// Hoje + N dias UTEIS, pulando sabado e domingo — o revPrazoPadrao do app. O
+// Suite empurra qualquer data para o proximo dia util, entao calcular assim faz
+// a tela mostrar o mesmo que vai valer no chamado.
+function prazoPadrao(dias = 7): string {
+  const [a, m, d] = hojeSaoPaulo().split("-").map(Number);
+  const dt = new Date(Date.UTC(a, m - 1, d));
+  let restantes = dias;
+  while (restantes > 0) {
+    dt.setUTCDate(dt.getUTCDate() + 1);
+    const dow = dt.getUTCDay();
+    if (dow !== 0 && dow !== 6) restantes--;
+  }
+  return dt.toISOString().slice(0, 10);
+}
+
+const dataBr = (iso: string) =>
+  /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso.split("-").reverse().join("/") : iso;
+const competenciaBr = (c: string) =>
+  /^\d{4}-\d{2}$/.test(c) ? `${c.slice(5, 7)}/${c.slice(0, 4)}` : c;
+
+// Competencias oferecidas: 12 meses para tras ate 2 para frente.
+function opcoesCompetencia(atual: string): C.ItemLista[] {
+  const [a, m] = competenciaAtual().split("-").map(Number);
+  const meses: string[] = [];
+  for (let i = -12; i <= 2; i++) {
+    const dt = new Date(Date.UTC(a, m - 1 + i, 1));
+    meses.push(dt.toISOString().slice(0, 7));
+  }
+  if (atual && !meses.includes(atual)) meses.push(atual);
+  return meses
+    .sort()
+    .reverse()
+    .map((c) => ({ texto: competenciaBr(c), valor: c, selecionado: c === atual }));
+}
+
+const PRIORIDADES: C.ItemLista[] = [
+  { texto: "Padrão do Suite", valor: "" },
+  { texto: "1 · Baixa", valor: "1" },
+  { texto: "2 · Média", valor: "2" },
+  { texto: "3 · Alta", valor: "3" },
+  { texto: "4 · Urgente", valor: "4" },
+];
+const rotuloPrioridade = (p: string) =>
+  PRIORIDADES.find((x) => x.valor === p)?.texto.replace(/^\d · /, "") || "Padrão";
+
+// ---------------------------------------------------------------------------
 // Descricao
 // ---------------------------------------------------------------------------
 
@@ -436,6 +538,11 @@ function descricaoFinal(r: Rascunho): string {
 // ---------------------------------------------------------------------------
 // Preparar (preview em segundo plano)
 // ---------------------------------------------------------------------------
+
+// Mesma lista que o /admin usa para separar o gasto de teste (admin.controller).
+function ramalDeTeste(): string {
+  return (process.env.RAMAIS_TESTE || "258").split(",")[0].trim() || "258";
+}
 
 async function gerarRascunho(r: Rascunho): Promise<void> {
   const inicio = Date.now();
@@ -498,6 +605,7 @@ async function gerarRascunho(r: Rascunho): Promise<void> {
           ? ia.providencias_sugeridas
           : [],
       },
+      conteudo: String(d.transcricao || "").slice(0, MAX_CONTEUDO),
       anexos: (Array.isArray(d.anexos) ? d.anexos : []).map((a: any) => ({
         id: String(a.id),
         nome: String(a.nome || ""),
@@ -505,34 +613,57 @@ async function gerarRascunho(r: Rascunho): Promise<void> {
         bloqueado: !!a.bloqueado,
         motivo: String(a.motivo || ""),
       })),
-      setoresSugeridos: (refs.setoresVinculados?.itens || []).map(opc),
-      pessoasSugeridas: (refs.usuariosVinculados?.itens || []).map(opc),
+      naoResolvidos: [
+        ...(refs.usuariosVinculados?.naoResolvidos || []),
+        ...(refs.setoresVinculados?.naoResolvidos || []),
+      ].map(String),
     };
 
     const setorFinal = refs.setor?.id ? String(refs.setor.id) : "";
+    const executor = refs.executor?.id ? opc(refs.executor) : undefined;
+    const pessoasIa: Opcao[] = (refs.usuariosVinculados?.itens || []).map(opc);
     const { corpo: corpoDesc } = partesDescricao(r.preview, cliente);
     const finalizadoIa = refs.finalizaApontamento?.valor === true;
+    const internoIa = refs.isInterno?.valor === true;
     r.form = {
       titulo: refs.titulo?.valor || ia.titulo || "",
       clienteId: cliente?.id || "",
+      empresas: [],
+      modoEmpresas: "independente",
       assuntoId: refs.tipo?.id ? String(refs.tipo.id) : "",
       origemId: refs.origem?.id ? String(refs.origem.id) : "",
       setorId: setorFinal,
-      executorId: refs.executor?.id ? String(refs.executor.id) : "",
+      // O principal sempre primeiro; o que a IA sugeriu vem depois (app).
+      setoresExtra: (refs.setoresVinculados?.itens || [])
+        .map(opc)
+        .filter((s: Opcao) => s.id !== setorFinal),
+      executorId: executor?.id || "",
+      // Quem vai atender tambem acompanha (revGarantirExecutorVinculado).
+      pessoas:
+        executor && !pessoasIa.some((p) => p.id === executor.id)
+          ? [...pessoasIa, executor]
+          : pessoasIa,
+      pessoasDoSetor: [],
+      processos: [],
+      // Competencia SEMPRE no mes corrente (decisao de produto do app): e o
+      // caso da maioria, e sobrepoe a sugestao da IA de proposito.
+      competencia: competenciaAtual(),
+      prioridade: refs.prioridade?.valor ? String(refs.prioridade.valor) : "",
+      // O prazo que a IA achou no texto ("ate sexta") vale; senao 7 dias uteis.
+      prazo: refs.prazo?.valor || prazoPadrao(7),
+      visibilidade: refs.visibilidade?.valor === "restrito" ? "restrito" : "publico",
+      interno: internoIa,
+      enviarEmails: refs.enviarEmails?.valor === true,
       finalizado: finalizadoIa,
       corpo: corpoDesc,
       anexos: [], // como no app: nenhum anexo vai sem a pessoa marcar
-      setoresExtra: r.preview.setoresSugeridos
-        .map((s) => s.id)
-        .filter((id) => id !== setorFinal),
-      pessoas: r.preview.pessoasSugeridas.map((p) => p.id),
       campos: {},
     };
     r.corpoSistema = corpoDesc;
     r.opcoes = {
       clientes: cliente ? [cliente] : [],
       assuntos: refs.tipo?.id ? [opc(refs.tipo)] : [],
-      executores: refs.executor?.id ? [opc(refs.executor)] : [],
+      executores: executor ? [executor] : [],
     };
     r.camposDef = refs.camposPersonalizados?.definicoes || [];
     r.sugestao = {
@@ -544,6 +675,8 @@ async function gerarRascunho(r: Rascunho): Promise<void> {
       assuntoNome: refs.tipo?.nome || "",
       finalizado: finalizadoIa,
       finalizadoMotivo: refs.finalizaApontamento?.motivo,
+      interno: internoIa,
+      internoFonte: String(refs.isInterno?.fonte || "ausente"),
     };
     r.status = "pronto";
     console.log(
@@ -567,13 +700,8 @@ async function gerarRascunho(r: Rascunho): Promise<void> {
   });
 }
 
-// Mesma lista que o /admin usa para separar o gasto de teste (admin.controller).
-function ramalDeTeste(): string {
-  return (process.env.RAMAIS_TESTE || "258").split(",")[0].trim() || "258";
-}
-
 // Espera a tarefa ate `ms`; devolve se ela terminou a tempo.
-async function terminouEm(tarefa: Promise<void>, ms: number): Promise<boolean> {
+async function terminouEm(tarefa: Promise<unknown>, ms: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
   const limite = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => resolve(false), ms);
@@ -585,7 +713,7 @@ async function terminouEm(tarefa: Promise<void>, ms: number): Promise<boolean> {
   }
 }
 
-function emSegundoPlano(tarefa: Promise<void>): void {
+function emSegundoPlano(tarefa: Promise<unknown>): void {
   try {
     waitUntil(tarefa);
   } catch {
@@ -599,29 +727,35 @@ function emSegundoPlano(tarefa: Promise<void>): void {
 
 // Toda acao vem da tela de revisao, que sempre tem estes campos: campo ausente
 // no evento quer dizer que a pessoa o deixou vazio, nao que ele nao existia.
-// Cliente, assunto, executor, setor e origem NAO sao lidos aqui: na tela eles
-// sao linhas com "Trocar", e so mudam pela acao "escolher".
+// Cliente, assunto, executor, setor, origem e as listas (empresas, setores,
+// pessoas, processos) NAO sao lidos aqui: na tela eles sao linhas com
+// "Trocar"/"Remover" e so mudam pelas acoes proprias.
 function absorverFormulario(r: Rascunho, evento: unknown): void {
   const f = r.form!;
   f.titulo = C.lerCampo(evento, "titulo");
   f.finalizado = C.lerInterruptor(evento, "finalizado");
   f.corpo = C.lerCampo(evento, "descricao");
+  f.competencia = C.lerCampo(evento, "competencia") || f.competencia;
+  f.prioridade = C.lerCampo(evento, "prioridade");
+  f.prazo = C.lerData(evento, "prazo") || "";
+  f.visibilidade = C.lerCampo(evento, "visibilidade") === "restrito" ? "restrito" : "publico";
+  f.interno = C.lerInterruptor(evento, "interno");
+  f.enviarEmails = C.lerInterruptor(evento, "enviar_emails");
+  if (f.empresas.length) {
+    f.modoEmpresas =
+      C.lerCampo(evento, "modo_empresas") === "agrupado_sincronizado"
+        ? "agrupado_sincronizado"
+        : "independente";
+  }
   if (r.preview?.anexos.some((a) => !a.bloqueado)) {
     f.anexos = C.lerLista(evento, "anexos");
   }
-  if (extrasDeSetor(r).length) f.setoresExtra = C.lerLista(evento, "setores_extra");
-  if (r.preview?.pessoasSugeridas.length) f.pessoas = C.lerLista(evento, "pessoas");
   for (const d of r.camposDef || []) {
     const nome = `cp_${d.id}`;
     if (d.tipo === "booleano") f.campos[d.id] = C.lerInterruptor(evento, nome);
     else if (d.tipo === "data") f.campos[d.id] = C.lerData(evento, nome) || "";
     else f.campos[d.id] = C.lerCampo(evento, nome);
   }
-}
-
-function extrasDeSetor(r: Rascunho): Opcao[] {
-  const principal = r.form?.setorId;
-  return (r.preview?.setoresSugeridos || []).filter((s) => s.id !== principal);
 }
 
 const ROTULOS: Record<string, string> = {
@@ -636,6 +770,8 @@ const ROTULOS: Record<string, string> = {
   competencia: "competência",
   prioridade: "prioridade",
   prazo_personalizado_data: "prazo",
+  visibilidade: "visibilidade",
+  modo_criacao: "como criar para várias empresas",
 };
 
 function rotuloCampo(campo: string, defs: CampoPersonalizado[] = []): string {
@@ -656,6 +792,7 @@ function faltando(r: Rascunho): string[] {
   if (!f.setorId) falta.push("setor");
   if (!f.executorId) falta.push("executor");
   if (!f.corpo.trim()) falta.push("descrição");
+  if (f.prazo && f.prazo < hojeSaoPaulo()) falta.push("prazo (a data já passou)");
   for (const d of r.camposDef || []) {
     if (!d.obrigatorio) continue;
     const v = f.campos[d.id];
@@ -667,34 +804,57 @@ function faltando(r: Rascunho): string[] {
   return falta;
 }
 
+// "interno" tem TRES estados no app: sim, nao e "ninguem decidiu". Sem decisao
+// a chave nao vai, e vale o padrao do ASSUNTO no Suite — mandar false sempre
+// derrubaria essa configuracao em silencio. Decidiu: o sistema (lookup/IA) ou
+// a pessoa, ao mudar o valor.
+function internoDecidido(r: Rascunho): boolean {
+  const s = r.sugestao!;
+  return ["lookup", "ia"].includes(s.internoFonte) || r.form!.interno !== s.interno;
+}
+
+const modoExecutor = (r: Rascunho) =>
+  r.usuario && r.form!.executorId === r.usuario.id ? "eu" : "escolher";
+
 function montarBodyCriar(r: Rascunho): Record<string, unknown> {
   const f = r.form!;
-  const modo = r.usuario && f.executorId === r.usuario.id ? "eu" : "escolher";
+  const modo = modoExecutor(r);
   const campos: Record<string, unknown> = {};
   for (const d of r.camposDef || []) {
     const v = f.campos[d.id];
     if (v === undefined || v === null || v === "") continue;
     campos[d.id] = v;
   }
+  const outras = f.empresas.map((e) => e.id).filter((id) => id && id !== f.clienteId);
+  const unicos = (ids: string[]) => ids.filter((id, i) => id && ids.indexOf(id) === i);
   return {
     ...(r.threadId ? { threadId: r.threadId } : { messageId: r.messageId }),
     anexosEscolhidos: f.anexos,
     cliente_id: f.clienteId,
+    // Varias empresas: o cliente principal continua indo separado (e a chave
+    // de idempotencia e de custo no backend).
+    cliente_ids: outras.length ? unicos([f.clienteId, ...outras]) : undefined,
+    modo_criacao: outras.length ? f.modoEmpresas : undefined,
     tipo_apontamento_id: f.assuntoId,
     descricao: descricaoFinal(r),
     origem_id: f.origemId,
-    setores_vinculados: [f.setorId, ...f.setoresExtra].filter(
-      (id, i, todos) => id && todos.indexOf(id) === i,
-    ),
+    setores_vinculados: unicos([f.setorId, ...f.setoresExtra.map((s) => s.id)]),
     executor_id: f.executorId,
     executor_modo: modo,
     responsavel_conclusao_id: modo === "escolher" ? f.executorId : undefined,
     titulo: f.titulo,
-    usuarios_vinculados: f.pessoas,
+    competencia: f.competencia || undefined,
+    prioridade: f.prioridade || undefined,
+    prazo_personalizado_data: f.prazo || undefined,
+    // Publico e o padrao do Suite: so vai quando for diferente (app).
+    visibilidade: f.visibilidade !== "publico" ? f.visibilidade : undefined,
+    ...(internoDecidido(r) ? { is_interno: f.interno } : {}),
+    usuarios_vinculados: unicos(f.pessoas.map((p) => p.id)),
+    processos_vinculados: f.processos.map((p) => p.id),
     campos_personalizados: Object.keys(campos).length ? campos : undefined,
     // Os dois vao sempre, como no app: o padrao da API ja e false.
     finaliza_apontamento: f.finalizado,
-    enviar_emails: false,
+    enviar_emails: f.enviarEmails,
     // So para o painel de custos.
     usuario: r.usuario?.nome || r.conta,
     cliente_nome: clienteEscolhido(r)?.nome || undefined,
@@ -731,13 +891,15 @@ async function enviarFeedback(dados: Record<string, unknown>): Promise<void> {
   await chamar(feedbackController, dados);
 }
 
+const corpoEditado = (r: Rascunho) =>
+  (r.form?.corpo || "").trim() !== (r.corpoSistema || "").trim();
+
 function feedbackImplicito(r: Rascunho): Record<string, unknown> {
   const s = r.sugestao!;
   const f = r.form!;
   const dif = (a?: string, b?: string) => String(a || "") !== String(b || "");
   const sistema = r.corpoSistema || "";
-  const editado = f.corpo.trim() !== sistema.trim();
-  const modo = r.usuario && f.executorId === r.usuario.id ? "eu" : "escolher";
+  const editado = corpoEditado(r);
   return {
     tipo: "implicito",
     origem: "email",
@@ -760,7 +922,7 @@ function feedbackImplicito(r: Rascunho): Record<string, unknown> {
       clienteVia: s.clienteVia,
       setorMudou: dif(s.setorId, f.setorId),
       executorMudou: dif(s.executorId, f.executorId),
-      executorModo: modo,
+      executorModo: modoExecutor(r),
       assuntoSugerido: s.assuntoNome,
       assuntoFinal:
         r.opcoes?.assuntos.find((a) => a.id === f.assuntoId)?.nome || "",
@@ -800,17 +962,36 @@ const curto = (s: string, n = 70) => (s.length > n ? `${s.slice(0, n - 1)}…` :
 // Telas
 // ---------------------------------------------------------------------------
 
-// Mesmo simbolo do icone da barra lateral (addon/*.json).
-const LOGO =
-  "https://contas.com.br/wp-content/uploads/2024/05/cropped-Contas-Contabilidade-Favicon-192x192.webp";
-// Verde do simbolo da Contas, no botao principal de cada tela.
-const VERDE: C.Cor = { red: 0.12, green: 0.62, blue: 0.35 };
+// Logo azul da Contas (o app e azul). Mesmo endereco do icone em addon/*.json.
+const LOGO = "https://contas.com.br/wp-content/uploads/2024/09/Contas-Contabilidade_logo.png";
+// Azul principal do app (--primary do tema claro, renderer/style.css: #0a4a97).
+const AZUL: C.Cor = { red: 0.04, green: 0.29, blue: 0.59 };
 
-const CAMPOS_EDITAVEIS = ["cliente", "assunto", "executor", "setor", "origem"] as const;
-type CampoEditavel = (typeof CAMPOS_EDITAVEIS)[number];
-const CAMPOS_COM_BUSCA: CampoEditavel[] = ["cliente", "assunto", "executor"];
-const ehCampoEditavel = (s: string): s is CampoEditavel =>
-  (CAMPOS_EDITAVEIS as readonly string[]).includes(s);
+// Campos que abrem busca ou lista. Os "unicos" trocam um valor; os de lista
+// acrescentam um item (o "+" e os chips do app).
+const EDITORES = {
+  cliente: { rotulo: "Cliente", busca: true, dica: "Nome ou CNPJ" },
+  empresa: { rotulo: "Empresa", busca: true, dica: "Nome ou CNPJ" },
+  assunto: { rotulo: "Assunto", busca: true },
+  executor: { rotulo: "Executor", busca: true },
+  pessoa: { rotulo: "Pessoa", busca: true },
+  processo: { rotulo: "Processo", busca: true },
+  setor: { rotulo: "Setor", busca: false },
+  setor_extra: { rotulo: "Setor", busca: false },
+  origem: { rotulo: "Origem", busca: false },
+} as const;
+type Editor = keyof typeof EDITORES;
+const ehEditor = (s: string): s is Editor => s in EDITORES;
+
+// Listas de itens com "Remover" (os chips do app).
+const LISTAS = {
+  empresas: "empresas",
+  setores: "setoresExtra",
+  pessoas: "pessoas",
+  processos: "processos",
+} as const;
+type Lista = keyof typeof LISTAS;
+const ehLista = (s: string): s is Lista => s in LISTAS;
 
 function cartaoContas(p: Omit<Parameters<typeof C.cartao>[0], "imagem">) {
   return C.cartao({ ...p, imagem: LOGO });
@@ -820,7 +1001,7 @@ function telaMensagem(titulo: string, texto: string, botao?: { texto: string; ac
   return cartaoContas({
     titulo,
     secoes: [{ widgets: [C.paragrafo(C.esc(texto))] }],
-    ...(botao ? { botaoPrincipal: { ...botao, cor: VERDE } } : {}),
+    ...(botao ? { botaoPrincipal: { ...botao, cor: AZUL } } : {}),
   });
 }
 
@@ -830,10 +1011,7 @@ function telaConectar() {
     secoes: [
       {
         widgets: [
-          C.item({
-            icone: "PERSON",
-            texto: "<b>Falta conectar esta conta no app</b>",
-          }),
+          C.item({ icone: "PERSON", texto: "<b>Falta conectar esta conta no app</b>" }),
           C.paragrafo(cinza(MSG_CONECTAR)),
         ],
       },
@@ -893,7 +1071,7 @@ function telaPreparar(threadId: string, messageId: string, ctx: Ctx) {
     botaoPrincipal: {
       texto: "Preparar chamado",
       acao: C.acao(ctx.url("preparar"), { threadId, messageId }),
-      cor: VERDE,
+      cor: AZUL,
     },
   });
 }
@@ -934,9 +1112,64 @@ function telaGerando(r: Rascunho, ctx: Ctx) {
     botaoPrincipal: {
       texto: "Atualizar",
       acao: C.acao(ctx.url("atualizar"), { rascunho: r.id }),
-      cor: VERDE,
+      cor: AZUL,
     },
   });
+}
+
+const rotuloOpcao = (o: Opcao) =>
+  curto(o.cnpj ? `${o.nome} — ${o.cnpj}` : o.extra ? `${o.nome} (${o.extra})` : o.nome, 90);
+
+// Busca/lista do campo que a pessoa abriu. Item vazio na frente: sem ele o
+// Google ja deixa o primeiro selecionado e o "ao mudar" nunca dispara para ele.
+function editorAberto(
+  r: Rascunho,
+  ctx: Ctx,
+  campo: Editor,
+  listaFixa?: Opcao[],
+): C.Widget[] {
+  const cfg = EDITORES[campo];
+  const escolher = C.acao(ctx.url("escolher"), { rascunho: r.id, campo });
+  const cancelar = { texto: "Cancelar", acao: C.acao(ctx.url("editar"), { rascunho: r.id }) };
+  const vazio: C.ItemLista = { texto: "— escolha —", valor: "", selecionado: true };
+  const dropdown = (itens: Opcao[], rotulo: string) =>
+    C.lista({
+      nome: `escolha_${campo}`,
+      rotulo,
+      itens: [vazio, ...itens.map((o) => ({ texto: rotuloOpcao(o), valor: o.id }))],
+      aoMudar: escolher,
+    });
+
+  if (!cfg.busca) {
+    return [dropdown(listaFixa || [], `Escolha o ${cfg.rotulo.toLowerCase()}`), C.botoes([cancelar])];
+  }
+
+  const resultados = r.resultados || [];
+  const total = r.resultadosTotal || resultados.length;
+  const saida: C.Widget[] = [
+    C.campoTexto({
+      nome: `busca_${campo}`,
+      rotulo: `Buscar ${cfg.rotulo.toLowerCase()}`,
+      dica: "dica" in cfg ? cfg.dica : undefined,
+    }),
+    C.botoes([
+      {
+        texto: "Buscar",
+        acao: C.acao(ctx.url("buscar"), { rascunho: r.id, alvo: campo }),
+        cor: AZUL,
+      },
+      cancelar,
+    ]),
+  ];
+  if (resultados.length) {
+    saida.push(dropdown(resultados, "Escolha um"));
+    if (total > resultados.length) {
+      saida.push(
+        C.paragrafo(cinza(`Mostrando ${resultados.length} de ${total}. Busque para achar outro.`)),
+      );
+    }
+  }
+  return saida;
 }
 
 interface InfoCampo {
@@ -944,79 +1177,74 @@ interface InfoCampo {
   rotulo: string;
   nome: string; // vazio = nada escolhido
   rodape?: string;
-  dica?: string; // da busca
   lista?: Opcao[]; // setor/origem: lista completa, sem busca
 }
 
-const rotuloOpcao = (o: Opcao) => curto(o.cnpj ? `${o.nome} — ${o.cnpj}` : o.nome, 90);
-
 // Um dado escolhido vira uma linha limpa com "Trocar". So o campo que a pessoa
-// esta trocando abre busca e lista — antes as cinco buscas ficavam empilhadas
-// na tela o tempo todo.
-function linhaCampo(r: Rascunho, ctx: Ctx, campo: CampoEditavel, info: InfoCampo): C.Widget[] {
-  const atual = info.nome
-    ? `<b>${C.esc(info.nome)}</b>`
-    : vermelho("Não escolhido");
-  const editar = (alvo: string) => C.acao(ctx.url("editar"), { rascunho: r.id, campo: alvo });
+// esta trocando abre busca e lista.
+function linhaCampo(r: Rascunho, ctx: Ctx, campo: Editor, info: InfoCampo): C.Widget[] {
+  const atual = info.nome ? `<b>${C.esc(info.nome)}</b>` : vermelho("Não escolhido");
+  const linha = (comBotao: boolean) =>
+    C.item({
+      icone: info.icone,
+      rotulo: info.rotulo,
+      texto: atual,
+      rodape: info.rodape,
+      ...(comBotao
+        ? {
+            botao: {
+              texto: info.nome ? "Trocar" : "Escolher",
+              acao: C.acao(ctx.url("editar"), { rascunho: r.id, campo }),
+            },
+          }
+        : {}),
+    });
+  if (r.editando !== campo) return [linha(true)];
+  return [linha(false), ...editorAberto(r, ctx, campo, info.lista)];
+}
 
-  if (r.editando !== campo) {
-    return [
-      C.item({
-        icone: info.icone,
-        rotulo: info.rotulo,
-        texto: atual,
-        rodape: info.rodape,
-        botao: { texto: info.nome ? "Trocar" : "Escolher", acao: editar(campo) },
-      }),
-    ];
-  }
-
-  const escolher = C.acao(ctx.url("escolher"), { rascunho: r.id, campo });
-  const cancelar = { texto: "Cancelar", acao: editar("") };
-  // Item vazio na frente: sem ele o Google ja deixa o primeiro selecionado e o
-  // "ao mudar" nunca dispara para ele.
-  const vazio: C.ItemLista = { texto: "— escolha —", valor: "", selecionado: true };
-
-  if (!CAMPOS_COM_BUSCA.includes(campo)) {
-    const lista = info.lista || [];
-    return [
-      C.lista({
-        nome: `escolha_${campo}`,
-        rotulo: info.rotulo,
-        itens: [vazio, ...lista.map((o) => ({ texto: rotuloOpcao(o), valor: o.id }))],
-        aoMudar: escolher,
-      }),
-      C.botoes([cancelar]),
-    ];
-  }
-
-  const resultados = r.resultados || [];
-  return [
-    C.item({ icone: info.icone, rotulo: info.rotulo, texto: atual }),
-    C.campoTexto({
-      nome: `busca_${campo}`,
-      rotulo: `Buscar ${info.rotulo.toLowerCase()}`,
-      dica: info.dica,
-    }),
-    C.botoes([
-      {
-        texto: "Buscar",
-        acao: C.acao(ctx.url("buscar"), { rascunho: r.id, alvo: campo }),
-        cor: VERDE,
+// Lista de itens com "Remover" e um botao para acrescentar (os chips do app).
+function blocoLista(
+  r: Rascunho,
+  ctx: Ctx,
+  p: {
+    lista: Lista;
+    editor: Editor;
+    icone: C.Icone;
+    itens: Opcao[];
+    rodape?: (o: Opcao) => string | undefined;
+    adicionar: string;
+    vazio: string;
+    extras?: C.Botao[];
+    listaFixa?: Opcao[];
+  },
+): C.Widget[] {
+  const saida: C.Widget[] = p.itens.map((o) =>
+    C.item({
+      icone: p.icone,
+      texto: C.esc(rotuloOpcao(o)),
+      rodape: p.rodape?.(o),
+      botao: {
+        texto: "Remover",
+        acao: C.acao(ctx.url("remover"), { rascunho: r.id, lista: p.lista, id: o.id }),
       },
-      cancelar,
-    ]),
-    ...(resultados.length
-      ? [
-          C.lista({
-            nome: `escolha_${campo}`,
-            rotulo: `${resultados.length} encontrado(s): escolha um`,
-            itens: [vazio, ...resultados.map((o) => ({ texto: rotuloOpcao(o), valor: o.id }))],
-            aoMudar: escolher,
-          }),
-        ]
-      : []),
-  ];
+    }),
+  );
+  if (!p.itens.length) saida.push(C.paragrafo(cinza(p.vazio)));
+  if (r.editando === p.editor) {
+    saida.push(...editorAberto(r, ctx, p.editor, p.listaFixa));
+  } else {
+    saida.push(
+      C.botoes([
+        {
+          texto: p.adicionar,
+          acao: C.acao(ctx.url("editar"), { rascunho: r.id, campo: p.editor }),
+        },
+        ...(p.extras || []),
+      ]),
+    );
+  }
+  return saida;
 }
 
 async function telaRevisao(r: Rascunho, ctx: Ctx, aviso?: string) {
@@ -1029,7 +1257,10 @@ async function telaRevisao(r: Rascunho, ctx: Ctx, aviso?: string) {
   const nomeEm = (lista: Opcao[] | undefined, id: string, reserva: string) =>
     id ? lista?.find((o) => o.id === id)?.nome || `${reserva} ${id}` : "";
   const cliente = clienteEscolhido(r);
+  const sugerido = (id: string, idIa?: string) =>
+    id && id === idIa ? "Sugerido pela IA" : undefined;
 
+  // --- avisos -------------------------------------------------------------
   const avisos: C.Widget[] = [];
   if (aviso) avisos.push(C.paragrafo(vermelho(aviso)));
   if (!p.iaOk) {
@@ -1040,36 +1271,70 @@ async function telaRevisao(r: Rascunho, ctx: Ctx, aviso?: string) {
   if (p.dryRun || ctx.simular) {
     avisos.push(C.paragrafo(laranja("Modo teste: nada vai para o Suite.")));
   }
+  const falta = faltando(r);
+  if (falta.length && !aviso) {
+    avisos.push(C.paragrafo(cinza(`Ainda falta: ${falta.join(", ")}.`)));
+  }
 
-  const sugerido = (id: string, idIa?: string) =>
-    id && id === idIa ? "Sugerido pela IA" : undefined;
-
-  const dados: C.Widget[] = [
+  // --- cliente, empresas, assunto, origem ----------------------------------
+  const chamado: C.Widget[] = [
     C.campoTexto({ nome: "titulo", rotulo: "Título", valor: f.titulo }),
     ...linhaCampo(r, ctx, "cliente", {
       icone: "STORE",
-      rotulo: "Cliente",
+      rotulo: "Cliente vinculado",
       nome: cliente?.nome || (f.clienteId ? `Cliente ${f.clienteId}` : ""),
       rodape: cliente?.cnpj || sugerido(f.clienteId, r.sugestao?.clienteId),
-      dica: "Nome ou CNPJ",
     }),
+  ];
+  // Varias empresas (o "+" ao lado do cliente no app).
+  if (f.empresas.length || r.editando === "empresa") {
+    chamado.push(
+      ...blocoLista(r, ctx, {
+        lista: "empresas",
+        editor: "empresa",
+        icone: "STORE",
+        itens: f.empresas,
+        rodape: (o) => o.cnpj,
+        adicionar: "+ Outra empresa",
+        vazio: "Nenhuma outra empresa.",
+      }),
+    );
+    if (f.empresas.length) {
+      chamado.push(
+        C.lista({
+          nome: "modo_empresas",
+          rotulo: "Como criar para várias empresas",
+          itens: [
+            {
+              texto: "Um chamado para cada empresa",
+              valor: "independente",
+              selecionado: f.modoEmpresas === "independente",
+            },
+            {
+              texto: "Um chamado agrupado (andam juntos)",
+              valor: "agrupado_sincronizado",
+              selecionado: f.modoEmpresas === "agrupado_sincronizado",
+            },
+          ],
+        }),
+      );
+    }
+  } else {
+    chamado.push(
+      C.botoes([
+        {
+          texto: "+ Outra empresa",
+          acao: C.acao(ctx.url("editar"), { rascunho: r.id, campo: "empresa" }),
+        },
+      ]),
+    );
+  }
+  chamado.push(
     ...linhaCampo(r, ctx, "assunto", {
       icone: "BOOKMARK",
-      rotulo: "Assunto",
+      rotulo: "Assunto (tipo do chamado)",
       nome: nomeEm(r.opcoes?.assuntos, f.assuntoId, "Assunto"),
       rodape: sugerido(f.assuntoId, r.sugestao?.assuntoId),
-    }),
-    ...linhaCampo(r, ctx, "executor", {
-      icone: "PERSON",
-      rotulo: "Executor",
-      nome: nomeEm(r.opcoes?.executores, f.executorId, "Usuário"),
-      rodape: r.usuario && f.executorId === r.usuario.id ? "Você" : undefined,
-    }),
-    ...linhaCampo(r, ctx, "setor", {
-      icone: "MULTIPLE_PEOPLE",
-      rotulo: "Setor",
-      nome: nomeEm(setores, f.setorId, "Setor"),
-      lista: setores,
     }),
     ...linhaCampo(r, ctx, "origem", {
       icone: "EMAIL",
@@ -1077,17 +1342,9 @@ async function telaRevisao(r: Rascunho, ctx: Ctx, aviso?: string) {
       nome: nomeEm(origens, f.origemId, "Origem"),
       lista: origens,
     }),
-    C.interruptor({
-      nome: "finalizado",
-      rotulo: "Criar já finalizado",
-      ligado: f.finalizado,
-      descricao:
-        r.sugestao?.finalizado && r.sugestao.finalizadoMotivo
-          ? curto(`Sugerido pela IA: ${r.sugestao.finalizadoMotivo}`, 140)
-          : "Ligado, ninguém vai trabalhar nele depois",
-    }),
-  ];
+  );
 
+  // --- campos do assunto ----------------------------------------------------
   const campos: C.Widget[] = (r.camposDef || []).map((d) => {
     const nome = `cp_${d.id}`;
     const rotulo = `${d.nome || `Campo ${d.id}`}${d.obrigatorio ? " *" : ""}`;
@@ -1102,43 +1359,157 @@ async function telaRevisao(r: Rascunho, ctx: Ctx, aviso?: string) {
     // sumir com o campo faria o Suite recusar sem a pessoa entender por que.
     return C.campoTexto({ nome, rotulo, valor: typeof v === "string" ? v : "" });
   });
+  if (r.camposFalharam) {
+    campos.push(
+      C.paragrafo(laranja("Não consegui carregar os campos deste assunto.")),
+      C.botoes([
+        { texto: "Tentar de novo", acao: C.acao(ctx.url("campos"), { rascunho: r.id }) },
+      ]),
+    );
+  }
 
-  const vinculos: C.Widget[] = [];
-  const extras = extrasDeSetor(r);
-  if (extras.length) {
-    vinculos.push(
-      C.lista({
-        nome: "setores_extra",
-        rotulo: "Outros setores (sugeridos pela IA)",
-        tipo: "CHECK_BOX",
-        itens: extras.map((s) => ({
-          texto: s.nome,
-          valor: s.id,
-          selecionado: f.setoresExtra.includes(s.id),
-        })),
-      }),
+  // --- quem atende ----------------------------------------------------------
+  const atende: C.Widget[] = [
+    ...linhaCampo(r, ctx, "setor", {
+      icone: "MULTIPLE_PEOPLE",
+      rotulo: "Setor",
+      nome: nomeEm(setores, f.setorId, "Setor"),
+      lista: setores,
+    }),
+    ...linhaCampo(r, ctx, "executor", {
+      icone: "PERSON",
+      rotulo: "Executor (quem vai atender)",
+      nome: nomeEm(r.opcoes?.executores, f.executorId, "Usuário"),
+      rodape: r.usuario && f.executorId === r.usuario.id ? "Eu mesmo" : undefined,
+    }),
+    C.interruptor({
+      nome: "finalizado",
+      rotulo: "Criar já finalizado",
+      ligado: f.finalizado,
+      descricao:
+        r.sugestao?.finalizado && r.sugestao.finalizadoMotivo
+          ? curto(`Sugerido pela IA: ${r.sugestao.finalizadoMotivo}`, 140)
+          : "Ligado, ninguém vai trabalhar nele depois",
+    }),
+  ];
+
+  // --- quem acompanha -------------------------------------------------------
+  const setorNome = nomeEm(setores, f.setorId, "Setor");
+  const acompanha: C.Widget[] = [
+    C.paragrafo("<b>Setores vinculados</b>"),
+    ...blocoLista(r, ctx, {
+      lista: "setores",
+      editor: "setor_extra",
+      icone: "MULTIPLE_PEOPLE",
+      itens: f.setoresExtra,
+      adicionar: "+ Adicionar setor",
+      vazio: "Só o setor principal.",
+      listaFixa: setores.filter(
+        (s) => s.id !== f.setorId && !f.setoresExtra.some((x) => x.id === s.id),
+      ),
+    }),
+    C.paragrafo("<b>Usuários vinculados</b>"),
+    ...blocoLista(r, ctx, {
+      lista: "pessoas",
+      editor: "pessoa",
+      icone: "PERSON",
+      itens: f.pessoas,
+      rodape: (o) =>
+        o.id === f.executorId
+          ? "Executor"
+          : f.pessoasDoSetor.includes(o.id)
+            ? "Do setor"
+            : undefined,
+      adicionar: "+ Adicionar pessoa",
+      vazio: "Ninguém acompanha.",
+      extras: f.setorId
+        ? [
+            {
+              texto: f.pessoasDoSetor.length ? "Tirar o setor" : "Todo o setor",
+              acao: C.acao(ctx.url("setor-pessoas"), { rascunho: r.id }),
+            },
+          ]
+        : [],
+    }),
+  ];
+  if (p.naoResolvidos.length) {
+    acompanha.push(
+      C.paragrafo(
+        laranja(
+          `A IA citou, mas não encontrei no Suite: ${p.naoResolvidos.join(", ")}. ` +
+            "Adicione à mão se fizer sentido.",
+        ),
+      ),
     );
   }
-  if (p.pessoasSugeridas.length) {
-    vinculos.push(
-      C.lista({
-        nome: "pessoas",
-        rotulo: "Pessoas (sugeridas pela IA)",
-        tipo: "CHECK_BOX",
-        itens: p.pessoasSugeridas.map((s) => ({
-          texto: s.nome,
-          valor: s.id,
-          selecionado: f.pessoas.includes(s.id),
-        })),
-      }),
-    );
-  }
+
+  // --- mais opcoes (sem recolher: tem campos de formulario) ----------------
+  const mais: C.Widget[] = [
+    C.lista({
+      nome: "competencia",
+      rotulo: "Competência",
+      itens: opcoesCompetencia(f.competencia),
+    }),
+    C.lista({
+      nome: "prioridade",
+      rotulo: "Prioridade",
+      itens: PRIORIDADES.map((x) => ({ ...x, selecionado: x.valor === f.prioridade })),
+    }),
+    C.campoData({ nome: "prazo", rotulo: "Prazo personalizado", valorIso: f.prazo }),
+    C.lista({
+      nome: "visibilidade",
+      rotulo: "Visibilidade",
+      itens: [
+        { texto: "Público", valor: "publico", selecionado: f.visibilidade === "publico" },
+        { texto: "Restrito", valor: "restrito", selecionado: f.visibilidade === "restrito" },
+      ],
+    }),
+    C.interruptor({
+      nome: "interno",
+      rotulo: "Chamado interno",
+      ligado: f.interno,
+      descricao: "Não envolve cliente externo",
+    }),
+    C.interruptor({
+      nome: "enviar_emails",
+      rotulo: "Enviar e-mails de notificação ao criar",
+      ligado: f.enviarEmails,
+    }),
+    C.paragrafo("<b>Processos vinculados</b>"),
+    ...blocoLista(r, ctx, {
+      lista: "processos",
+      editor: "processo",
+      icone: "DESCRIPTION",
+      itens: f.processos,
+      adicionar: "+ Adicionar processo",
+      vazio: setorNome
+        ? `Nenhum processo (opcional; só do setor ${setorNome}).`
+        : "Nenhum processo (opcional).",
+    }),
+  ];
+
+  // --- resumo -------------------------------------------------------------
+  const resumo: C.Widget[] = [
+    C.campoTexto({
+      nome: "descricao",
+      rotulo: "Resumo do chamado (editável)",
+      valor: f.corpo,
+      multilinha: true,
+    }),
+    C.botoes([
+      { texto: "↻ Regenerar resumo (IA)", acao: C.acao(ctx.url("regenerar"), { rascunho: r.id }) },
+    ]),
+    ...widgetsFeedback(r, ctx, r.feedbackRevisao, "revisao"),
+  ];
+
+  // --- anexos ---------------------------------------------------------------
+  const anexos: C.Widget[] = [];
   const liberados = p.anexos.filter((a) => !a.bloqueado);
   if (liberados.length) {
-    vinculos.push(
+    anexos.push(
       C.lista({
         nome: "anexos",
-        rotulo: "Anexar ao chamado",
+        rotulo: `Anexar ao chamado (${f.anexos.length} de ${liberados.length})`,
         tipo: "CHECK_BOX",
         itens: liberados.map((a) => ({
           texto: curto(`${a.nome} (${a.tamanhoTexto})`, 90),
@@ -1146,49 +1517,107 @@ async function telaRevisao(r: Rascunho, ctx: Ctx, aviso?: string) {
           selecionado: f.anexos.includes(a.id),
         })),
       }),
+      C.botoes([
+        { texto: "Selecionar tudo", acao: C.acao(ctx.url("anexos"), { rascunho: r.id, modo: "todos" }) },
+        { texto: "Limpar seleção", acao: C.acao(ctx.url("anexos"), { rascunho: r.id, modo: "nenhum" }) },
+      ]),
     );
   }
   for (const a of p.anexos.filter((x) => x.bloqueado)) {
-    vinculos.push(C.paragrafo(cinza(`${a.nome}: não pode ir (${a.motivo}).`)));
+    anexos.push(C.paragrafo(cinza(`${a.nome}: não pode ir (${a.motivo}).`)));
   }
+
+  // --- so leitura (recolhidas) ---------------------------------------------
+  const { cabecalho } = partesDescricao(p, cliente);
+  const dadosEmail: C.Widget[] = [
+    C.item({ icone: "EMAIL", rotulo: "Remetente", texto: C.esc(p.chamada.remetente || p.email.de || "-") }),
+    C.item({ icone: "BOOKMARK", rotulo: "Assunto", texto: C.esc(p.chamada.assunto || p.email.assunto || "-") }),
+    C.item({ icone: "PERSON", rotulo: "Responsável", texto: C.esc(p.chamada.atendente || "-") }),
+    C.item({ icone: "CLOCK", rotulo: "Recebido", texto: C.esc(p.email.data || "-") }),
+  ];
+  const textoLongo = (t: string, n: number) =>
+    C.paragrafo(C.esc(curto(t || "-", n)).replace(/\n/g, "<br>"));
 
   return cartaoContas({
     titulo: "Revisar chamado",
     subtitulo: curto(p.email.assunto || "(sem assunto)"),
     secoes: [
       { widgets: avisos },
-      { widgets: dados },
+      { widgets: chamado },
       { titulo: "Campos do assunto", widgets: campos },
+      { titulo: "Quem atende", widgets: atende },
+      { titulo: "Quem acompanha", widgets: acompanha },
+      { titulo: "Mais opções do chamado", widgets: mais },
+      // Recolhidas mostrando 1 item: e o caso de uso comum do Google, e estas
+      // secoes so tem leitura (campo de formulario nunca vai em secao recolhida).
+      { titulo: "Dados do e-mail", recolhida: 1, widgets: dadosEmail },
       {
-        titulo: "Resumo",
-        widgets: [
-          C.campoTexto({
-            nome: "descricao",
-            rotulo: "Resumo do chamado",
-            valor: f.corpo,
-            multilinha: true,
-          }),
-          C.paragrafo(cinza("Cliente e dados do e-mail entram sozinhos no começo do texto.")),
-        ],
+        titulo: "Conteúdo do e-mail",
+        recolhida: 1,
+        widgets: [C.paragrafo(cinza("O texto que a IA leu.")), textoLongo(p.conteudo, 4000)],
       },
-      // Sem recolher: campo escondido numa secao recolhida nao e garantido no
-      // evento, e a pessoa perderia as marcacoes sem ver.
-      { titulo: "Vínculos e anexos", widgets: vinculos },
       {
-        titulo: "E-mail",
+        titulo: "Dados do atendimento",
         recolhida: 1,
         widgets: [
-          C.item({ icone: "EMAIL", rotulo: "De", texto: C.esc(p.email.de || "-") }),
-          C.item({ icone: "CLOCK", rotulo: "Recebido", texto: C.esc(p.email.data || "-") }),
+          C.paragrafo(cinza("Gerado pelo sistema; entra no começo da descrição.")),
+          textoLongo(cabecalho, 2000),
         ],
       },
+      { titulo: "Resumo", widgets: resumo },
+      { titulo: "Anexos do e-mail", widgets: anexos },
     ],
+    // Texto fixo de proposito: a tela nao se redesenha quando o interruptor
+    // "finalizado" muda, e um "Criar chamado finalizado" velho enganaria.
     botaoPrincipal: {
       texto: ctx.simular ? "Simular criação" : "Criar chamado",
       acao: C.acao(ctx.url("criar"), { rascunho: r.id }),
-      cor: VERDE,
+      cor: AZUL,
     },
   });
+}
+
+// "A IA ajudou?" — o mesmo bloco serve a revisao (o "O resumo ficou bom?" do
+// app) e a tela de chamado criado (o modal pos-chamado do app).
+function widgetsFeedback(
+  r: Rascunho,
+  ctx: Ctx,
+  estado: "up" | "down" | "abrindo" | undefined,
+  onde: "revisao" | "criado",
+): C.Widget[] {
+  const nota = (n: string) => C.acao(ctx.url("feedback"), { rascunho: r.id, nota: n, onde });
+  if (estado === "up" || estado === "down") {
+    return [C.item({ icone: "STAR", texto: "<b>Obrigado pelo feedback!</b>" })];
+  }
+  if (estado === "abrindo") {
+    return [
+      C.lista({
+        nome: "tags",
+        rotulo: "O que errou?",
+        tipo: "CHECK_BOX",
+        itens: [
+          "Resumo incorreto/incompleto",
+          "Cliente errado",
+          "Assunto errado",
+          "Faltou providência",
+          "Outro",
+        ].map((t) => ({ texto: t, valor: t })),
+      }),
+      C.campoTexto({ nome: "comentario", rotulo: "O que faltou ou errou? (opcional)", multilinha: true }),
+      C.botoes([{ texto: "Enviar feedback", acao: nota("enviar"), cor: AZUL }]),
+    ];
+  }
+  return [
+    C.paragrafo(
+      onde === "revisao"
+        ? cinza("O resumo ficou bom?")
+        : "O que a IA sugeriu (resumo, cliente, assunto) ajudou?",
+    ),
+    C.botoes([
+      { texto: "👍 Ajudou", acao: nota("up") },
+      { texto: "👎 Precisa melhorar", acao: nota("down") },
+    ]),
+  ];
 }
 
 function telaCriado(r: Rascunho, ctx: Ctx) {
@@ -1204,7 +1633,7 @@ function telaCriado(r: Rascunho, ctx: Ctx) {
   const widgets: C.Widget[] = [
     C.item({
       icone: "CONFIRMATION_NUMBER_ICON",
-      rotulo: "Protocolo",
+      rotulo: c.protocolo.includes(",") ? "Protocolos" : "Protocolo",
       texto: c.protocolo
         ? `<b>${C.esc(c.protocolo)}</b>`
         : c.dryRun
@@ -1219,37 +1648,7 @@ function telaCriado(r: Rascunho, ctx: Ctx) {
   const secoes: C.Secao[] = [{ widgets }];
   // Feedback so em criacao real e nova, como no app. Nunca obrigatorio.
   if (!c.dryRun && !c.jaExistia) {
-    const fb: C.Widget[] = [];
-    const nota = (n: string) => C.acao(ctx.url("feedback"), { rascunho: r.id, nota: n });
-    if (c.feedback === "up" || c.feedback === "down") {
-      fb.push(C.item({ icone: "STAR", texto: "<b>Obrigado pelo feedback!</b>" }));
-    } else if (c.feedback === "abrindo") {
-      fb.push(
-        C.lista({
-          nome: "tags",
-          rotulo: "O que errou?",
-          tipo: "CHECK_BOX",
-          itens: [
-            "Resumo incorreto/incompleto",
-            "Cliente errado",
-            "Assunto errado",
-            "Faltou providência",
-            "Outro",
-          ].map((t) => ({ texto: t, valor: t })),
-        }),
-        C.campoTexto({ nome: "comentario", rotulo: "Comentário (opcional)", multilinha: true }),
-        C.botoes([{ texto: "Enviar feedback", acao: nota("enviar"), cor: VERDE }]),
-      );
-    } else {
-      fb.push(
-        C.paragrafo("O que a IA sugeriu (resumo, cliente, assunto) ajudou?"),
-        C.botoes([
-          { texto: "👍 Ajudou", acao: nota("up") },
-          { texto: "👎 Precisa melhorar", acao: nota("down") },
-        ]),
-      );
-    }
-    secoes.push({ titulo: "A IA ajudou?", widgets: fb });
+    secoes.push({ titulo: "A IA ajudou?", widgets: widgetsFeedback(r, ctx, c.feedback, "criado") });
   }
   return cartaoContas({
     titulo,
@@ -1268,29 +1667,61 @@ async function telaSimulada(r: Rascunho, ctx: Ctx) {
     listaSetores().catch(() => [] as Opcao[]),
     listaOrigens().catch(() => [] as Opcao[]),
   ]);
+  const f = r.form!;
   const nomeDe = (lista: Opcao[] | undefined, id: unknown) => {
     const s = String(id ?? "");
     return s ? lista?.find((o) => o.id === s)?.nome || s : "-";
   };
+  const nomesDe = (lista: Opcao[] | undefined, ids: unknown) =>
+    (Array.isArray(ids) ? ids : []).map((id) => nomeDe(lista, id)).join(", ") || "-";
   const linha = (icone: C.Icone, rotulo: string, valor: string) =>
     C.item({ icone, rotulo, texto: C.esc(valor) });
+  const todasEmpresas = [...(r.opcoes?.clientes || []), ...f.empresas];
 
   const dados: C.Widget[] = [
     linha("STORE", "Cliente", nomeDe(r.opcoes?.clientes, chamado.cliente_id)),
+    ...(chamado.cliente_ids?.length
+      ? [
+          linha("STORE", "Empresas", nomesDe(todasEmpresas, chamado.cliente_ids)),
+          linha(
+            "STORE",
+            "Como",
+            chamado.modo_criacao === "agrupado_sincronizado"
+              ? "Um chamado agrupado"
+              : "Um chamado para cada empresa",
+          ),
+        ]
+      : []),
     linha("BOOKMARK", "Assunto", nomeDe(r.opcoes?.assuntos, chamado.tipo_apontamento_id)),
-    linha("PERSON", "Executor", nomeDe(r.opcoes?.executores, chamado.executor_id)),
+    linha("EMAIL", "Origem", nomeDe(origens, chamado.origem_id)),
     linha(
       "MULTIPLE_PEOPLE",
       "Setores",
-      (chamado.setores_vinculados || []).map((id) => nomeDe(setores, id)).join(", ") || "-",
+      nomesDe([...setores, ...f.setoresExtra], chamado.setores_vinculados),
     ),
-    linha("EMAIL", "Origem", nomeDe(origens, chamado.origem_id)),
+    linha("PERSON", "Executor", nomeDe(r.opcoes?.executores, chamado.executor_id)),
+    linha("PERSON", "Usuários vinculados", nomesDe(f.pessoas, chamado.usuarios_vinculados)),
+    linha(
+      "CLOCK",
+      "Competência · Prazo",
+      `${competenciaBr(String(chamado.competencia || "-"))} · ${dataBr(String(chamado.prazo_personalizado_data || "-"))}`,
+    ),
+    linha(
+      "STAR",
+      "Prioridade · Visibilidade",
+      `${rotuloPrioridade(String(chamado.prioridade ?? ""))} · ${chamado.visibilidade === "restrito" ? "Restrito" : "Público"}`,
+    ),
     linha(
       "CONFIRMATION_NUMBER_ICON",
-      "Finalizado",
-      chamado.finaliza_apontamento ? "Sim" : "Não",
+      "Interno · E-mails · Finalizado",
+      [
+        chamado.is_interno === undefined ? "padrão do assunto" : chamado.is_interno ? "sim" : "não",
+        chamado.enviar_emails ? "sim" : "não",
+        chamado.finaliza_apontamento ? "sim" : "não",
+      ].join(" · "),
     ),
-    linha("DESCRIPTION", "Anexos", String(r.form?.anexos.length || 0)),
+    linha("DESCRIPTION", "Processos", nomesDe(f.processos, chamado.processos_vinculados)),
+    linha("DESCRIPTION", "Anexos", String(f.anexos.length || 0)),
   ];
   const problemas = [...falta, ...invalidos].map((x) => rotuloCampo(x, r.camposDef));
   if (problemas.length) {
@@ -1315,7 +1746,7 @@ async function telaSimulada(r: Rascunho, ctx: Ctx) {
     botaoPrincipal: {
       texto: "Voltar à revisão",
       acao: C.acao(ctx.url("atualizar"), { rascunho: r.id }),
-      cor: VERDE,
+      cor: AZUL,
     },
   });
 }
@@ -1470,36 +1901,67 @@ async function rascunhoEmRevisao(ctx: Ctx): Promise<Rascunho | { tela: unknown }
   return r;
 }
 
-// "Trocar" abre o campo; campo vazio fecha (o "Cancelar").
+async function salvarERevisar(r: Rascunho, ctx: Ctx, aviso?: string) {
+  await salvarRascunho(r);
+  return C.resposta.atualizar(await telaRevisao(r, ctx, aviso));
+}
+
+// O que aparece de cara quando o campo abre, antes de qualquer busca: as
+// pessoas do setor (executor/pessoa, como o dropdown do app), os processos do
+// setor e os assuntos (o app abre a lista inteira ao focar).
+async function listaInicial(r: Rascunho, campo: Editor): Promise<Opcao[]> {
+  const f = r.form!;
+  if (campo === "executor" || campo === "pessoa") {
+    const doSetor = await pessoasDoSetor(f.setorId);
+    const eu =
+      campo === "executor" && r.usuario
+        ? [{ id: r.usuario.id, nome: `Eu mesmo (${r.usuario.nome})` }]
+        : [];
+    return [...eu, ...doSetor.filter((p) => p.id !== r.usuario?.id || campo === "pessoa")];
+  }
+  if (campo === "processo") return (await buscarProcessos(f.setorId)).filter((p) => p.id).map(paraOpcao);
+  if (campo === "assunto") return (await buscarTipos()).filter((t) => t.id).map(paraOpcao);
+  return [];
+}
+
+// "Trocar"/"+ Adicionar" abre o campo; campo vazio fecha (o "Cancelar").
 async function acaoEditar(ctx: Ctx) {
   const r = await rascunhoEmRevisao(ctx);
   if ("tela" in r) return r.tela;
   const campo = C.lerParametro(ctx.evento, "campo");
-  r.editando = ehCampoEditavel(campo) ? campo : undefined;
+  r.editando = ehEditor(campo) ? campo : undefined;
   r.resultados = [];
-  await salvarRascunho(r);
-  return C.resposta.atualizar(await telaRevisao(r, ctx));
+  r.resultadosTotal = 0;
+  let aviso: string | undefined;
+  if (r.editando) {
+    try {
+      const lista = await listaInicial(r, r.editando as Editor);
+      r.resultados = lista.slice(0, MAX_OPCOES);
+      r.resultadosTotal = lista.length;
+    } catch (error) {
+      console.warn(
+        `[addon:gmail:editar] rasc=${r.id} lista de ${campo} falhou: ${getErrorMessage(error)}`,
+      );
+      aviso = "Não consegui carregar a lista do Suite. Use a busca.";
+    }
+  }
+  return salvarERevisar(r, ctx, aviso);
 }
 
 async function acaoBuscar(ctx: Ctx) {
   const r = await rascunhoEmRevisao(ctx);
   if ("tela" in r) return r.tela;
   const alvo = C.lerParametro(ctx.evento, "alvo");
-  if (!CAMPOS_COM_BUSCA.includes(alvo as CampoEditavel)) {
+  if (!ehEditor(alvo) || !EDITORES[alvo].busca) {
     throw new AppError({ statusCode: 400, code: "ADDON_ALVO_INVALIDO", message: MSG_INESPERADO });
   }
   r.editando = alvo;
   const termo = C.lerCampo(ctx.evento, `busca_${alvo}`);
-  if (!termo) {
-    await salvarRascunho(r);
-    return C.resposta.atualizar(
-      await telaRevisao(r, ctx, "Digite o que buscar antes de clicar em Buscar."),
-    );
-  }
+  if (!termo) return salvarERevisar(r, ctx, "Digite o que buscar antes de clicar em Buscar.");
 
   let achados: Opcao[] = [];
   try {
-    if (alvo === "cliente") {
+    if (alvo === "cliente" || alvo === "empresa") {
       const digitos = termo.replace(/\D+/g, "");
       // Mesma regra do app: 11+ digitos e CPF/CNPJ, o resto e nome.
       const lista = await buscarClientes(
@@ -1509,13 +1971,11 @@ async function acaoBuscar(ctx: Ctx) {
         .filter((c) => c.id)
         .map((c) => ({ id: String(c.id), nome: c.razao_social || String(c.id), cnpj: c.cnpj }));
     } else if (alvo === "assunto") {
-      achados = (await buscarTipos(termo))
-        .filter((t) => t.id)
-        .map((t) => ({ id: String(t.id), nome: t.extra ? `${t.nome} (${t.extra})` : t.nome }));
+      achados = (await buscarTipos(termo)).filter((t) => t.id).map(paraOpcao);
+    } else if (alvo === "processo") {
+      achados = (await buscarProcessos(r.form!.setorId, termo)).filter((p) => p.id).map(paraOpcao);
     } else {
-      achados = (await buscarUsuarios(termo)).itens
-        .filter((u) => u.id)
-        .map((u) => ({ id: String(u.id), nome: u.nome }));
+      achados = (await buscarUsuarios(termo)).itens.filter((u) => u.id).map(paraOpcao);
     }
   } catch (error) {
     // A busca falhar nao pode jogar fora o que a pessoa ja preencheu: o aviso
@@ -1523,69 +1983,237 @@ async function acaoBuscar(ctx: Ctx) {
     console.warn(
       `[addon:gmail:buscar] rasc=${r.id} busca de ${alvo} falhou: ${getErrorMessage(error)}`,
     );
-    await salvarRascunho(r);
-    return C.resposta.atualizar(
-      await telaRevisao(r, ctx, `Não consegui buscar no Suite agora: ${mensagemParaPessoa(error)}`),
-    );
+    return salvarERevisar(r, ctx, `Não consegui buscar no Suite agora: ${mensagemParaPessoa(error)}`);
   }
 
   r.resultados = achados.slice(0, MAX_OPCOES);
-  await salvarRascunho(r);
-
-  const aviso = !achados.length
-    ? `Nada encontrado para "${curto(termo, 40)}".`
-    : achados.length > MAX_OPCOES
-      ? `Mostrando ${MAX_OPCOES} de ${achados.length}. Refine a busca se não achar.`
-      : undefined;
-  return C.resposta.atualizar(await telaRevisao(r, ctx, aviso));
+  r.resultadosTotal = achados.length;
+  return salvarERevisar(
+    r,
+    ctx,
+    achados.length ? undefined : `Nada encontrado para "${curto(termo, 40)}".`,
+  );
 }
 
-const OPCOES_DO_CAMPO = {
-  cliente: "clientes",
-  assunto: "assuntos",
-  executor: "executores",
-} as const;
+// Quem vai atender tambem acompanha (revGarantirExecutorVinculado do app).
+function garantirExecutorVinculado(r: Rascunho): void {
+  const f = r.form!;
+  if (!f.executorId || f.pessoas.some((p) => p.id === f.executorId)) return;
+  const nome = r.opcoes!.executores.find((o) => o.id === f.executorId)?.nome || "";
+  f.pessoas.push({ id: f.executorId, nome });
+  f.pessoasDoSetor = f.pessoasDoSetor.filter((id) => id !== f.executorId);
+}
 
-// A pessoa escolheu na lista do campo aberto. Fecha o campo e, se foi o
-// assunto, troca os campos personalizados que o Suite exige.
+// A pessoa escolheu na lista do campo aberto. Fecha o campo e aplica as regras
+// que o app aplica na mesma troca.
 async function acaoEscolher(ctx: Ctx) {
   const r = await rascunhoEmRevisao(ctx);
   if ("tela" in r) return r.tela;
   const campo = C.lerParametro(ctx.evento, "campo");
   const valor = C.lerCampo(ctx.evento, `escolha_${campo}`);
   const f = r.form!;
+  const escolhido = (r.resultados || []).find((o) => o.id === valor);
+  const guardarEm = (lista: Opcao[], o: Opcao | undefined) => {
+    if (o && !lista.some((x) => x.id === o.id)) lista.push(o);
+  };
   let aviso: string | undefined;
 
   // "— escolha —" nao apaga o que ja estava escolhido.
-  if (valor && ehCampoEditavel(campo)) {
-    if (campo === "setor") f.setorId = valor;
-    else if (campo === "origem") f.origemId = valor;
-    else {
-      // Guarda o escolhido nas opcoes: e de la que a tela tira o nome dele.
-      const lista = r.opcoes![OPCOES_DO_CAMPO[campo]];
-      const achado = (r.resultados || []).find((o) => o.id === valor);
-      if (achado && !lista.some((o) => o.id === valor)) lista.push(achado);
-      if (campo === "cliente") f.clienteId = valor;
-      if (campo === "executor") f.executorId = valor;
-      if (campo === "assunto" && f.assuntoId !== valor) {
-        f.assuntoId = valor;
-        try {
-          r.camposDef = await buscarCamposDoTipo(valor);
-        } catch (error) {
-          console.warn(
-            `[addon:gmail:escolher] rasc=${r.id} campos do assunto falharam: ${getErrorMessage(error)}`,
-          );
-          r.camposDef = [];
-          aviso =
-            "Não consegui carregar os campos deste assunto. O Suite pode recusar se faltar algum.";
-        }
+  if (valor && ehEditor(campo)) {
+    if (campo === "cliente") {
+      guardarEm(r.opcoes!.clientes, escolhido);
+      f.clienteId = valor;
+      f.empresas = f.empresas.filter((e) => e.id !== valor);
+    } else if (campo === "empresa") {
+      if (valor !== f.clienteId) guardarEm(f.empresas, escolhido);
+    } else if (campo === "assunto" && f.assuntoId !== valor) {
+      guardarEm(r.opcoes!.assuntos, escolhido);
+      f.assuntoId = valor;
+      aviso = await carregarCampos(r, valor);
+    } else if (campo === "executor") {
+      // "Eu mesmo (Fulano)" vira so "Fulano" no nome guardado.
+      const nome =
+        r.usuario && valor === r.usuario.id ? r.usuario.nome : escolhido?.nome || "";
+      guardarEm(r.opcoes!.executores, { id: valor, nome });
+      f.executorId = valor;
+      garantirExecutorVinculado(r);
+    } else if (campo === "pessoa") {
+      guardarEm(f.pessoas, escolhido);
+    } else if (campo === "setor" && f.setorId !== valor) {
+      f.setorId = valor;
+      f.setoresExtra = f.setoresExtra.filter((s) => s.id !== valor);
+      // Troca de setor: sai o pessoal do setor ANTIGO (o executor fica), e os
+      // processos, que o Suite so aceita do setor do executor (regras do app).
+      const sairam = new Set(f.pessoasDoSetor);
+      f.pessoas = f.pessoas.filter((p) => !sairam.has(p.id) || p.id === f.executorId);
+      f.pessoasDoSetor = [];
+      if (f.processos.length) {
+        f.processos = [];
+        aviso = "Os processos vinculados saíram: eles dependem do setor.";
       }
+    } else if (campo === "setor_extra") {
+      const setores = await listaSetores().catch(() => [] as Opcao[]);
+      if (valor !== f.setorId) guardarEm(f.setoresExtra, setores.find((s) => s.id === valor));
+    } else if (campo === "origem") {
+      f.origemId = valor;
+    } else if (campo === "processo") {
+      guardarEm(f.processos, escolhido);
     }
   }
   r.editando = undefined;
   r.resultados = [];
+  r.resultadosTotal = 0;
+  return salvarERevisar(r, ctx, aviso);
+}
+
+// Campos personalizados do assunto. Falhou: avisa e oferece "Tentar de novo",
+// em vez de deixar o Suite recusar sem a pessoa entender (rev-campos-retry).
+async function carregarCampos(r: Rascunho, assuntoId: string): Promise<string | undefined> {
+  try {
+    r.camposDef = assuntoId ? await buscarCamposDoTipo(assuntoId) : [];
+    r.camposFalharam = false;
+    return undefined;
+  } catch (error) {
+    console.warn(
+      `[addon:gmail:campos] rasc=${r.id} campos do assunto falharam: ${getErrorMessage(error)}`,
+    );
+    r.camposDef = [];
+    r.camposFalharam = true;
+    return "Não consegui carregar os campos deste assunto. O Suite pode recusar se faltar algum.";
+  }
+}
+
+async function acaoCampos(ctx: Ctx) {
+  const r = await rascunhoEmRevisao(ctx);
+  if ("tela" in r) return r.tela;
+  const aviso = await carregarCampos(r, r.form!.assuntoId);
+  return salvarERevisar(r, ctx, aviso);
+}
+
+// O "×" dos chips do app.
+async function acaoRemover(ctx: Ctx) {
+  const r = await rascunhoEmRevisao(ctx);
+  if ("tela" in r) return r.tela;
+  const lista = C.lerParametro(ctx.evento, "lista");
+  const id = C.lerParametro(ctx.evento, "id");
+  if (ehLista(lista)) {
+    const f = r.form!;
+    const chave = LISTAS[lista];
+    f[chave] = f[chave].filter((o: Opcao) => o.id !== id);
+    if (lista === "pessoas") f.pessoasDoSetor = f.pessoasDoSetor.filter((x) => x !== id);
+  }
+  return salvarERevisar(r, ctx);
+}
+
+// "Todo o setor" / "Tirar o setor": o botao nao guarda estado proprio; ligado
+// e ter alguem que entrou por ele (mesma regra do app).
+async function acaoSetorPessoas(ctx: Ctx) {
+  const r = await rascunhoEmRevisao(ctx);
+  if ("tela" in r) return r.tela;
+  const f = r.form!;
+  if (f.pessoasDoSetor.length) {
+    const sairam = new Set(f.pessoasDoSetor);
+    f.pessoas = f.pessoas.filter((p) => !sairam.has(p.id) || p.id === f.executorId);
+    f.pessoasDoSetor = [];
+    return salvarERevisar(r, ctx);
+  }
+  let pessoas: Opcao[];
+  try {
+    pessoas = await pessoasDoSetor(f.setorId);
+  } catch (error) {
+    console.warn(`[addon:gmail:setor-pessoas] rasc=${r.id} falhou: ${getErrorMessage(error)}`);
+    pessoas = [];
+  }
+  if (!pessoas.length) {
+    return salvarERevisar(
+      r,
+      ctx,
+      "Não deu para carregar as pessoas do setor. Adicione quem acompanha à mão.",
+    );
+  }
+  const novos = pessoas.filter((p) => !f.pessoas.some((x) => x.id === p.id));
+  f.pessoas.push(...novos);
+  f.pessoasDoSetor = novos.map((p) => p.id);
+  return salvarERevisar(r, ctx);
+}
+
+async function acaoAnexos(ctx: Ctx) {
+  const r = await rascunhoEmRevisao(ctx);
+  if ("tela" in r) return r.tela;
+  // "Selecionar tudo" ignora os bloqueados: marcar um anexo que o Suite vai
+  // recusar so adiaria o erro para a hora de criar (regra do app).
+  r.form!.anexos =
+    C.lerParametro(ctx.evento, "modo") === "todos"
+      ? r.preview!.anexos.filter((a) => !a.bloqueado).map((a) => a.id)
+      : [];
+  return salvarERevisar(r, ctx);
+}
+
+// "↻ Regenerar resumo (IA)": re-chama so o resumo, com o conteudo ja lido —
+// nao relê o e-mail e nao mexe nos campos escolhidos (mesmo do app).
+async function acaoRegenerar(ctx: Ctx) {
+  const r = await rascunhoEmRevisao(ctx);
+  if ("tela" in r) return r.tela;
+  const p = r.preview!;
+  if (!p.conteudo.trim()) {
+    return salvarERevisar(r, ctx, "Não há conteúdo do e-mail para regenerar o resumo.");
+  }
   await salvarRascunho(r);
-  return C.resposta.atualizar(await telaRevisao(r, ctx, aviso));
+
+  const aplicar = (alvo: Rascunho, resumo: Record<string, any>) => {
+    alvo.preview!.ia = {
+      resumo: resumo.resumo || "",
+      pontos: Array.isArray(resumo.pontos_principais) ? resumo.pontos_principais : [],
+      providencias: Array.isArray(resumo.providencias_sugeridas)
+        ? resumo.providencias_sugeridas
+        : [],
+    };
+    alvo.preview!.iaOk = true;
+    const { corpo } = partesDescricao(alvo.preview!, clienteEscolhido(alvo));
+    alvo.form!.corpo = corpo;
+    alvo.corpoSistema = corpo;
+  };
+
+  let resultado: Record<string, any> | undefined;
+  let falha: unknown;
+  const tarefa = gerarResumoGemini({
+    text: p.conteudo,
+    origem: "email",
+    fonte: "email",
+    ramal: r.simular ? ramalDeTeste() : undefined,
+    usuario: r.usuario?.nome || r.conta,
+    itemId: itemDo(r),
+  }).then(
+    (x) => {
+      resultado = x.resumo as unknown as Record<string, any>;
+    },
+    (error) => {
+      falha = error;
+    },
+  );
+
+  if (!(await terminouEm(tarefa, ESPERA_REGENERAR_MS))) {
+    // A IA passou do tempo do Google: termina em segundo plano e grava no
+    // rascunho mais novo (a pessoa pode ter mexido em outro campo nesse meio).
+    emSegundoPlano(
+      tarefa.then(async () => {
+        if (!resultado) return;
+        const atual = await cacheGet<Rascunho>(chaveRascunho(r.id)).catch(() => null);
+        if (!atual || atual.criado) return;
+        aplicar(atual, resultado);
+        await salvarRascunho(atual);
+      }),
+    );
+    return salvarERevisar(r, ctx, "A IA ainda está reescrevendo o resumo. Clique em Atualizar daqui a pouco.");
+  }
+  if (falha || !resultado) {
+    console.warn(
+      `[addon:gmail:regenerar] rasc=${r.id} falhou: ${getErrorMessage(falha || "sem resumo")}`,
+    );
+    return salvarERevisar(r, ctx, `Não foi possível regenerar o resumo: ${mensagemParaPessoa(falha)}`);
+  }
+  aplicar(r, resultado);
+  return salvarERevisar(r, ctx);
 }
 
 async function acaoCriar(ctx: Ctx) {
@@ -1669,17 +2297,30 @@ async function acaoCriar(ctx: Ctx) {
   return C.resposta.atualizar(telaCriado(r, ctx));
 }
 
+// 👍/👎 da revisao ("O resumo ficou bom?") e da tela de chamado criado.
 async function acaoFeedback(ctx: Ctx) {
   const r = await lerRascunho(C.lerParametro(ctx.evento, "rascunho"), ctx.conta);
-  if (!r.criado) return C.resposta.atualizar(await telaDoRascunho(r, ctx));
+  const naRevisao = C.lerParametro(ctx.evento, "onde") === "revisao" && !r.criado;
+  if (!naRevisao && !r.criado) return C.resposta.atualizar(await telaDoRascunho(r, ctx));
+  if (naRevisao) {
+    if (r.status !== "pronto") return C.resposta.atualizar(await telaDoRascunho(r, ctx));
+    // O resto do formulario vem no mesmo clique: nao pode se perder.
+    absorverFormulario(r, ctx.evento);
+  }
   const nota = C.lerParametro(ctx.evento, "nota");
+  const definir = (v: "up" | "down" | "abrindo") => {
+    if (naRevisao) r.feedbackRevisao = v;
+    else r.criado!.feedback = v;
+  };
+  const redesenhar = async () =>
+    C.resposta.atualizar(naRevisao ? await telaRevisao(r, ctx) : telaCriado(r, ctx));
 
   if (nota === "down") {
     // 👎 abre os detalhes em vez de enviar: e no "o que errou" que esta a
     // informacao util para corrigir o prompt (mesma decisao do app).
-    r.criado.feedback = "abrindo";
+    definir("abrindo");
     await salvarRascunho(r);
-    return C.resposta.atualizar(telaCriado(r, ctx));
+    return redesenhar();
   }
 
   const rating = nota === "up" ? "up" : "down";
@@ -1691,11 +2332,11 @@ async function acaoFeedback(ctx: Ctx) {
     rating,
     tags: rating === "down" ? C.lerLista(ctx.evento, "tags") : [],
     comentario: rating === "down" ? C.lerCampo(ctx.evento, "comentario") : "",
-    descEditada: (r.form?.corpo || "").trim() !== (r.corpoSistema || "").trim(),
+    descEditada: corpoEditado(r),
   });
-  r.criado.feedback = rating;
+  definir(rating);
   await salvarRascunho(r);
-  return C.resposta.atualizar(telaCriado(r, ctx));
+  return redesenhar();
 }
 
 // ---------------------------------------------------------------------------
@@ -1710,6 +2351,11 @@ const ACOES: Record<string, (ctx: Ctx) => Promise<unknown>> = {
   editar: acaoEditar,
   buscar: acaoBuscar,
   escolher: acaoEscolher,
+  remover: acaoRemover,
+  "setor-pessoas": acaoSetorPessoas,
+  campos: acaoCampos,
+  anexos: acaoAnexos,
+  regenerar: acaoRegenerar,
   criar: acaoCriar,
   feedback: acaoFeedback,
 };
