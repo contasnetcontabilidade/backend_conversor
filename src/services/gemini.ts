@@ -596,7 +596,8 @@ contexto, quando for claro, com este glossario do escritorio: CBS, IBS, pro-labo
 presuncao, lucro presumido, Simples Nacional, DCTFWeb, eSocial, e-CAC, SIEG, Dominio, Onvio,
 Acessorias, Suite/SuiteWeb (tambem chamado de Switch), CertProtect, AnyDesk, GoTo. Ex.: "CDS" nao
 existe como tributo — e "CBS" (o tributo novo da reforma); "CIEG" e "SIEG". Escreva sempre a forma
-corrigida. Nunca "corrija" nome de cliente.
+corrigida. Quando NAO der para ter certeza (termo, numero ou nome que a transcricao pode ter
+errado), escreva o que entendeu seguido de "(a confirmar)". Nunca "corrija" nome de cliente.
 
 Campos obrigatorios:
 - titulo: string (assunto curto do chamado, ate ~80 caracteres)
