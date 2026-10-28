@@ -41,6 +41,8 @@ import {
 } from "../services/store";
 import { montarChamadoBodyDaRequisicao } from "../services/chamadoPayload";
 import { gerarResumoGemini } from "../services/gemini";
+import { publishAbrirEmail } from "../services/ably";
+import { ensureBodyObject, getOptionalString } from "../utils/request";
 import {
   buscarCamposDoTipo,
   buscarClientes,
@@ -344,6 +346,9 @@ const chaveRascunho = (id: string) => `addon:gmail:rasc:${id}`;
 const chaveItem = (conta: string, item: string) =>
   `addon:gmail:item:${conta}:${item}`;
 const chavePerfil = (conta: string) => `addon:gmail:perfil:${conta}`;
+// Em qual ramal esta o app desktop desta conta Google (o app grava ao iniciar).
+const chaveRamalDaConta = (conta: string) => `addon:gmail:ramal:${conta}`;
+const TTL_RAMAL_SEG = 180 * 24 * 3600;
 const itemDo = (r: { threadId: string; messageId: string }) =>
   r.threadId || r.messageId;
 
@@ -1065,7 +1070,10 @@ function telaInicio() {
   });
 }
 
-function telaPreparar(threadId: string, messageId: string, ctx: Ctx) {
+// E-mail aberto: o caminho principal e abrir a revisao no app desktop. No
+// painel, a IA esbarra no limite de poucos segundos do Google e a pessoa
+// ficava clicando em "Atualizar".
+function telaAbrirNoApp(threadId: string, messageId: string, ctx: Ctx) {
   return cartaoContas({
     titulo: "Abrir chamado",
     subtitulo: "Esta conversa ainda não tem chamado",
@@ -1073,23 +1081,78 @@ function telaPreparar(threadId: string, messageId: string, ctx: Ctx) {
       {
         widgets: [
           C.item({
-            icone: "STAR",
-            texto: "<b>A IA prepara para você</b>",
-            rodape: "Cliente, assunto, setor e resumo",
+            icone: "DESCRIPTION",
+            texto: "<b>Revise no Assistente de Reuniões</b>",
+            rodape: "O app abre o formulário deste e-mail",
           }),
           C.item({
-            icone: "CONFIRMATION_NUMBER_ICON",
-            texto: "<b>Você confere antes de criar</b>",
-            rodape: "Tudo pode ser trocado na revisão",
+            icone: "STAR",
+            texto: "<b>A IA prepara no app</b>",
+            rodape: "Cliente, assunto e resumo já preenchidos",
           }),
         ],
       },
     ],
     botaoPrincipal: {
-      texto: "Preparar chamado",
-      acao: C.acao(ctx.url("preparar"), { threadId, messageId }),
+      texto: "Abrir no app",
+      acao: C.acao(ctx.url("abrir"), { threadId, messageId }),
       cor: AZUL,
     },
+  });
+}
+
+function telaAbrindo(threadId: string, messageId: string, ctx: Ctx) {
+  return cartaoContas({
+    titulo: "Abrindo no app…",
+    secoes: [
+      {
+        widgets: [
+          C.item({
+            icone: "CLOCK",
+            texto: "<b>Olhe o Assistente de Reuniões</b>",
+            rodape: "A revisão deste e-mail abre lá",
+          }),
+          C.paragrafo(
+            cinza(
+              `Não abriu? Confira se o app está aberto neste computador, com a conta ${ctx.conta} ativa.`,
+            ),
+          ),
+          C.botoes([
+            { texto: "Abrir de novo", acao: C.acao(ctx.url("abrir"), { threadId, messageId }) },
+          ]),
+        ],
+      },
+    ],
+  });
+}
+
+// O app desta conta nunca se registrou (versao antiga, fechado desde sempre ou
+// outra conta ativa). A revisao no proprio painel fica como saida, com o
+// "Atualizar" de sempre.
+function telaSemApp(threadId: string, messageId: string, ctx: Ctx) {
+  return cartaoContas({
+    titulo: "App não encontrado",
+    secoes: [
+      {
+        widgets: [
+          C.item({
+            icone: "PERSON",
+            texto: "<b>Não achei o app desta conta</b>",
+            rodape: ctx.conta,
+          }),
+          C.paragrafo(
+            cinza(
+              "Abra o Assistente de Reuniões neste computador, na versão mais nova e " +
+                "com esta conta ativa, e tente de novo.",
+            ),
+          ),
+          C.botoes([
+            { texto: "Tentar de novo", acao: C.acao(ctx.url("abrir"), { threadId, messageId }), cor: AZUL },
+            { texto: "Revisar aqui no Gmail", acao: C.acao(ctx.url("preparar"), { threadId, messageId }) },
+          ]),
+        ],
+      },
+    ],
   });
 }
 
@@ -1842,13 +1905,65 @@ async function acaoEmail(ctx: Ctx) {
       : null);
   if (ja) return C.resposta.empurrar(telaJaTem(ja.protocolo || ""));
 
+  // Revisao feita aqui no painel (a saida "Revisar aqui no Gmail") continua de
+  // onde parou.
   const idRasc = await cacheGet<string>(chaveItem(ctx.conta, item)).catch(() => null);
   const r = await rascunhoValido(idRasc, ctx.conta);
   if (r && r.status !== "erro" && !r.criado) {
     return C.resposta.empurrar(await telaDoRascunho(r, ctx));
   }
 
-  return C.resposta.empurrar(telaPreparar(threadId, messageId, ctx));
+  return C.resposta.empurrar(telaAbrirNoApp(threadId, messageId, ctx));
+}
+
+// "Abrir no app": pede ao app desktop desta conta, pelo canal em tempo real do
+// ramal dele (o mesmo do popup de chamada), que abra a revisao do e-mail.
+async function acaoAbrir(ctx: Ctx) {
+  const threadId = C.lerParametro(ctx.evento, "threadId");
+  const messageId = C.lerParametro(ctx.evento, "messageId");
+  if (!threadId && !messageId) {
+    throw new AppError({
+      statusCode: 400,
+      code: "MESSAGE_ID_REQUIRED",
+      message: "Abra um e-mail para abrir o chamado.",
+    });
+  }
+  const ramal = await cacheGet<string>(chaveRamalDaConta(ctx.conta)).catch(() => null);
+  if (!ramal) {
+    console.warn(`[addon:gmail:abrir] conta=${ctx.conta} sem app registrado`);
+    return C.resposta.atualizar(telaSemApp(threadId, messageId, ctx));
+  }
+  await publishAbrirEmail(String(ramal), {
+    conta: ctx.conta,
+    ...(threadId ? { threadId } : {}),
+    ...(messageId ? { messageId } : {}),
+  });
+  console.log(
+    `[addon:gmail:abrir] conta=${ctx.conta} ramal=${ramal} item=${threadId || messageId}`,
+  );
+  return C.resposta.atualizar(telaAbrindo(threadId, messageId, ctx));
+}
+
+// POST /api/gmail/vinculo — o app desktop avisa em qual ramal esta a conta
+// Google dele, para o "Abrir no app" do painel saber para onde mandar.
+// O profileToken prova que a conta foi conectada NESTE app (OAuth); o ramal e
+// o mesmo que o app ja usa para receber os avisos de chamada. Fica no
+// apiRouter (x-app-token), porque quem chama e o app, nao o Google.
+export async function addonVinculoController(req: Request, res: Response) {
+  const body = ensureBodyObject(req.body);
+  const profileToken = getOptionalString(body, "profileToken") || "";
+  const ramal = getOptionalString(body, "ramal") || "";
+  if (!profileToken || !/^[\w.-]{1,20}$/.test(ramal)) {
+    throw new AppError({
+      statusCode: 400,
+      code: "ADDON_VINCULO_INVALIDO",
+      message: "Informe a conta conectada (profileToken) e o ramal.",
+    });
+  }
+  const conta = await resolverContaGoogle(profileToken, "");
+  await cacheSet(chaveRamalDaConta(conta), ramal, TTL_RAMAL_SEG);
+  console.log(`[addon:vinculo] conta=${conta} ramal=${ramal}`);
+  res.status(200).json({ ok: true, data: { conta, ramal } });
 }
 
 async function acaoPreparar(ctx: Ctx) {
@@ -2364,6 +2479,7 @@ async function acaoFeedback(ctx: Ctx) {
 const ACOES: Record<string, (ctx: Ctx) => Promise<unknown>> = {
   inicio: acaoInicio,
   email: acaoEmail,
+  abrir: acaoAbrir,
   preparar: acaoPreparar,
   atualizar: acaoAtualizar,
   editar: acaoEditar,
