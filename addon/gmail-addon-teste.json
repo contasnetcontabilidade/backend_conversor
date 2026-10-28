@@ -7,7 +7,7 @@
   "addOns": {
     "common": {
       "name": "Abrir chamado (teste)",
-      "logoUrl": "https://www.gstatic.com/images/icons/material/system/2x/assignment_black_48dp.png",
+      "logoUrl": "https://contas.com.br/wp-content/uploads/2024/05/cropped-Contas-Contabilidade-Favicon-192x192.webp",
       "homepageTrigger": {
         "runFunction": "https://backend-conversor.vercel.app/api/addon/gmail/inicio?simular=1"
       }
