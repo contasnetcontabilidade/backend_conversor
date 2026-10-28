@@ -559,6 +559,10 @@ function normalizarMensagem(
   if (!bruta) return null;
   // Mensagem apagada volta so com metadado, sem texto: nao serve para chamado.
   if (bruta.deletionMetadata) return null;
+  // Mensagem privada de app (so quem acionou ve), como o "Abrindo no
+  // Assistente…" que o proprio complemento responde ao /chamado e ao "Abrir
+  // chamado": e aviso de interface, nao parte da conversa.
+  if (bruta.privateMessageViewer) return null;
 
   const texto = String(bruta.text || "").trim();
   const anexos = Array.isArray(bruta.attachment) ? bruta.attachment : [];
