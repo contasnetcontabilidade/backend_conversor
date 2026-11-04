@@ -65,6 +65,7 @@ O desktop também tem uma aba "Transcrever & Resumir" para arquivos avulsos (`.w
 - **Custo por dia (R$)**, **transcrição vs. resumo** (rosca), **custo por modelo** e **tendência do custo médio por ligação**.
 - **Comparativo** com o período anterior (▲▼ %), **projeção do mês** (no ritmo atual), **ranking dos dias mais caros** e **tabela de custo por dia** ordenável.
 - **Gasto por ramal / usuário** (ver nota abaixo), **exportação CSV** (por dia e por ramal), **auto-atualização** (5 min) e **câmbio USD→BRL editável** (recalcula os R$ na hora).
+- **Câmbio de cada dia** (desde 04/11/2026): o R$ de um dia usa o **fechamento USD→BRL daquele dia**, então o dólar subir hoje não muda os meses passados — igual ao preço do Claude. `cotacoesDosDias` (`pricing.ts`) busca os dias encerrados que faltam (AwesomeAPI; reserva **PTAX venda do Banco Central**) e grava cada um uma vez no hash `fx:usdbrl:dia`. Fim de semana e feriado herdam o último dia útil, e só são gravados depois que sai a cotação de um dia posterior (antes disso não dá para separar feriado de fonte atrasada). Hoje, e dia ainda sem fechamento, usam a cotação atual. A busca roda ao abrir o painel, no máximo a cada 3 h (6 h depois de falha). Se as duas fontes falharem, o cartão de custo mostra "câmbio histórico indisponível desde dd/mm" e o motivo vai para o `/admin/erros`. O campo **Câmbio R$** vazio segue o câmbio de cada dia; com um valor, **simula** todos os dias com ele. O relatório "Por dia" traz a coluna `cambio`.
 
 > **Atribuição por ramal/usuário é _forward-only_.** O consumo passou a ser gravado com o ramal/usuário
 > do escritório (interna → quem ligou; externa → quem atendeu) em `recordUsage`, em hashes paralelos
@@ -262,7 +263,7 @@ src/
 ### Gemini (`@google/genai`)
 
 - Chave `GEMINI_API_KEY` (ou `GOOGLE_API_KEY`). Usado para **transcrição** (upload do áudio + `generateContent`) e como **reserva do resumo** (`generateContent` com schema JSON forçado) quando o Claude falha ou não está configurado.
-- Custo do "thinking" é minimizado via `geminiThinking.ts`. O uso de tokens é gravado no Redis e precificado em `pricing.ts` (tabela USD + cotação USD→BRL com cache de 6h; fallback `GEMINI_USD_BRL`).
+- Custo do "thinking" é minimizado via `geminiThinking.ts`. O uso de tokens é gravado no Redis e precificado em `pricing.ts` (tabela USD + cotação USD→BRL: o fechamento de cada dia para os dias encerrados e, para hoje, a atual com cache de 6h e fallback `GEMINI_USD_BRL` — ver "Câmbio de cada dia" na seção do painel).
 
 ### Suite360 / SuiteWeb
 
@@ -452,7 +453,7 @@ Valores em **USD por 1 milhão de tokens**, exatamente como estão no código (`
 | `gemini-1.5-pro`                 | US$ 1,25 | US$ 5,00   |                 |
 | `gemini-1.0-pro`                 | US$ 0,50 | US$ 1,50   |                 |
 
-> ⚠️ **Estes são valores de referência embutidos no código** — confirme os preços atuais em https://ai.google.dev/gemini-api/docs/pricing e ajuste a tabela em `pricing.ts` se mudarem. A conversão para BRL usa a cotação USD→BRL ao vivo (cache de 6h; fallback `GEMINI_USD_BRL`, padrão R$ 5,40).
+> ⚠️ **Estes são valores de referência embutidos no código** — confirme os preços atuais em https://ai.google.dev/gemini-api/docs/pricing e ajuste a tabela em `pricing.ts` se mudarem. A conversão para BRL usa o fechamento USD→BRL de cada dia; hoje (e dia sem fechamento gravado) usa a cotação ao vivo (cache de 6h; fallback `GEMINI_USD_BRL`, padrão R$ 5,40).
 >
 > A fórmula usada (`custoUsd`): `custo = (tokens_entrada/1M × preço_entrada) + (tokens_saída/1M × preço_saída)`.
 
