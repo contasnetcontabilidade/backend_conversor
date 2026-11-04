@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { custoLinha, getUsdBrl } from "../services/pricing";
+import { cotacoesDosDias, custoLinha, getUsdBrl } from "../services/pricing";
 import { getRelatorioUso } from "../services/usage";
 import { getSaldoDeepgramUsd } from "../services/deepgramSpeech";
 import {
@@ -212,6 +212,15 @@ export async function adminUsoController(req: Request, res: Response) {
     lerEstadoPrecoClaude(),
   ]);
 
+  // Cambio de fechamento de cada dia com gasto: o R$ de um dia nao muda mais
+  // quando o dolar mexe. Dia sem fechamento gravado (hoje, fonte fora do ar)
+  // usa a cotacao atual — no servidor e no JS da pagina.
+  const cambioDia = await cotacoesDosDias([
+    ...relatorio.porDiaModelo.map((d) => d.dia),
+    ...chamados.map((c) => c.dia),
+  ]);
+  const cotacaoDoDia = (dia: string) => cambioDia.cotacoes[dia] ?? cotacao;
+
   // Detalhe por dia+modelo+op, ja com custo por linha (precificado por modelo).
   // O frontend agrega/filtra por periodo em cima disto. O Claude usa o preco
   // vigente em cada dia (historico lido do site).
@@ -335,7 +344,12 @@ export async function adminUsoController(req: Request, res: Response) {
     },
     { inputTokens: 0, outputTokens: 0, calls: 0, audioSec: 0, custoUsd: 0 },
   );
-  const custoBrl = totais.custoUsd * cotacao;
+  // Dia a dia, cada um no seu cambio (o total em US$ x cotacao de hoje
+  // reescreveria o passado).
+  const custoBrl = porDiaModelo.reduce(
+    (s, d) => s + d.custoUsd * cotacaoDoDia(d.dia),
+    0,
+  );
 
   // Saldo do Claude ESTIMADO: a Anthropic nao tem API de saldo, e conta
   // individual nem acessa a Admin API de custos (testado em 19/10/2026). Entao e
@@ -351,7 +365,9 @@ export async function adminUsoController(req: Request, res: Response) {
   res.status(200).json({
     ok: true,
     configurado: relatorio.configurado,
-    cotacao,
+    cotacao, // atual: hoje e dias sem fechamento gravado
+    cotacoes: cambioDia.cotacoes, // AAAA-MM-DD -> fechamento daquele dia
+    cambioDia: cambioDia.estado, // falha da busca do historico, se houver
     deepgramSaldoUsd, // creditos restantes no Deepgram (null se indisponivel)
     claudeSaldo: {
       creditoMensalUsd,
@@ -595,7 +611,7 @@ body.win-max .titlebar .ic-restore{display:inline}
     </div>
     <span id="custom-range" class="hidden"><label>de</label> <input type="date" id="dt-de" /> <label>até</label> <input type="date" id="dt-ate" /></span>
     <div class="spacer"></div>
-    <label>Câmbio R$</label> <input type="number" step="0.01" min="0" class="cambio" id="cambio" title="Câmbio USD→BRL (editável)" />
+    <label>Câmbio R$</label> <input type="number" step="0.01" min="0" class="cambio" id="cambio" title="Vazio: cada dia usa o câmbio de fechamento daquele dia (hoje, a cotação atual). Com um valor: todos os dias usam este câmbio — só para simular." />
     <button class="mini-btn" id="csv-completo" title="CSV completo (todo o histórico, todas as seções)"><i data-lucide="file-text"></i> CSV completo</button>
     <button class="mini-btn" id="csv-periodo" title="CSV do período selecionado"><i data-lucide="file-text"></i> CSV período</button>
     <button class="mini-btn" id="xls-completo" title="Excel com abas (todo o histórico)"><i data-lucide="file-spreadsheet"></i> Excel completo</button>
@@ -716,7 +732,7 @@ body.win-max .titlebar .ic-restore{display:inline}
           <th class="sortable right" data-col="calls">Chamadas</th>
           <th class="sortable right" data-col="ligacoes">Ligações</th>
           <th class="sortable right" data-col="audioSec">Min (Deepgram)</th>
-          <th class="sortable right" data-col="custoUsd">Custo R$</th>
+          <th class="sortable right" data-col="custoBrl">Custo R$</th>
         </tr></thead>
         <tbody id="tbody-dia"><tr><td colspan="6" class="muted">Carregando…</td></tr></tbody>
       </table>
@@ -852,7 +868,14 @@ function resetPag(chave){PAG[chave]=1;}
 var ORD={col:"dia",dir:-1};
 var timerAuto=null;
 
-function cot(){return CAMBIO!=null?CAMBIO:(DADOS&&DADOS.cotacao)||0}
+// Cambio de UM dia: o fechamento gravado no backend (nao muda mais) ou, para
+// hoje e dia ainda sem fechamento, a cotacao atual. O campo "Cambio R$"
+// preenchido vale para todos os dias — e simulacao, nao o custo de verdade.
+function cotHoje(){return (DADOS&&DADOS.cotacao)||0}
+function cotDia(dia){if(CAMBIO!=null)return CAMBIO;var h=DADOS&&DADOS.cotacoes,v=h&&h[dia];return v>0?v:cotHoje()}
+// R$ de uma linha com dia (porDiaModelo, porRamal, porFonte, chamados). Somar
+// em US$ e multiplicar uma vez so aplicaria um cambio ao periodo inteiro.
+function brl(r){return (r.custoUsd||0)*cotDia(r.dia)}
 
 // ---- datas (UTC, batendo com as chaves YYYY-MM-DD do backend) ----
 function hojeUTC(){return new Date().toISOString().slice(0,10)}
@@ -919,20 +942,20 @@ function ligacoesNoPeriodo(de,ate){
     .filter(function(r){return r.fonte==="ligacao"&&r.op==="resumo"})
     .reduce(function(a,r){return a+(r.calls||0)},0);
 }
-function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,ligacoes:0,transcUsd:0,resumoUsd:0,audioSec:0,deepgramUsd:0,claudeUsd:0};
-  rows.forEach(function(r){t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;t.audioSec+=r.audioSec||0;
-    if(/^deepgram/i.test(r.model||""))t.deepgramUsd+=r.custoUsd;
-    if(/^claude-/i.test(r.model||""))t.claudeUsd+=r.custoUsd;
-    if(r.op==="resumo"){t.ligacoes+=r.calls;t.resumoUsd+=r.custoUsd}if(r.op==="transcricao")t.transcUsd+=r.custoUsd});
+function totais(rows){var t={inputTokens:0,outputTokens:0,calls:0,custoUsd:0,custoBrl:0,ligacoes:0,transcUsd:0,resumoUsd:0,transcBrl:0,resumoBrl:0,audioSec:0,deepgramBrl:0,claudeBrl:0};
+  rows.forEach(function(r){var b=brl(r);t.inputTokens+=r.inputTokens;t.outputTokens+=r.outputTokens;t.calls+=r.calls;t.custoUsd+=r.custoUsd;t.custoBrl+=b;t.audioSec+=r.audioSec||0;
+    if(/^deepgram/i.test(r.model||""))t.deepgramBrl+=b;
+    if(/^claude-/i.test(r.model||""))t.claudeBrl+=b;
+    if(r.op==="resumo"){t.ligacoes+=r.calls;t.resumoUsd+=r.custoUsd;t.resumoBrl+=b}if(r.op==="transcricao"){t.transcUsd+=r.custoUsd;t.transcBrl+=b}});
   return t;}
 function porDiaAgg(rows){var m={};
-  rows.forEach(function(r){var a=m[r.dia]||(m[r.dia]={dia:r.dia,inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0,audioSec:0});
-    a.inputTokens+=r.inputTokens;a.outputTokens+=r.outputTokens;a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.audioSec+=r.audioSec||0;if(r.op==="resumo")a.ligacoes+=r.calls});
+  rows.forEach(function(r){var a=m[r.dia]||(m[r.dia]={dia:r.dia,inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0,custoBrl:0,audioSec:0});
+    a.inputTokens+=r.inputTokens;a.outputTokens+=r.outputTokens;a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.custoBrl+=brl(r);a.audioSec+=r.audioSec||0;if(r.op==="resumo")a.ligacoes+=r.calls});
   return Object.keys(m).sort().map(function(k){return m[k]});}
 function ramalAgg(rows){var m={};
-  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0,audioSec:0,tokens:0});
-    a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.audioSec+=r.audioSec||0;a.tokens+=(r.inputTokens||0)+(r.outputTokens||0);if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
-  return Object.keys(m).map(function(k){return m[k]}).sort(function(a,b){return b.custoUsd-a.custoUsd});}
+  rows.forEach(function(r){var a=m[r.ramal]||(m[r.ramal]={ramal:r.ramal,usuario:r.usuario||"",calls:0,ligacoes:0,custoUsd:0,custoBrl:0,audioSec:0,tokens:0});
+    a.calls+=r.calls;a.custoUsd+=r.custoUsd;a.custoBrl+=brl(r);a.audioSec+=r.audioSec||0;a.tokens+=(r.inputTokens||0)+(r.outputTokens||0);if(r.op==="resumo")a.ligacoes+=r.calls;if(!a.usuario&&r.usuario)a.usuario=r.usuario});
+  return Object.keys(m).map(function(k){return m[k]}).sort(function(a,b){return b.custoBrl-a.custoBrl});}
 
 async function carregar(){
   var r,d;
@@ -947,7 +970,9 @@ async function carregar(){
   DADOS=d;
   document.getElementById("login").classList.add("hidden");
   document.getElementById("app").classList.remove("hidden");
-  if(CAMBIO==null){var ci=document.getElementById("cambio");if(ci&&!ci.value)ci.value=Number(d.cotacao||0).toFixed(2);}
+  // Vazio = cambio de cada dia. A cotacao de hoje fica so de dica: escrita no
+  // campo, parecia valer para o periodo inteiro.
+  var ci=document.getElementById("cambio");if(ci)ci.placeholder=Number(d.cotacao||0).toFixed(2);
   if(!d.configurado){document.getElementById("status").textContent="Storage (Upstash) ainda não configurado — os contadores começam a somar após configurar.";}
   else{document.getElementById("status").textContent="Consumo de IA (transcrição + resumo) e custo estimado.";}
   var agora=new Date();
@@ -960,9 +985,10 @@ async function carregar(){
 
 // ---- Novidades do painel de custos (changelog proprio, so deste painel) ----
 // Bump PAINEL_NOV_VER quando adicionar novidades -> reaparece 1x ao acessar.
-var PAINEL_NOV_VER="2026-10a";
+var PAINEL_NOV_VER="2026-11a";
 // ic = nome do icone no lucide (mesma biblioteca do app).
 var PAINEL_NOV=[
+  {ic:"banknote",tx:"Os valores em <b>R$</b> agora usam o <b>câmbio de fechamento de cada dia</b>: quando o dólar mexe, os dias que já passaram não mudam mais. Hoje usa a cotação atual. O campo <b>Câmbio R$</b> vazio segue o câmbio de cada dia; com um valor, simula todos os dias com ele."},
   {ic:"bot",tx:"O resumo agora é feito pelo <b>Claude Haiku 5.5</b> (o Gemini fica de reserva). Novo cartão <b>Claude</b> com o <b>saldo estimado do mês</b> — a Anthropic não informa saldo, então é a franquia menos o gasto registrado aqui."},
   {ic:"file-text",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
   {ic:"file-spreadsheet",tx:"Exportação em <b>Excel com abas</b> (uma aba por seção), com números de verdade — dá pra somar e ordenar."},
@@ -1199,10 +1225,9 @@ function render(){
   var rowsP=noPeriodo(DADOS.porDiaModelo,iv.de,iv.ate);
   var t=totais(rowsP);
   t.ligacoes=ligacoesNoPeriodo(iv.de,iv.ate);
-  var c=cot();
 
   // KPIs
-  document.getElementById("c-brl").textContent=fmtBRL.format(t.custoUsd*c);
+  document.getElementById("c-brl").textContent=fmtBRL.format(t.custoBrl);
   document.getElementById("c-usd").textContent=fmtUSD(t.custoUsd);
   document.getElementById("c-tok").textContent=fmtInt.format(t.inputTokens+t.outputTokens);
   document.getElementById("c-tok-s").textContent=fmtInt.format(t.inputTokens)+" in · "+fmtInt.format(t.outputTokens)+" out";
@@ -1211,9 +1236,14 @@ function render(){
   // Comparativo vs periodo anterior de mesmo tamanho (#3)
   var nDias=diffDias(iv.de,iv.ate)+1;
   var antAte=addDias(iv.de,-1),antDe=addDias(antAte,-(nDias-1));
-  var custoAnt=totais(noPeriodo(DADOS.porDiaModelo,antDe,antAte)).custoUsd*c;
-  var custoAtual=t.custoUsd*c;
-  var brlS="câmbio R$ "+Number(c).toFixed(2);
+  var custoAnt=totais(noPeriodo(DADOS.porDiaModelo,antDe,antAte)).custoBrl;
+  var custoAtual=t.custoBrl;
+  var brlS=CAMBIO!=null
+    ? '<span class="delta up">câmbio fixo R$ '+Number(CAMBIO).toFixed(2)+' (simulação)</span>'
+    : "câmbio de cada dia · hoje R$ "+Number(cotHoje()).toFixed(2);
+  // Busca do historico falhando: os dias sem fechamento estao na cotacao de hoje.
+  var cd=DADOS.cambioDia;
+  if(cd&&cd.falhaDesde)brlS+=' · <span class="delta up" title="'+escXml(cd.motivoFalha||"")+'">câmbio histórico indisponível desde '+new Date(cd.falhaDesde).toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})+'</span>';
   if(custoAnt>0){var delta=(custoAtual-custoAnt)/custoAnt*100;var up=delta>=0;
     brlS+=' · <span class="delta '+(up?"up":"down")+'"><i data-lucide="'+(up?"trending-up":"trending-down")+'"></i> '+Math.abs(delta).toFixed(0)+"% vs período anterior</span>";}
   document.getElementById("c-brl-s").innerHTML=brlS;
@@ -1222,7 +1252,7 @@ function render(){
   var dgCred=document.getElementById("dg-cred"),dgSub=document.getElementById("dg-cred-s");
   var temSaldo=DADOS&&typeof DADOS.deepgramSaldoUsd==='number';
   if(dgCred)dgCred.textContent=temSaldo?("US$ "+DADOS.deepgramSaldoUsd.toFixed(2).replace(".",",")):"—";
-  if(dgSub)dgSub.innerHTML=fmtInt.format(Math.round((t.audioSec||0)/60))+" min · "+fmtBRL.format((t.deepgramUsd||0)*c)+" no período"+(temSaldo?"":" · saldo indisponível");
+  if(dgSub)dgSub.innerHTML=fmtInt.format(Math.round((t.audioSec||0)/60))+" min · "+fmtBRL.format(t.deepgramBrl||0)+" no período"+(temSaldo?"":" · saldo indisponível");
 
   // Card do Claude: saldo ESTIMADO do mes (a Anthropic nao tem API de saldo;
   // o backend calcula franquia - gasto registrado aqui) + uso do periodo.
@@ -1244,11 +1274,11 @@ function render(){
       (cp.verificadoEm?", conferido em "+new Date(cp.verificadoEm).toLocaleString("pt-BR")+".":".")+
       (cp.falhaDesde?"\\nLeitura do site falhando desde "+new Date(cp.falhaDesde).toLocaleString("pt-BR")+": "+(cp.motivoFalha||""):"");
   }
-  if(clSub)clSub.innerHTML="saldo estimado do mês · "+fmtBRL.format((t.claudeUsd||0)*c)+" no período"+precoTx;
+  if(clSub)clSub.innerHTML="saldo estimado do mês · "+fmtBRL.format(t.claudeBrl||0)+" no período"+precoTx;
 
   // Projecao do mes (#4) — media por DIA UTIL decorrido x dias uteis do mes.
   var mesDe=primeiroDiaMes(),mesAte=hojeUTC();
-  var custoMes=totais(noPeriodo(DADOS.porDiaModelo,mesDe,mesAte)).custoUsd*c;
+  var custoMes=totais(noPeriodo(DADOS.porDiaModelo,mesDe,mesAte)).custoBrl;
   var uteisDec=diasUteisDecorridos(),uteisMes=diasUteisNoMes();
   var proj=custoMes/uteisDec*uteisMes;
   document.getElementById("c-proj").textContent=fmtBRL.format(proj);
@@ -1258,7 +1288,7 @@ function render(){
     +uteisMes+" dias úteis do mês. O dia de hoje entra pela fração já decorrida (UTC).";
 
   // Por ligacao (periodo)
-  var custoLig=(t.transcUsd+t.resumoUsd)*c;
+  var custoLig=t.transcBrl+t.resumoBrl;
   document.getElementById("l-count").textContent=fmtInt.format(t.ligacoes);
   document.getElementById("l-total").textContent=fmtBRL.format(custoLig);
   document.getElementById("l-total-s").textContent=fmtUSD(t.transcUsd+t.resumoUsd);
@@ -1269,50 +1299,50 @@ function render(){
   var dias=porDiaAgg(rowsP);
 
   // #2 Custo por dia (R$)
-  chart("chartCustoDia",{type:"bar",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{data:dias.map(function(x){return +(x.custoUsd*c).toFixed(4)}),backgroundColor:accent,borderRadius:6}]},options:baseOpt(muted,grid,true)});
+  chart("chartCustoDia",{type:"bar",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{data:dias.map(function(x){return +x.custoBrl.toFixed(4)}),backgroundColor:accent,borderRadius:6}]},options:baseOpt(muted,grid,true)});
 
   // #6 Transcricao vs resumo (rosca, R$)
-  chart("chartOp",{type:"doughnut",data:{labels:["Transcrição","Resumo"],datasets:[{data:[+(t.transcUsd*c).toFixed(4),+(t.resumoUsd*c).toFixed(4)],backgroundColor:[brand,gold],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
+  chart("chartOp",{type:"doughnut",data:{labels:["Transcrição","Resumo"],datasets:[{data:[+t.transcBrl.toFixed(4),+t.resumoBrl.toFixed(4)],backgroundColor:[brand,gold],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
 
   // Custo por modelo (R$) no periodo
-  var porModelo={};rowsP.forEach(function(r){porModelo[r.model]=(porModelo[r.model]||0)+r.custoUsd});
+  var porModelo={};rowsP.forEach(function(r){porModelo[r.model]=(porModelo[r.model]||0)+brl(r)});
   var ml=Object.keys(porModelo).sort(function(a,b){return porModelo[b]-porModelo[a]});
-  chart("chartModelo",{type:"bar",data:{labels:ml,datasets:[{data:ml.map(function(m){return +(porModelo[m]*c).toFixed(4)}),backgroundColor:brand,borderRadius:6}]},options:baseOpt(muted,grid,false)});
+  chart("chartModelo",{type:"bar",data:{labels:ml,datasets:[{data:ml.map(function(m){return +porModelo[m].toFixed(4)}),backgroundColor:brand,borderRadius:6}]},options:baseOpt(muted,grid,false)});
 
   // #9 Tendencia custo medio por ligacao
-  chart("chartTend",{type:"line",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{label:"R$ / ligação",data:dias.map(function(x){return x.ligacoes?+((x.custoUsd*c)/x.ligacoes).toFixed(4):0}),borderColor:gold,backgroundColor:"rgba(224,169,59,.15)",fill:true,tension:.3}]},options:baseOpt(muted,grid,false)});
+  chart("chartTend",{type:"line",data:{labels:dias.map(function(x){return x.dia.slice(5)}),datasets:[{label:"R$ / ligação",data:dias.map(function(x){return x.ligacoes?+(x.custoBrl/x.ligacoes).toFixed(4):0}),borderColor:gold,backgroundColor:"rgba(224,169,59,.15)",fill:true,tension:.3}]},options:baseOpt(muted,grid,false)});
 
   // Ligacoes vs E-mails (por fonte)
   var fonteRows=noPeriodo(DADOS.porFonte,iv.de,iv.ate);
   var fAgg={};
-  fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={custoUsd:0,itens:0});a.custoUsd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
+  fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={custoBrl:0,itens:0});a.custoBrl+=brl(r);if(r.op==="resumo")a.itens+=r.calls;});
   // Fontes do painel. Tabela unica: incluir uma fonte nova aqui ja reflete no
   // grafico, na tabela e no total — antes o Chat era gravado mas nao aparecia.
   // Cores bem separadas no circulo cromatico: verde (ligacao), ambar (e-mail),
   // roxo (chat) e magenta (resumo). O antigo #2f9e6b era quase o mesmo verde do
   // --accent das ligacoes e as duas fatias se confundiam no grafico.
   var FONTES=[["Ligações","ligacao",accent],["E-mails","email",gold],["Chat","chat","#7c5cff"],["Gravação","gravacao","#2aa9d6"],["Resumo (gravação)","resumo","#e0509a"]];
-  var fLinhas=FONTES.map(function(f){var a=fAgg[f[1]]||{custoUsd:0,itens:0};return {nome:f[0],itens:a.itens||0,usd:a.custoUsd||0,cor:f[2]};});
-  var totF=fLinhas.reduce(function(x,y){return x+y.usd},0);
-  chart("chartFonte",{type:"doughnut",data:{labels:fLinhas.map(function(x){return x.nome}),datasets:[{data:fLinhas.map(function(x){return +(x.usd*c).toFixed(4)}),backgroundColor:fLinhas.map(function(x){return x.cor}),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
+  var fLinhas=FONTES.map(function(f){var a=fAgg[f[1]]||{custoBrl:0,itens:0};return {nome:f[0],itens:a.itens||0,brl:a.custoBrl||0,cor:f[2]};});
+  var totF=fLinhas.reduce(function(x,y){return x+y.brl},0);
+  chart("chartFonte",{type:"doughnut",data:{labels:fLinhas.map(function(x){return x.nome}),datasets:[{data:fLinhas.map(function(x){return +x.brl.toFixed(4)}),backgroundColor:fLinhas.map(function(x){return x.cor}),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
   var tbf=document.getElementById("tbody-fonte");
   if(tbf){
     if(totF<=0.0000001){tbf.innerHTML='<tr><td colspan="4" class="muted">Sem consumo marcado por fonte no período.</td></tr>';}
-    else{tbf.innerHTML=fLinhas.map(function(x){var pct=totF>0?Math.round(x.usd/totF*100):0;return "<tr><td>"+x.nome+"</td><td class='right'>"+fmtInt.format(x.itens)+"</td><td class='right'>"+fmtBRL.format(x.usd*c)+"</td><td class='right'>"+pct+"%</td></tr>"}).join("");}
+    else{tbf.innerHTML=fLinhas.map(function(x){var pct=totF>0?Math.round(x.brl/totF*100):0;return "<tr><td>"+x.nome+"</td><td class='right'>"+fmtInt.format(x.itens)+"</td><td class='right'>"+fmtBRL.format(x.brl)+"</td><td class='right'>"+pct+"%</td></tr>"}).join("");}
   }
 
   // #5 Por ramal/usuario
   var ramais=ramalAgg(noPeriodo(DADOS.porRamal,iv.de,iv.ate));
-  var somaRamais=ramais.reduce(function(a,x){return a+x.custoUsd},0);
-  var naoAtrib=t.custoUsd-somaRamais;
+  var somaRamais=ramais.reduce(function(a,x){return a+x.custoBrl},0);
+  var naoAtrib=t.custoBrl-somaRamais;
   var tbr=document.getElementById("tbody-ramal");
   // O "nao atribuido" entra como item da lista para paginar junto, em vez de
   // ficar fora da paginacao e sumir da conta em listas grandes.
   var listaRamal=ramais.slice();
-  if(naoAtrib>0.0000001)listaRamal.push({naoAtrib:true,custoUsd:naoAtrib});
+  if(naoAtrib>0.0000001)listaRamal.push({naoAtrib:true,custoBrl:naoAtrib});
   paginar("ramal",tbr,listaRamal,function(x){
-    if(x.naoAtrib)return "<tr><td class='muted'>—</td><td class='muted'>não atribuído</td><td class='right muted'>—</td><td class='right muted'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>";
-    return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>";
+    if(x.naoAtrib)return "<tr><td class='muted'>—</td><td class='muted'>não atribuído</td><td class='right muted'>—</td><td class='right muted'>"+fmtBRL.format(x.custoBrl)+"</td></tr>";
+    return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtBRL.format(x.custoBrl)+"</td></tr>";
   },'<tr><td colspan="4" class="muted">Sem consumo atribuído a ramal no período.</td></tr>');
 
   // Uso por usuário HOJE (mesma fonte, filtrado ao dia atual em UTC).
@@ -1320,30 +1350,32 @@ function render(){
   var tbrh=document.getElementById("tbody-ramal-hoje");
   if(tbrh){
     if(!ramaisHoje.length)tbrh.innerHTML='<tr><td colspan="6" class="muted">Sem uso registrado hoje.</td></tr>';
-    else tbrh.innerHTML=ramaisHoje.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.tokens||0)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>"}).join("");
+    else tbrh.innerHTML=ramaisHoje.map(function(x){return "<tr><td>"+(x.ramal||"—")+"</td><td>"+(x.usuario||"—")+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.tokens||0)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoBrl)+"</td></tr>"}).join("");
   }
 
   // Custo por cliente / por assunto (1 linha por chamado criado, ver custoChamados.ts)
   var ivC=intervaloChamados(iv);
-  renderChamados(noPeriodo(DADOS.chamados||[],ivC.de,ivC.ate),c,ivC);
-  renderSemChamado(ivC,c,muted,grid,gold);
+  renderChamados(noPeriodo(DADOS.chamados||[],ivC.de,ivC.ate),ivC);
+  renderSemChamado(ivC,muted,grid,gold);
 
   // #8 Ranking dias mais caros
   // Antes mostrava so os 7 primeiros; agora a lista inteira, paginada.
-  var top=dias.slice().sort(function(a,b){return b.custoUsd-a.custoUsd});
+  var top=dias.slice().sort(function(a,b){return b.custoBrl-a.custoBrl});
   var rk=document.getElementById("ranking");
   paginar("caros",rk,top,function(x){
-    return "<li><span class='d'>"+x.dia+"</span><span>"+fmtBRL.format(x.custoUsd*c)+"</span></li>";
+    return "<li><span class='d'>"+x.dia+"</span><span>"+fmtBRL.format(x.custoBrl)+"</span></li>";
   },'<li class="muted">Sem dados no período.</li>');
 
   // #7 Tabela custo por dia (ordenavel)
-  renderTabelaDia(dias,c);
+  renderTabelaDia(dias);
 
-  // Detalhe por modelo+op (todo o periodo)
+  // Detalhe por modelo+op (todo o periodo). DADOS.linhas so traz US$: o R$
+  // sai de porDiaModelo, somado dia a dia, cada dia no seu cambio.
+  var brlModeloOp={};(DADOS.porDiaModelo||[]).forEach(function(r){var k=r.model+"::"+r.op;brlModeloOp[k]=(brlModeloOp[k]||0)+brl(r)});
   var tb=document.getElementById("tbody");
   var linhas=DADOS.linhas||[];
   if(!linhas.length){tb.innerHTML='<tr><td colspan="7" class="muted">Nenhum uso registrado ainda.</td></tr>';}
-  else{tb.innerHTML=linhas.map(function(l){var ehMin=/^deepgram/i.test(l.model);var ent=ehMin?(fmtInt.format(Math.round((l.audioSec||0)/60))+" min"):fmtInt.format(l.inputTokens);var sai=ehMin?"—":fmtInt.format(l.outputTokens);return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+ent+"</td><td class='right'>"+sai+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(l.custoUsd*c)+"</td></tr>"}).join("");}
+  else{tb.innerHTML=linhas.map(function(l){var ehMin=/^deepgram/i.test(l.model);var ent=ehMin?(fmtInt.format(Math.round((l.audioSec||0)/60))+" min"):fmtInt.format(l.inputTokens);var sai=ehMin?"—":fmtInt.format(l.outputTokens);return "<tr><td>"+l.model+"</td><td><span class='badge "+(l.op==="resumo"?"resumo":"")+"'>"+l.op+"</span></td><td class='right'>"+ent+"</td><td class='right'>"+sai+"</td><td class='right'>"+fmtInt.format(l.calls)+"</td><td class='right'>"+fmtUSD(l.custoUsd)+"</td><td class='right'>"+fmtBRL.format(brlModeloOp[l.model+"::"+l.op]||0)+"</td></tr>"}).join("");}
 
   icones(); // KPIs/tabelas acabaram de reescrever HTML com <i data-lucide>
 }
@@ -1355,29 +1387,30 @@ function agruparChamados(rows,campoNome,campoId){
   var m={};
   (rows||[]).forEach(function(r){
     var nome=(r[campoNome]||"").trim()||("#"+(r[campoId]||"?"));
-    var a=m[nome]||(m[nome]={nome:nome,qtd:0,usd:0});
-    a.qtd++;a.usd+=r.custoUsd||0;
+    var a=m[nome]||(m[nome]={nome:nome,qtd:0,usd:0,brl:0});
+    a.qtd++;a.usd+=r.custoUsd||0;a.brl+=brl(r);
   });
-  return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){return b.usd-a.usd;});
+  return Object.keys(m).map(function(k){return m[k];}).sort(function(a,b){return b.brl-a.brl;});
 }
 // ---- IA sem chamado ----
 // Conta por SUBTRACAO: gasto de IA do ramal - gasto que virou chamado.
 // Nao precisa de dado novo; os dois lados ja vem no payload do painel.
 function ehTeste(ramal){return ((DADOS&&DADOS.ramaisTeste)||[]).indexOf(String(ramal||''))>=0;}
-function renderSemChamado(iv,c,muted,grid,gold){
+// Tudo aqui em R$, cada linha no cambio do seu dia: e o que a tabela mostra.
+function renderSemChamado(iv,muted,grid,gold){
   var gastoRows=noPeriodo(DADOS.porRamal||[],iv.de,iv.ate);
   var chamRows=noPeriodo(DADOS.chamados||[],iv.de,iv.ate);
 
   // Por ramal: gasto total x gasto que virou chamado.
   var m={};
   function slot(r,u){var k=String(r||'');var a=m[k]||(m[k]={ramal:k,usuario:u||'',gasto:0,conv:0});if(!a.usuario&&u)a.usuario=u;return a;}
-  gastoRows.forEach(function(r){slot(r.ramal,r.usuario).gasto+=r.custoUsd||0;});
-  chamRows.forEach(function(r){slot(r.ramal,r.usuario).conv+=r.custoUsd||0;});
+  gastoRows.forEach(function(r){slot(r.ramal,r.usuario).gasto+=brl(r);});
+  chamRows.forEach(function(r){slot(r.ramal,r.usuario).conv+=brl(r);});
   // Gasto ANTERIOR ao corte entra como convertido: naquele periodo o chamado
   // era criado sem ramal, entao o cruzamento nao tem como casar.
   var corte=(DADOS&&DADOS.semChamadoDesde)||"";
   if(corte){
-    gastoRows.forEach(function(r){ if(r.dia<corte) slot(r.ramal,r.usuario).conv+=r.custoUsd||0; });
+    gastoRows.forEach(function(r){ if(r.dia<corte) slot(r.ramal,r.usuario).conv+=brl(r); });
   }
   var lista=Object.keys(m).map(function(k){var a=m[k];
     a.teste=ehTeste(a.ramal);
@@ -1394,7 +1427,7 @@ function renderSemChamado(iv,c,muted,grid,gold){
   // acima, entao somar de novo aqui contava o mesmo chamado duas vezes.
   var convSemRamal=chamRows.filter(function(r){
     return !String(r.ramal||'') && (!corte || r.dia>=corte);
-  }).reduce(function(a,r){return a+(r.custoUsd||0)},0);
+  }).reduce(function(a,r){return a+brl(r)},0);
   var reais=lista.filter(function(x){return !x.teste});
   var gastoReal=reais.reduce(function(a,x){return a+x.gasto},0);
   // Soma o SEM ja limitado por ramal, em vez de subtrair os totais: quando um
@@ -1405,28 +1438,28 @@ function renderSemChamado(iv,c,muted,grid,gold){
   var gastoTeste=lista.filter(function(x){return x.teste}).reduce(function(a,x){return a+x.gasto},0);
   var pct=gastoReal>0?Math.round(semReal/gastoReal*100):0;
   document.getElementById('sc-pct').textContent=pct+'%';
-  document.getElementById('sc-val').textContent=fmtBRL.format(semReal*c);
-  document.getElementById('sc-teste').textContent=fmtBRL.format(gastoTeste*c);
+  document.getElementById('sc-val').textContent=fmtBRL.format(semReal);
+  document.getElementById('sc-teste').textContent=fmtBRL.format(gastoTeste);
 
   // Tendencia: por dia, quanto virou chamado x quanto nao virou (sem testes).
   var porDia={};
-  gastoRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.g+=r.custoUsd||0;if(corte&&r.dia<corte)d.cv+=r.custoUsd||0;});
+  gastoRows.forEach(function(r){if(ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.g+=brl(r);if(corte&&r.dia<corte)d.cv+=brl(r);});
   // Sem ramal tambem conta aqui: o chamado existiu, so nao sabemos de quem foi.
-  chamRows.forEach(function(r){if(String(r.ramal||'')&&ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.cv+=r.custoUsd||0;});
+  chamRows.forEach(function(r){if(String(r.ramal||'')&&ehTeste(r.ramal))return;var d=porDia[r.dia]||(porDia[r.dia]={g:0,cv:0});d.cv+=brl(r);});
   var dias=Object.keys(porDia).sort();
   chart('chartSemChamado',{type:'line',data:{labels:dias,datasets:[
-    {label:'Virou chamado',data:dias.map(function(d){return +(Math.min(porDia[d].cv,porDia[d].g)*c).toFixed(4)}),borderColor:'#2f9e6b',backgroundColor:'#2f9e6b',tension:.3,pointRadius:2},
-    {label:'Sem chamado',data:dias.map(function(d){return +(Math.max(0,porDia[d].g-porDia[d].cv)*c).toFixed(4)}),borderColor:gold,backgroundColor:gold,tension:.3,pointRadius:2}
+    {label:'Virou chamado',data:dias.map(function(d){return +Math.min(porDia[d].cv,porDia[d].g).toFixed(4)}),borderColor:'#2f9e6b',backgroundColor:'#2f9e6b',tension:.3,pointRadius:2},
+    {label:'Sem chamado',data:dias.map(function(d){return +Math.max(0,porDia[d].g-porDia[d].cv).toFixed(4)}),borderColor:gold,backgroundColor:gold,tension:.3,pointRadius:2}
   ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}});
 
   var tb=document.getElementById('tbody-semchamado');
   paginar('semchamado',tb,lista,function(x){
     var rot=x.teste?" <span class='muted'>(teste)</span>":'';
-    return "<tr><td>"+(x.ramal||'—')+rot+"</td><td>"+(x.usuario||'—')+"</td><td class='right'>"+fmtBRL.format(x.gasto*c)+"</td><td class='right'>"+fmtBRL.format(x.conv*c)+"</td><td class='right'>"+fmtBRL.format(x.sem*c)+"</td><td class='right'>"+(x.teste?'—':x.pct+'%')+"</td></tr>";
+    return "<tr><td>"+(x.ramal||'—')+rot+"</td><td>"+(x.usuario||'—')+"</td><td class='right'>"+fmtBRL.format(x.gasto)+"</td><td class='right'>"+fmtBRL.format(x.conv)+"</td><td class='right'>"+fmtBRL.format(x.sem)+"</td><td class='right'>"+(x.teste?'—':x.pct+'%')+"</td></tr>";
   },'<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>');
 }
 
-function renderChamados(rows,c,ivC){
+function renderChamados(rows,ivC){
   var av=document.getElementById('ch-aviso');
   if(av)av.innerHTML=(ivC&&ivC.cortado)
     ? 'Mostrando de <b>'+ivC.de+'</b> em diante: o histórico de chamados guarda os últimos '+fmtInt.format(10000)+'. O gasto acima cobre o período inteiro.'
@@ -1436,7 +1469,7 @@ function renderChamados(rows,c,ivC){
   function pintar(chave,tb,lista,rotuloVazio){
     paginar(chave,tb,lista,function(x){
       return "<tr><td>"+escFb(x.nome)+"</td><td class='right'>"+fmtInt.format(x.qtd)+"</td><td class='right'>"
-        +fmtBRL.format(x.usd*c)+"</td><td class='right'>"+fmtBRL4.format(x.qtd?x.usd*c/x.qtd:0)+"</td></tr>";
+        +fmtBRL.format(x.brl)+"</td><td class='right'>"+fmtBRL4.format(x.qtd?x.brl/x.qtd:0)+"</td></tr>";
     },'<tr><td colspan="4" class="muted">'+rotuloVazio+'</td></tr>');
   }
   var vazio="Nenhum chamado criado no período (só conta a partir de agora).";
@@ -1446,7 +1479,7 @@ function renderChamados(rows,c,ivC){
 
 function baseOpt(muted,grid,money){return {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:muted},grid:{display:false}},y:{ticks:{color:muted},grid:{color:grid}}}}}
 
-function renderTabelaDia(dias,c){
+function renderTabelaDia(dias){
   var arr=dias.slice();
   arr.sort(function(a,b){
     var col=ORD.col,va,vb;
@@ -1457,7 +1490,7 @@ function renderTabelaDia(dias,c){
   });
   var tb=document.getElementById("tbody-dia");
   paginar("dia",tb,arr,function(x){
-    return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoUsd*c)+"</td></tr>";
+    return "<tr><td>"+x.dia+"</td><td class='right'>"+fmtInt.format(x.inputTokens+x.outputTokens)+"</td><td class='right'>"+fmtInt.format(x.calls)+"</td><td class='right'>"+fmtInt.format(x.ligacoes)+"</td><td class='right'>"+fmtInt.format(Math.round((x.audioSec||0)/60))+" min</td><td class='right'>"+fmtBRL.format(x.custoBrl)+"</td></tr>";
   },'<tr><td colspan="6" class="muted">Sem dados no período.</td></tr>');
 }
 
@@ -1472,27 +1505,26 @@ function Sc(s){return {s:s==null?"":String(s)};}          // celula texto
 function Nc(n,d){return {n:Number(n||0),d:d};}            // celula numero (d casas)
 // Modelo comum das secoes; CSV e Excel consomem daqui (sem duplicar logica).
 function montarSecoes(de,ate,incluir3dias,incluirMes){
-  var c=cot();
   var rowsP=noPeriodo(DADOS.porDiaModelo,de,ate);
   var t=totais(rowsP);
   t.ligacoes=ligacoesNoPeriodo(de,ate);
   var dias=porDiaAgg(rowsP);
   var ramais=ramalAgg(noPeriodo(DADOS.porRamal,de,ate));
   var fonteRows=noPeriodo(DADOS.porFonte,de,ate);
-  var custoLigBrl=(t.transcUsd+t.resumoUsd)*c;
+  var custoLigBrl=t.transcBrl+t.resumoBrl;
   var secoes=[];
 
   secoes.push({nome:"Resumo geral",linhas:[
     [Sc("Metrica"),Sc("Valor")],
-    [Sc("Custo total (BRL)"),Nc(t.custoUsd*c,2)],
+    [Sc("Custo total (BRL)"),Nc(t.custoBrl,2)],
     [Sc("Custo total (USD)"),Nc(t.custoUsd,4)],
     [Sc("Tokens entrada"),Nc(t.inputTokens,0)],
     [Sc("Tokens saida"),Nc(t.outputTokens,0)],
     [Sc("Tokens total"),Nc(t.inputTokens+t.outputTokens,0)],
     [Sc("Chamadas IA"),Nc(t.calls,0)],
     [Sc("Ligacoes/itens (resumos)"),Nc(t.ligacoes,0)],
-    [Sc("Custo transcricao (BRL)"),Nc(t.transcUsd*c,2)],
-    [Sc("Custo resumo (BRL)"),Nc(t.resumoUsd*c,2)],
+    [Sc("Custo transcricao (BRL)"),Nc(t.transcBrl,2)],
+    [Sc("Custo resumo (BRL)"),Nc(t.resumoBrl,2)],
     [Sc("Custo medio por ligacao (BRL)"),Nc(t.ligacoes?custoLigBrl/t.ligacoes:0,4)]
   ]});
 
@@ -1501,27 +1533,29 @@ function montarSecoes(de,ate,incluir3dias,incluirMes){
     var d0=hojeUTC();var alvo=[d0,addDias(d0,-1),addDias(d0,-2)];
     var mapaDia={};dias.forEach(function(x){mapaDia[x.dia]=x;});
     var tot3=0;
-    alvo.forEach(function(d){var x=mapaDia[d]||{inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0};tot3+=x.custoUsd*c;l3.push([Sc(d),Nc(x.inputTokens+x.outputTokens,0),Nc(x.calls,0),Nc(x.ligacoes,0),Nc(x.custoUsd*c,2)]);});
+    alvo.forEach(function(d){var x=mapaDia[d]||{inputTokens:0,outputTokens:0,calls:0,ligacoes:0,custoUsd:0,custoBrl:0};tot3+=x.custoBrl;l3.push([Sc(d),Nc(x.inputTokens+x.outputTokens,0),Nc(x.calls,0),Nc(x.ligacoes,0),Nc(x.custoBrl,2)]);});
     l3.push([Sc("Total 3 dias"),Sc(""),Sc(""),Sc(""),Nc(tot3,2)]);
     secoes.push({nome:"Ultimos 3 dias",linhas:l3});
   }
 
-  var ld=[[Sc("dia"),Sc("tokens_entrada"),Sc("tokens_saida"),Sc("chamadas"),Sc("ligacoes"),Sc("custo_usd"),Sc("custo_brl")]];
-  dias.forEach(function(x){ld.push([Sc(x.dia),Nc(x.inputTokens,0),Nc(x.outputTokens,0),Nc(x.calls,0),Nc(x.ligacoes,0),Nc(x.custoUsd,6),Nc(x.custoUsd*c,4)]);});
+  // Coluna "cambio": sem ela o R$ de cada dia nao tem como ser conferido.
+  var ld=[[Sc("dia"),Sc("tokens_entrada"),Sc("tokens_saida"),Sc("chamadas"),Sc("ligacoes"),Sc("custo_usd"),Sc("cambio"),Sc("custo_brl")]];
+  dias.forEach(function(x){ld.push([Sc(x.dia),Nc(x.inputTokens,0),Nc(x.outputTokens,0),Nc(x.calls,0),Nc(x.ligacoes,0),Nc(x.custoUsd,6),Nc(cotDia(x.dia),4),Nc(x.custoBrl,4)]);});
   secoes.push({nome:"Por dia",linhas:ld});
 
   var lr=[[Sc("ramal"),Sc("usuario"),Sc("ligacoes"),Sc("chamadas"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct_do_total")]];
   var somaR=ramais.reduce(function(a,x){return a+x.custoUsd},0);
-  ramais.forEach(function(x){var p=t.custoUsd>0?Math.round(x.custoUsd/t.custoUsd*100):0;lr.push([Sc(x.ramal||"—"),Sc(x.usuario||"—"),Nc(x.ligacoes,0),Nc(x.calls,0),Nc(x.custoUsd,6),Nc(x.custoUsd*c,4),Sc(p+"%")]);});
+  var somaRBrl=ramais.reduce(function(a,x){return a+x.custoBrl},0);
+  ramais.forEach(function(x){var p=t.custoUsd>0?Math.round(x.custoUsd/t.custoUsd*100):0;lr.push([Sc(x.ramal||"—"),Sc(x.usuario||"—"),Nc(x.ligacoes,0),Nc(x.calls,0),Nc(x.custoUsd,6),Nc(x.custoBrl,4),Sc(p+"%")]);});
   var naoAtrib=t.custoUsd-somaR;
-  if(naoAtrib>0.0000001){var p2=t.custoUsd>0?Math.round(naoAtrib/t.custoUsd*100):0;lr.push([Sc("—"),Sc("nao atribuido"),Sc(""),Sc(""),Nc(naoAtrib,6),Nc(naoAtrib*c,4),Sc(p2+"%")]);}
+  if(naoAtrib>0.0000001){var p2=t.custoUsd>0?Math.round(naoAtrib/t.custoUsd*100):0;lr.push([Sc("—"),Sc("nao atribuido"),Sc(""),Sc(""),Nc(naoAtrib,6),Nc(t.custoBrl-somaRBrl,4),Sc(p2+"%")]);}
   secoes.push({nome:"Por ramal",linhas:lr});
 
   var lf=[[Sc("fonte"),Sc("itens"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct")]];
-  var fAgg={};fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={usd:0,itens:0});a.usd+=r.custoUsd;if(r.op==="resumo")a.itens+=r.calls;});
+  var fAgg={};fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={usd:0,brl:0,itens:0});a.usd+=r.custoUsd;a.brl+=brl(r);if(r.op==="resumo")a.itens+=r.calls;});
   var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Chat","chat"],["Gravacao","gravacao"],["Resumo (gravacao)","resumo"]];
   var totF=0;fLista.forEach(function(f){totF+=(fAgg[f[1]]&&fAgg[f[1]].usd)||0;});
-  fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;lf.push([Sc(f[0]),Nc(a.itens,0),Nc(a.usd,6),Nc(a.usd*c,4),Sc(p+"%")]);});
+  fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,brl:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;lf.push([Sc(f[0]),Nc(a.itens,0),Nc(a.usd,6),Nc(a.brl,4),Sc(p+"%")]);});
   secoes.push({nome:"Por fonte",linhas:lf});
 
   // Custo por cliente / assunto: so tem linha para chamados criados apos o
@@ -1531,40 +1565,43 @@ function montarSecoes(de,ate,incluir3dias,incluirMes){
     [["Por cliente","cliente","clienteId"],["Por assunto","assunto","assuntoId"]].forEach(function(cfg){
       var l=[[Sc(cfg[1]),Sc("chamados"),Sc("custo_usd"),Sc("custo_brl"),Sc("custo_medio_brl")]];
       agruparChamados(chamadosP,cfg[1],cfg[2]).forEach(function(x){
-        l.push([Sc(x.nome),Nc(x.qtd,0),Nc(x.usd,6),Nc(x.usd*c,4),Nc(x.qtd?x.usd*c/x.qtd:0,4)]);
+        l.push([Sc(x.nome),Nc(x.qtd,0),Nc(x.usd,6),Nc(x.brl,4),Nc(x.qtd?x.brl/x.qtd:0,4)]);
       });
       secoes.push({nome:cfg[0],linhas:l});
     });
   }
 
   var lm=[[Sc("modelo"),Sc("operacao"),Sc("tokens_entrada"),Sc("tokens_saida"),Sc("chamadas"),Sc("custo_usd"),Sc("custo_brl")]];
-  var moAgg={};rowsP.forEach(function(r){var k=r.model+"||"+r.op;var a=moAgg[k]||(moAgg[k]={model:r.model,op:r.op,i:0,o:0,calls:0,usd:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;a.usd+=r.custoUsd;});
-  Object.keys(moAgg).forEach(function(k){var a=moAgg[k];lm.push([Sc(a.model),Sc(a.op),Nc(a.i,0),Nc(a.o,0),Nc(a.calls,0),Nc(a.usd,6),Nc(a.usd*c,4)]);});
+  var moAgg={};rowsP.forEach(function(r){var k=r.model+"||"+r.op;var a=moAgg[k]||(moAgg[k]={model:r.model,op:r.op,i:0,o:0,calls:0,usd:0,brl:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;a.usd+=r.custoUsd;a.brl+=brl(r);});
+  Object.keys(moAgg).forEach(function(k){var a=moAgg[k];lm.push([Sc(a.model),Sc(a.op),Nc(a.i,0),Nc(a.o,0),Nc(a.calls,0),Nc(a.usd,6),Nc(a.brl,4)]);});
   secoes.push({nome:"Por modelo e operacao",linhas:lm});
 
   var lt=[[Sc("operacao"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct")]];
   var totTR=t.transcUsd+t.resumoUsd;
-  lt.push([Sc("Transcricao"),Nc(t.transcUsd,6),Nc(t.transcUsd*c,4),Sc((totTR>0?Math.round(t.transcUsd/totTR*100):0)+"%")]);
-  lt.push([Sc("Resumo"),Nc(t.resumoUsd,6),Nc(t.resumoUsd*c,4),Sc((totTR>0?Math.round(t.resumoUsd/totTR*100):0)+"%")]);
+  lt.push([Sc("Transcricao"),Nc(t.transcUsd,6),Nc(t.transcBrl,4),Sc((totTR>0?Math.round(t.transcUsd/totTR*100):0)+"%")]);
+  lt.push([Sc("Resumo"),Nc(t.resumoUsd,6),Nc(t.resumoBrl,4),Sc((totTR>0?Math.round(t.resumoUsd/totTR*100):0)+"%")]);
   secoes.push({nome:"Transcricao x Resumo",linhas:lt});
 
   if(incluirMes){
-    var mesAgg={};rowsP.forEach(function(r){var mes=r.dia.slice(0,7);var a=mesAgg[mes]||(mesAgg[mes]={i:0,o:0,calls:0,ligacoes:0,usd:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;if(r.op==="resumo")a.ligacoes+=r.calls;a.usd+=r.custoUsd;});
+    var mesAgg={};rowsP.forEach(function(r){var mes=r.dia.slice(0,7);var a=mesAgg[mes]||(mesAgg[mes]={i:0,o:0,calls:0,ligacoes:0,usd:0,brl:0});a.i+=r.inputTokens;a.o+=r.outputTokens;a.calls+=r.calls;if(r.op==="resumo")a.ligacoes+=r.calls;a.usd+=r.custoUsd;a.brl+=brl(r);});
     var meses=Object.keys(mesAgg).sort();
     var lms=[[Sc("mes"),Sc("tokens"),Sc("chamadas"),Sc("ligacoes"),Sc("custo_brl"),Sc("variacao_vs_anterior")]];
     var prev=null;
-    meses.forEach(function(m){var a=mesAgg[m];var brl=a.usd*c;var vv="—";if(prev!==null&&prev>0){var dd=(brl-prev)/prev*100;vv=(dd>=0?"+":"")+Math.round(dd)+"%";}lms.push([Sc(m),Nc(a.i+a.o,0),Nc(a.calls,0),Nc(a.ligacoes,0),Nc(brl,2),Sc(vv)]);prev=brl;});
+    meses.forEach(function(m){var a=mesAgg[m];var vb=a.brl;var vv="—";if(prev!==null&&prev>0){var dd=(vb-prev)/prev*100;vv=(dd>=0?"+":"")+Math.round(dd)+"%";}lms.push([Sc(m),Nc(a.i+a.o,0),Nc(a.calls,0),Nc(a.ligacoes,0),Nc(vb,2),Sc(vv)]);prev=vb;});
     secoes.push({nome:"Por mes",linhas:lms});
   }
 
   return secoes;
 }
+// Cabecalho dos relatorios: com o campo vazio cada dia tem o seu (coluna
+// "cambio" em Por dia); preenchido, e o valor fixo da simulacao.
+function rotuloCambio(){return CAMBIO!=null?numBR(CAMBIO,4)+" (fixo, simulacao)":"fechamento de cada dia (ver Por dia)"}
 function celCsv(x){return x.n!==undefined?numBR(x.n,x.d):x.s;}
 function secoesParaCsv(secoes,de,ate,titulo){
   var L=[];var add=function(){L.push(Array.prototype.slice.call(arguments).map(csvCampo).join(";"));};
   var ger="";try{ger=new Date().toLocaleString("pt-BR");}catch(e){ger="";}
   add("RELATORIO DE CUSTOS DE IA - "+titulo);
-  add("Gerado em",ger);add("Periodo",de+" a "+ate);add("Cambio (USD->BRL)",numBR(cot(),4));add("");
+  add("Gerado em",ger);add("Periodo",de+" a "+ate);add("Cambio (USD->BRL)",rotuloCambio());add("");
   secoes.forEach(function(sec){
     add("== "+sec.nome.toUpperCase()+" ==");
     sec.linhas.forEach(function(row){L.push(row.map(function(x){return csvCampo(celCsv(x));}).join(";"));});
@@ -1578,7 +1615,7 @@ function secoesParaXml(secoes,de,ate,titulo){
     [Sc("Relatorio"),Sc(titulo)],
     [Sc("Gerado em"),Sc(ger)],
     [Sc("Periodo"),Sc(de+" a "+ate)],
-    [Sc("Cambio (USD->BRL)"),Nc(cot(),4)]
+    [Sc("Cambio (USD->BRL)"),Sc(rotuloCambio())]
   ]};
   var todas=[info].concat(secoes);
   var x=['<?xml version="1.0" encoding="UTF-8"?>','<?mso-application progid="Excel.Sheet"?>','<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'];
