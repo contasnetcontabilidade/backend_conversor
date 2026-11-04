@@ -1,5 +1,6 @@
 import { Redis } from "@upstash/redis";
 import { getErrorMessage } from "../lib/errors";
+import { registrarErro } from "./erros";
 
 // Redis (Upstash/KV) para cachear a cotacao ENTRE execucoes serverless (o cache
 // em memoria nao sobrevive a instancias frias na Vercel).
@@ -205,4 +206,248 @@ export async function getUsdBrl(): Promise<number> {
 
   console.warn(`[pricing] todas as fontes falharam -> fallback ${fallback}`);
   return fallback;
+}
+
+// --- Cotacao USD -> BRL de CADA DIA (fechamento), para o passado nao mudar ---
+// Decisao do dono em 04/11/2026: o gasto de um dia, em R$, fica com o cambio
+// daquele dia — igual ao preco do Claude (precoClaude.ts). Antes o painel
+// convertia todo o historico pela cotacao de hoje, e os meses passados subiam
+// e desciam junto com o dolar. O fechamento de cada dia encerrado e gravado no
+// Redis uma vez e nao e reescrito; hoje, e dia ainda sem fechamento, usa a
+// cotacao atual (getUsdBrl).
+//
+// As fontes nao publicam fim de semana nem feriado: esses dias herdam o
+// fechamento do ultimo dia util antes deles. So sao gravados depois que sai a
+// cotacao de um dia POSTERIOR — ate la nao da para separar feriado de fonte
+// atrasada, e gravar o valor errado seria para sempre.
+const FX_DIA_KEY = "fx:usdbrl:dia"; // HASH AAAA-MM-DD -> cotacao
+const FX_DIA_PROXIMA = "fx:usdbrl:dia:proxima"; // trava + espera entre buscas
+const FX_DIA_ESTADO = "fx:usdbrl:dia:estado"; // falha da ultima busca
+// O painel recarrega a cada minuto: sem espera, uma fonte fora do ar seria
+// chamada (e o /admin/erros preenchido) 60 vezes por hora.
+const FX_DIA_ESPERA_OK_SEG = 3 * 3600;
+const FX_DIA_ESPERA_FALHA_SEG = 6 * 3600;
+// Folga antes do 1o dia pedido: se ele cair num fim de semana ou feriado, o
+// fechamento que vale e o de um dia util anterior a ele.
+const FX_DIA_FOLGA = 7;
+// Herdar alem disso nao e feriado, e buraco na fonte: o dia fica sem gravar.
+const FX_DIA_HERANCA_MAX = 7;
+
+export interface EstadoCambioDia {
+  falhaDesde?: string; // primeira falha sem busca boa depois (ISO)
+  motivoFalha?: string;
+}
+
+type Fechamentos = Map<string, number>; // so os dias que a fonte publicou
+
+// Data em Brasilia (UTC-3; sem horario de verao desde 2019). E o dia do
+// mercado de cambio: um dia so "fecha" quando acaba aqui, nao em UTC.
+function diaBrasilia(ms: number): string {
+  return new Date(ms - 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+function somaDias(dia: string, n: number): string {
+  const d = new Date(`${dia}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function diasEntre(de: string, ate: string): number {
+  return Math.round(
+    (Date.parse(`${ate}T00:00:00Z`) - Date.parse(`${de}T00:00:00Z`)) / 86400000,
+  );
+}
+const cotacaoValida = (n: number) => Number.isFinite(n) && n > 1 && n < 20;
+
+async function getJsonFx(url: string): Promise<unknown> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+const FONTES_FX_DIA: {
+  nome: string;
+  buscar: (de: string, ate: string) => Promise<Fechamentos>;
+}[] = [
+  {
+    // Mesma fonte da cotacao atual. Um item por dia util, e a data sai do
+    // timestamp (so o 1o item traz create_date). O numero no caminho e o
+    // maximo de itens: sem ele a API ignora as datas e devolve so a cotacao
+    // de agora (testado em 04/11/2026).
+    nome: "awesomeapi",
+    buscar: async (de, ate) => {
+      const n = Math.min(diasEntre(de, ate) + 1, 360);
+      const dados = await getJsonFx(
+        `https://economia.awesomeapi.com.br/json/daily/USD-BRL/${n}` +
+          `?start_date=${de.replace(/-/g, "")}&end_date=${ate.replace(/-/g, "")}`,
+      );
+      // Cota estourada ou bloqueio vem como objeto, nao como lista.
+      if (!Array.isArray(dados)) throw new Error("resposta sem a lista de dias");
+      const maisTarde = new Map<string, { ts: number; v: number }>();
+      for (const it of dados as { bid?: string; timestamp?: string }[]) {
+        const ts = Number(it.timestamp);
+        const v = Number(it.bid);
+        if (!Number.isFinite(ts) || !cotacaoValida(v)) continue;
+        const dia = diaBrasilia(ts * 1000);
+        // Dois itens no mesmo dia: vale o ultimo, que e o fechamento.
+        const atual = maisTarde.get(dia);
+        if (!atual || ts > atual.ts) maisTarde.set(dia, { ts, v });
+      }
+      return new Map(Array.from(maisTarde, ([dia, x]) => [dia, x.v]));
+    },
+  },
+  {
+    // PTAX do Banco Central: a cotacao oficial, a que a contabilidade usa.
+    // Reserva porque a AwesomeAPI as vezes e bloqueada em datacenter
+    // (Vercel). A Frankfurter (BCE), a 1a escolha de reserva, deu HTTP 522
+    // por ~20 s no teste de 04/11/2026. Venda, nao compra: e a taxa de quem
+    // paga em dolar. Datas no formato MM-DD-AAAA, entre aspas (OData do BC).
+    nome: "ptax-bcb",
+    buscar: async (de, ate) => {
+      const bc = (d: string) => `'${d.slice(5, 7)}-${d.slice(8, 10)}-${d.slice(0, 4)}'`;
+      const dados = await getJsonFx(
+        "https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/" +
+          "CotacaoDolarPeriodo(dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)" +
+          `?@dataInicial=${bc(de)}&@dataFinalCotacao=${bc(ate)}` +
+          "&$format=json&$select=cotacaoVenda,dataHoraCotacao",
+      );
+      const lista = (dados as { value?: unknown })?.value;
+      if (!Array.isArray(lista)) throw new Error("resposta sem value");
+      // "2026-10-30 13:04:18.706316": ja vem na hora de Brasilia.
+      const maisTarde = new Map<string, { quando: string; v: number }>();
+      for (const it of lista as { cotacaoVenda?: number; dataHoraCotacao?: string }[]) {
+        const quando = String(it.dataHoraCotacao || "");
+        const dia = quando.slice(0, 10);
+        const v = Number(it.cotacaoVenda);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dia) || !cotacaoValida(v)) continue;
+        const atual = maisTarde.get(dia);
+        if (!atual || quando > atual.quando) maisTarde.set(dia, { quando, v });
+      }
+      return new Map(Array.from(maisTarde, ([dia, x]) => [dia, x.v]));
+    },
+  },
+];
+
+// Cotacao de cada dia de `faltando` a partir do que a fonte publicou. Dia sem
+// publicacao herda o ultimo dia util antes dele — so se houver publicacao de
+// um dia posterior (ver o comentario no topo desta secao).
+function preencherDias(
+  faltando: string[],
+  pub: Fechamentos,
+): Record<string, number> {
+  const publicados = Array.from(pub.keys()).sort();
+  const ultimo = publicados[publicados.length - 1];
+  const out: Record<string, number> = {};
+  if (!ultimo) return out;
+  for (const dia of faltando) {
+    if (dia > ultimo) continue;
+    const direto = pub.get(dia);
+    if (direto !== undefined) {
+      out[dia] = direto;
+      continue;
+    }
+    let anterior: string | undefined;
+    for (const p of publicados) {
+      if (p >= dia) break;
+      anterior = p;
+    }
+    if (anterior && diasEntre(anterior, dia) <= FX_DIA_HERANCA_MAX) {
+      out[dia] = pub.get(anterior) as number;
+    }
+  }
+  return out;
+}
+
+async function lerEstadoCambioDia(r: Redis): Promise<EstadoCambioDia> {
+  const v = await r.get<unknown>(FX_DIA_ESTADO);
+  if (!v) return {};
+  return (typeof v === "string" ? JSON.parse(v) : v) as EstadoCambioDia;
+}
+
+// Cotacao de fechamento gravada para cada dia de `dias`. Os dias ja
+// encerrados que ainda nao tem cotacao sao buscados aqui (no maximo a cada
+// 3 h; 6 h depois de falha). Dia que fica fora do retorno — hoje, fechamento
+// ainda nao publicado, fontes fora do ar — e convertido pela cotacao atual por
+// quem chama. Falha vai para o /admin/erros e volta em `estado`, para o painel
+// avisar que aqueles dias ainda nao estao no cambio do dia.
+export async function cotacoesDosDias(
+  dias: string[],
+): Promise<{ cotacoes: Record<string, number>; estado: EstadoCambioDia }> {
+  const r = getRedisFx();
+  if (!r) return { cotacoes: {}, estado: {} };
+  const agora = new Date().toISOString();
+  const cotacoes: Record<string, number> = {};
+  try {
+    const salvas =
+      (await r.hgetall<Record<string, unknown>>(FX_DIA_KEY)) || {};
+    for (const [dia, v] of Object.entries(salvas)) {
+      const n = Number(v);
+      if (cotacaoValida(n)) cotacoes[dia] = n;
+    }
+    let estado = await lerEstadoCambioDia(r);
+
+    const hoje = diaBrasilia(Date.now());
+    const faltando = Array.from(new Set(dias))
+      .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d < hoje && !(d in cotacoes))
+      .sort();
+    if (!faltando.length) return { cotacoes, estado };
+
+    // SET NX: a trava entre instancias da Vercel e a espera entre buscas.
+    const minha = await r.set(FX_DIA_PROXIMA, agora, {
+      nx: true,
+      ex: FX_DIA_ESPERA_OK_SEG,
+    });
+    if (minha !== "OK") return { cotacoes, estado };
+
+    const de = somaDias(faltando[0], -FX_DIA_FOLGA);
+    const ate = somaDias(hoje, -1);
+    const falhas: string[] = [];
+    for (const f of FONTES_FX_DIA) {
+      try {
+        const pub = await f.buscar(de, ate);
+        // O intervalo sempre tem dias uteis (a folga garante): vazio e falha.
+        if (!pub.size) throw new Error("nenhuma cotacao no periodo");
+        const novas = preencherDias(faltando, pub);
+        if (Object.keys(novas).length) {
+          await r.hset(
+            FX_DIA_KEY,
+            Object.fromEntries(
+              Object.entries(novas).map(([d, v]) => [d, v.toFixed(4)]),
+            ),
+          );
+          Object.assign(cotacoes, novas);
+        }
+        if (estado.falhaDesde) {
+          await r.del(FX_DIA_ESTADO);
+          estado = {};
+        }
+        return { cotacoes, estado };
+      } catch (error) {
+        falhas.push(`${f.nome}: ${getErrorMessage(error)}`);
+      }
+    }
+
+    const motivo = falhas.join(" | ");
+    console.warn(`[pricing] cotacao historica falhou: ${motivo}`);
+    estado = {
+      falhaDesde: estado.falhaDesde || agora,
+      motivoFalha: motivo.slice(0, 300),
+    };
+    await r.set(FX_DIA_PROXIMA, agora, { ex: FX_DIA_ESPERA_FALHA_SEG });
+    await r.set(FX_DIA_ESTADO, JSON.stringify(estado));
+    await registrarErro({
+      ts: agora,
+      origem: "backend",
+      tipo: "cambio",
+      mensagem: `Cotacao historica do dolar indisponivel — ${faltando.length} dia(s) seguem convertidos pela cotacao de hoje no painel. ${motivo}`.slice(
+        0,
+        500,
+      ),
+      contexto: "cambio:historico",
+    }).catch(() => undefined);
+    return { cotacoes, estado };
+  } catch (error) {
+    // Redis fora: o painel segue com a cotacao atual, mas avisa.
+    const motivo = `redis: ${getErrorMessage(error)}`;
+    console.warn(`[pricing] cotacao historica falhou: ${motivo}`);
+    return { cotacoes, estado: { falhaDesde: agora, motivoFalha: motivo } };
+  }
 }
