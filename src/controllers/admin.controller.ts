@@ -520,6 +520,15 @@ svg.lucide{width:16px;height:16px;flex:0 0 auto;vertical-align:-.16em}
 .icon-btn svg.lucide{width:18px;height:18px}
 html[data-theme=dark] #tema .lucide-moon{display:none}
 html[data-theme=light] #tema .lucide-sun{display:none}
+/* Troca de tema com "agua", a mesma do app desktop (via View Transitions): a
+   foto do tema antigo fica parada embaixo e o tema novo aparece pela poca
+   d'agua que o JS monta a cada troca (svgAgua, no script desta pagina) e
+   entrega na variavel --tinta. A poca cresce animada dentro do SVG; sem a
+   variavel, nao ha mascara e o tema novo aparece de uma vez. */
+::view-transition-old(root),::view-transition-new(root){animation:none;mix-blend-mode:normal}
+::view-transition-new(root){-webkit-mask-image:var(--tinta,none);mask-image:var(--tinta,none);
+-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;-webkit-mask-size:100% 100%;mask-size:100% 100%;
+-webkit-mask-position:0 0;mask-position:0 0}
 .seg button{display:inline-flex;align-items:center;gap:6px}
 .seg button svg.lucide{width:15px;height:15px}
 .mini-btn{display:inline-flex;align-items:center;gap:6px}
@@ -808,7 +817,155 @@ var THEME_KEY="painel-tema";
 // mexer no conteudo aqui, senao apaga os <svg> ja renderizados pelo lucide.
 function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{localStorage.setItem(THEME_KEY,t)}catch(e){}}
 setTheme((function(){try{return localStorage.getItem(THEME_KEY)||"dark"}catch(e){return "dark"}})());
-document.getElementById("tema").onclick=function(){setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");if(DADOS)render()};
+
+// ---- Troca de tema com "agua" ----------------------------------------------
+// Copia da animacao do app desktop (svgAgua e toggleTheme em
+// renderer/app-core.js do conversor_WAV_txt), pedida para o painel em
+// 06/11/2026. Os dois repositorios nao compartilham codigo: mudou la, mude aqui.
+var TINTA_DURACAO_MS=1500;
+
+// Centro do botao do sol/lua: e de la que a agua sai. Sem o botao visivel,
+// sai do canto de cima a direita.
+function origemDaTinta(){
+  var b=document.getElementById("tema");
+  var r=b&&b.getBoundingClientRect();
+  if(r&&r.width)return {x:r.left+r.width/2,y:r.top+r.height/2};
+  return {x:window.innerWidth-40,y:40};
+}
+
+// Mascara da troca de tema: uma poca d'agua que sai do botao e se espalha ate
+// as bordas sem crescer por igual. Uma borda so ondulada parecia uma mancha
+// sendo ampliada; o que da cara de agua sao os "dedos": filetes que escorrem na
+// frente, cada um numa direcao e num momento, enquanto o resto da poca vem
+// atras e preenche. A agua nunca recua: cada direcao guarda o maior raio que ja
+// alcancou.
+// Os quadros vao num <animate> do atributo "d" dentro do proprio SVG, sem
+// filtro: filtro seria recalculado a cada quadro e engasgaria em PC fraco. O
+// raio cresce como u^3: comeca devagar e acelera.
+function svgAgua(W,H,bx,by){
+  var PONTOS=120,QUADROS=30;
+  var longe=Math.hypot(Math.max(bx,W-bx),Math.max(by,H-by));
+
+  // Pseudo-aleatorio fixo: a mesma poca a cada troca (e a mesma do app), sem
+  // Math.random. A ordem das chamadas a acaso() faz parte do desenho.
+  var semente=11;
+  function acaso(){semente=(semente*9301+49297)%233280;return semente/233280}
+  var fases=[];
+  for(var f=0;f<4;f++)fases.push(acaso()*Math.PI*2);
+
+  // Dedos apontados para pontos sorteados DENTRO da janela: com o botao no
+  // canto, um dedo sorteado em qualquer direcao poderia escorrer para fora da
+  // tela e ninguem veria.
+  var dedos=[];
+  for(var j=0;j<8;j++){
+    var alvoX=acaso()*W,alvoY=acaso()*H;
+    dedos.push({
+      angulo:Math.atan2(alvoY-by,alvoX-bx),
+      finura:5+acaso()*25,     // maior = filete mais estreito
+      altura:0.4+acaso()*0.7,  // quanto passa a frente da poca
+      inicio:acaso()*0.6,      // quando comeca a escorrer (fracao do tempo)
+      duracao:0.3+acaso()*0.4
+    });
+  }
+
+  // A soma das amplitudes do contorno (0,27) e o quanto a borda pode ficar
+  // para dentro do raio; o ultimo quadro compensa isso para cobrir os cantos,
+  // com 5% de folga porque a curva passa um pouco por dentro dos pontos.
+  var RECUO=0.27;
+  var raioFinal=(longe/(1-RECUO))*1.05;
+  function contorno(a,u){
+    return 0.12*Math.sin(2*a+fases[0]+1.6*u)+
+      0.09*Math.sin(3*a+fases[1]-2.2*u)+
+      0.035*Math.sin(11*a+fases[2]+5*u)+
+      0.025*Math.sin(17*a+fases[3]-6*u);
+  }
+  // Cada dedo nasce, chega ao comprimento maximo e "afunda" de volta na poca
+  // (o maximo por direcao, la embaixo, impede que a borda recue).
+  function dedosEm(a,u){
+    var soma=0;
+    for(var k=0;k<dedos.length;k++){
+      var d=dedos[k],fase=(u-d.inicio)/d.duracao;
+      if(fase<=0||fase>=1)continue;
+      soma+=d.altura*Math.sin(Math.PI*fase)*Math.exp(d.finura*(Math.cos(a-d.angulo)-1));
+    }
+    return soma;
+  }
+
+  function meio(p,q){return [(p[0]+q[0])/2,(p[1]+q[1])/2]}
+  function n(v){return v.toFixed(1)}
+  var maiorRaio=[];
+  for(var z=0;z<PONTOS;z++)maiorRaio.push(0);
+  var valores=[],tempos=[];
+  for(var q=0;q<=QUADROS;q++){
+    var u=q/QUADROS,R=raioFinal*u*u*u,pts=[];
+    for(var i=0;i<PONTOS;i++){
+      var a=(i/PONTOS)*Math.PI*2;
+      var r=Math.max(maiorRaio[i],R*(1+contorno(a,u)+dedosEm(a,u)));
+      maiorRaio[i]=r;
+      pts.push([bx+r*Math.cos(a),by+r*Math.sin(a)]);
+    }
+    // Curva fechada: passa pelo meio de cada lado, com o ponto como controle
+    // (agua nao faz quina).
+    var ini=meio(pts[PONTOS-1],pts[0]);
+    var dd="M"+n(ini[0])+" "+n(ini[1]);
+    for(var m=0;m<PONTOS;m++){
+      var md=meio(pts[m],pts[(m+1)%PONTOS]);
+      dd+="Q"+n(pts[m][0])+" "+n(pts[m][1])+" "+n(md[0])+" "+n(md[1]);
+    }
+    valores.push(dd+"Z");
+    tempos.push(u.toFixed(4));
+  }
+
+  var dur=(TINTA_DURACAO_MS/1000).toFixed(2);
+  // O <desc> com a hora faz cada troca ser uma imagem nova: imagem SVG repetida
+  // reaproveitaria a animacao ja terminada e apareceria pronta. (O app usa um
+  // comentario HTML; aqui o SVG mora dentro de um <script> e um comentario
+  // HTML no meio do codigo confunde o leitor de HTML.)
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'">'+
+    '<desc>'+Date.now()+'</desc>'+
+    '<path d="'+valores[0]+'" fill="#000" stroke="#000" stroke-opacity="0.35" stroke-width="14" stroke-linejoin="round">'+
+    '<animate attributeName="d" values="'+valores.join(";")+'" keyTimes="'+tempos.join(";")+'" dur="'+dur+'s" begin="0s" fill="freeze"/>'+
+    '</path></svg>';
+}
+
+// Os graficos leem as cores do tema na hora de montar (Chart.js nao segue as
+// variaveis CSS sozinho), entao trocar o tema e redesenhar andam juntos.
+function trocarTema(t){setTheme(t);if(DADOS)render()}
+
+document.getElementById("tema").onclick=function(){
+  var root=document.documentElement;
+  var next=root.getAttribute("data-theme")==="dark"?"light":"dark";
+
+  // O navegador fotografa a tela no tema atual, o tema troca por baixo e o
+  // novo aparece pela poca que sai do botao (mascara em
+  // ::view-transition-new(root), lida da variavel --tinta). Sem a API
+  // (navegador antigo), ou se a captura falhar, troca na hora, como antes.
+  if(typeof document.startViewTransition==="function"){
+    try{
+      var o=origemDaTinta();
+      var svg=svgAgua(window.innerWidth,window.innerHeight,o.x,o.y);
+      root.style.setProperty("--tinta",'url("data:image/svg+xml,'+encodeURIComponent(svg)+'")');
+      var transicao=document.startViewTransition(function(){trocarTema(next)});
+      transicao.ready.then(function(){
+        // A poca cresce dentro do SVG; esta animacao "parada" so segura a
+        // transicao aberta ate ela cobrir a tela (sem ela, a transicao
+        // acabaria na hora e ninguem veria a agua).
+        root.animate({opacity:[1,1]},{duration:TINTA_DURACAO_MS+80,pseudoElement:"::view-transition-new(root)"});
+      }).catch(function(e){
+        // AbortError e transicao pulada (ex.: dois cliques seguidos): o tema
+        // ja trocou. Qualquer outro erro (ex.: o redesenho dos graficos
+        // quebrou) tem que aparecer no console.
+        if(!e||e.name!=="AbortError")console.error("[tema] troca de tema com animacao falhou:",e);
+      });
+      transicao.finished.finally(function(){root.style.removeProperty("--tinta")}).catch(function(){/* o erro ja foi logado no ready */});
+      return;
+    }catch(e){
+      console.warn("[tema] sem animacao de agua, troca direta:",e);
+      root.style.removeProperty("--tinta");
+    }
+  }
+  trocarTema(next);
+};
 
 // Abas: Custos x Feedback da IA x Erros do app
 var VIEWS=["custos","feedback","erros"];
