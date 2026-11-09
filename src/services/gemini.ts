@@ -12,7 +12,18 @@ import {
 } from "../utils/datas";
 import { recordUsage } from "./usage";
 import { thinkingConfigFor } from "./geminiThinking";
-import { CLAUDE_MODEL, claudeConfigurado, gerarJsonClaude } from "./claude";
+import {
+  CLAUDE_MODEL,
+  claudeConfigurado,
+  ehPedidoRecusado,
+  gerarJsonClaude,
+  type RespostaClaude,
+} from "./claude";
+import {
+  blocosClaude,
+  partesGemini,
+  type AnexosIa,
+} from "./anexosIa";
 import { registrarErro } from "./erros";
 import { registrarModeloDoResumo } from "./feedback";
 
@@ -42,7 +53,9 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 // 2026-10-28: feedback de 20-28/10 (93 chamados). Finalizado do suporte vira
 // "sim" por padrao; assunto do suporte pelo trabalho feito (nunca vazio);
 // varios pedidos viram lista; sem AnyDesk nem comentario sobre anexo.
-export const PROMPT_VERSION = "2026-10-28";
+// 2026-11-09: a IA passa a LER os anexos de e-mail e Chat (bloco ANEXOS, so
+// quando ha anexo; sem anexo o prompt e o mesmo do 2026-10-28).
+export const PROMPT_VERSION = "2026-11-09";
 
 // Identidade do escritorio no prompt. O modelo precisa saber quem ATENDE para
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
@@ -145,7 +158,44 @@ export type ResumoInput = {
   // Id do atendimento (conversationSpaceId / messageId): amarra o custo desta
   // chamada de IA ao chamado que sair dela (custo por cliente/assunto).
   itemId?: string;
+  // Anexos ja baixados e convertidos (anexosIa.ts). So e-mail e Chat mandam.
+  anexos?: AnexosIa;
 };
+
+// Bloco do prompt sobre anexos (2026-11-09). Vazio quando nao ha anexo, para o
+// prompt ficar identico ao anterior. ler = false e a 2a tentativa, depois que
+// a API recusou um arquivo: todos viram "nao lidos" e valem so como fato.
+function blocoDeAnexos(anexos: AnexosIa | undefined, ler: boolean): string {
+  if (!anexos) return "";
+  const lidos = ler ? anexos.partes : [];
+  const naoLidos = [
+    ...(ler ? [] : anexos.partes.map((p) => ({ nome: p.nome, motivo: "nao lido" }))),
+    ...anexos.naoLidos,
+  ];
+  if (!lidos.length && !naoLidos.length) return "";
+  const linhas = ["*** ANEXOS ***"];
+  if (lidos.length) {
+    linhas.push(`Depois do conteudo vem ${lidos.length} anexo(s) para voce ler, cada um aberto por "ANEXO n: nome".
+Eles fazem parte do pedido:
+- Use o que estiver neles para entender e preencher o chamado: dados de guia, boleto, nota ou
+  planilha (empresa e CNPJ, competencia, valor, vencimento), a mensagem de erro de um print, o que o
+  documento pede. Cliente e competencia podem sair do anexo quando o texto nao diz.
+- Escreva a informacao, nao o anexo: "DAS de 05/2026, R$ 1.234,56, vence em 20/06/2026", e nao
+  "o anexo mostra uma guia". Pode citar de onde veio quando ajudar ("conforme a guia enviada").
+- So o que interessa ao pedido: nao transcreva o documento nem copie dado pessoal que nao serve
+  ao chamado (numero de documento de pessoas, salario de cada funcionario).
+- Se o anexo e o texto da pessoa divergirem, siga o texto e registre a divergencia.
+- Anexo cortado ("primeiras N de M paginas", "texto cortado") nao diz nada do que ficou de fora.`);
+  }
+  if (naoLidos.length) {
+    linhas.push(
+      `Anexos que NAO vieram para leitura (para estes vale "anexo vira so o fato"): ${naoLidos
+        .map((n) => `${n.nome} (${n.motivo})`)
+        .join("; ")}.`,
+    );
+  }
+  return `${linhas.join("\n")}\n`;
+}
 
 function getGeminiClient() {
   // Reutiliza um único client por processo.
@@ -403,7 +453,10 @@ export async function gerarResumoGemini(input: ResumoInput = {}): Promise<{
     .replace(/[^\p{L}]/gu, "")
     .trim();
   const origem = input.origem || "ligacao";
-  if (soTexto.length < 10) {
+  // "Segue anexo" com uma guia e um pedido de verdade: com anexo legivel, o
+  // texto curto nao e motivo para pular a IA.
+  const temAnexoLido = !!input.anexos?.partes.length;
+  if (soTexto.length < 10 && !temAnexoLido) {
     return {
       srtPath,
       resumo: {
@@ -575,7 +628,9 @@ LIGACAO INTERNA — siga a risca:
 `
     : "";
 
-  const prompt = `${blocoData}${blocoQuemRegistra}${contexto}${blocoConversa}${blocoChat}${blocoLigacaoInterna}
+  // Funcao do bloco de anexos: se a API recusar um arquivo, o resumo e refeito
+  // com o mesmo prompt, mas com os anexos so pelo nome (ver o Claude abaixo).
+  const montarPrompt = (blocoAnexos: string) => `${blocoData}${blocoQuemRegistra}${contexto}${blocoConversa}${blocoChat}${blocoLigacaoInterna}
 Escreva em portugues do Brasil, tom profissional, claro e objetivo. Retorne APENAS JSON valido,
 sem markdown e sem texto fora do JSON.
 *** NAO REPITA A MESMA INFORMACAO ***
@@ -591,7 +646,7 @@ mesmo fato em dois campos deixa o chamado arrastado e e o que mais incomoda quem
   dois videos mostrando o problema", "enviou print do erro").
 - Nome de arquivo GENERICO (image.png, UserRecording_123.mp4, Captura de tela 2026-...). Nome que
   diz algo ("ENTRADAS GOLFARMA 2025.zip") pode entrar.
-TRANSCRICAO COM ERROS: ligacao vem de transcricao automatica, que erra termos tecnicos. Corrija pelo
+${blocoAnexos}TRANSCRICAO COM ERROS: ligacao vem de transcricao automatica, que erra termos tecnicos. Corrija pelo
 contexto, quando for claro, com este glossario do escritorio: CBS, IBS, pro-labore, percentual de
 presuncao, lucro presumido, Simples Nacional, DCTFWeb, eSocial, e-CAC, SIEG, Dominio, Onvio,
 Acessorias, Suite/SuiteWeb (tambem chamado de Switch), CertProtect, AnyDesk, GoTo. Ex.: "CDS" nao
@@ -843,13 +898,19 @@ um ainda em aberto tem a sua providencia.`;
     },
   };
 
-  const conteudo = `${prompt}${blocoAssuntos}${blocoSetores}\n\n${
-    origem === "chat"
-      ? "CONVERSA (GOOGLE CHAT)"
-      : origem === "email"
-        ? "E-MAIL"
-        : "TRANSCRICAO"
-  }:\n${transcricao}`;
+  const montarConteudo = (blocoAnexos: string) =>
+    `${montarPrompt(blocoAnexos)}${blocoAssuntos}${blocoSetores}\n\n${
+      origem === "chat"
+        ? "CONVERSA (GOOGLE CHAT)"
+        : origem === "email"
+          ? "E-MAIL"
+          : "TRANSCRICAO"
+    }:\n${transcricao}`;
+  const conteudo = montarConteudo(blocoDeAnexos(input.anexos, true));
+  const anexosLidos = input.anexos?.partes || [];
+  // O que o Gemini de reserva recebe. Muda se o Claude recusar os anexos.
+  let conteudoGemini = conteudo;
+  let anexosGemini = anexosLidos;
 
   // O Claude Haiku 5.5 faz o resumo; o Gemini abaixo e a RESERVA (decisao de
   // 19/10/2026): se a Anthropic falhar — fora do ar, chave recusada, credito
@@ -857,7 +918,29 @@ um ainda em aberto tem a sua providencia.`;
   // sem isso, o credito acabando viraria "tudo no Gemini" sem ninguem ver o porque.
   if (claudeConfigurado()) {
     try {
-      const r = await gerarJsonClaude(conteudo, responseJsonSchema);
+      let r: RespostaClaude;
+      try {
+        r = await gerarJsonClaude(conteudo, responseJsonSchema, blocosClaude(anexosLidos));
+      } catch (error) {
+        // Um arquivo que a API nao aceita (imagem corrompida, PDF estranho)
+        // recusa o pedido INTEIRO. Sem esta 2a tentativa, um anexo ruim tiraria
+        // o resumo do chamado; ela vai com os anexos so pelo nome.
+        if (!anexosLidos.length || !ehPedidoRecusado(error)) throw error;
+        const motivo = getErrorMessage(error);
+        console.warn(`[claude] anexos recusados, resumo refeito sem eles: ${motivo}`);
+        await registrarErro({
+          ts: new Date().toISOString(),
+          origem: "backend",
+          tipo: "resumo",
+          mensagem: `anexos recusados pela IA, resumo refeito sem eles — ${motivo}`.slice(0, 500),
+          contexto: `${input.fonte || origem}:resumo:anexos`,
+          ramal: input.ramal,
+          usuario: input.usuario,
+        }).catch(() => undefined);
+        conteudoGemini = montarConteudo(blocoDeAnexos(input.anexos, false));
+        anexosGemini = [];
+        r = await gerarJsonClaude(conteudoGemini, responseJsonSchema);
+      }
       // Grava ANTES de validar: a Anthropic cobra os tokens mesmo quando a
       // resposta foi recusada, cortada ou veio sem resumo.
       await recordUsage({
@@ -909,7 +992,14 @@ um ainda em aberto tem a sua providencia.`;
     try {
       const response = await getGeminiClient().models.generateContent({
         model: modelUsado,
-        contents: conteudo,
+        contents: anexosGemini.length
+          ? [
+              {
+                role: "user",
+                parts: [{ text: conteudoGemini }, ...partesGemini(anexosGemini)],
+              },
+            ]
+          : conteudoGemini,
         config: {
           thinkingConfig:
             tentativa === 1 ? thinkingConfigFor(modelUsado) : undefined,
