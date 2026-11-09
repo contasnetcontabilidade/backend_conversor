@@ -894,3 +894,26 @@ app mostra esse texto na bolinha do avatar, no menu de contas e na janela de per
   que falhou.
 - `CHAT_SCOPES_ENABLED=0` tira o Chat da cobrança, como tira do login.
 - Só pelo `profileToken`, como a foto.
+## A IA lê os anexos (e-mail e Chat)
+
+Desde o prompt `2026-11-09`, o resumo de e-mail e de mensagens do Chat recebe também
+os anexos (`src/services/anexosIa.ts`). Antes a IA só via o texto, e o anexo virava
+"enviou print do erro".
+
+- **O que é lido:** imagem (PNG, JPEG, WebP) e PDF vão como arquivo, e o Claude
+  Haiku 5.5 e o Gemini de reserva leem os dois, inclusive PDF escaneado. Word, Excel,
+  CSV e PowerPoint viram texto pelas conversões da prévia (`anexoPrevia.ts`).
+  `.txt`, `.xml` (nota fiscal) e `.ofx` entram como texto. Vídeo, áudio e compactado
+  não são lidos: vão só pelo nome, e o prompt trata como "só o fato".
+- **Tetos** (por causa do preço: acima de 100 mil tokens de entrada a chamada inteira
+  do Haiku sai 5× mais cara): até 10 anexos lidos, ~60 mil tokens estimados no total,
+  PDF cortado nas 10 primeiras páginas (`pdf-lib`), texto em 15 mil caracteres por
+  anexo, imagem até 3,75 MB. O que passa do teto vira "não lido" com o motivo.
+- **Sem anexo, o prompt é idêntico ao `2026-10-28`**: o bloco `*** ANEXOS ***` só
+  entra quando há anexo.
+- **Arquivo recusado pela API** (400) derrubaria o pedido inteiro: o resumo é refeito
+  sem os anexos (só pelo nome) e o caso vai para `/admin/erros` (contexto
+  `<fonte>:resumo:anexos`).
+- **Não entra:** ligação, gravação e o "Revisar aqui no Gmail" do complemento. Neste
+  último, o Google corta a resposta em poucos segundos, e baixar anexo não cabe.
+- O log (`[anexos-ia]`) traz só contagem e tipo, nunca conteúdo.
