@@ -23,6 +23,7 @@ import {
   resumoVazio,
   type ResumoJson,
 } from "../services/gemini";
+import { lerAnexosParaIa } from "../services/anexosIa";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
 import { montarRefs } from "../services/chamadoRefs";
 import {
@@ -502,11 +503,26 @@ export async function chatPreviewController(req: Request, res: Response) {
   const periodo = periodoLegivel(sel.primeiraHora, sel.ultimaHora);
   const nomeConversa = espacoNome || "Conversa do Google Chat";
 
+  // A IA le os anexos das mensagens marcadas (anexosIa.ts). Comeca a baixar
+  // ja, enquanto as listas do Suite carregam. O nome vai cru ("image.png"): o
+  // prompt sabe ignorar nome generico, e o nome com data do Suite seria citado.
+  const anexosIaP = lerAnexosParaIa(
+    msgs
+      .flatMap((m) => m.anexos || [])
+      .map((a) => ({
+        nome: a.nome,
+        mime: a.mime,
+        baixar: () => baixarAnexoChat(email, a.resourceName),
+      })),
+    `chat:preview req=${requestId}`,
+  );
+
   const tiposDisponiveis = await buscarTipos().catch(() => []);
 
   // Lista de setores para a IA poder sugerir setores ADICIONAIS ao do perfil.
 
   const setoresDisponiveis = await buscarSetores().catch(() => []);
+  const anexosIa = await anexosIaP;
 
   // A IA e best-effort (o retry robusto ja mora no gerarResumoGemini): se ela
   // falhar, o chamado ainda abre com os campos vazios para preenchimento manual.
@@ -515,6 +531,7 @@ export async function chatPreviewController(req: Request, res: Response) {
   try {
     ({ resumo } = await gerarResumoGemini({
       text: `Conversa: ${nomeConversa}\nParticipantes: ${participantes}\n\n${sel.texto}`,
+      anexos: anexosIa,
       origem: "chat",
       model: geminiModel,
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
