@@ -49,12 +49,23 @@ export type RespostaClaude = {
   modeloCusto: string;
 };
 
+// A API recusou o PEDIDO (400): com anexo, quase sempre e um arquivo que ela
+// nao aceitou. Repetir igual nao adianta; o resumo tenta de novo sem anexos.
+export function ehPedidoRecusado(error: unknown): boolean {
+  return error instanceof Anthropic.APIError && error.status === 400;
+}
+
 // Gera um JSON que segue `schema` (structured outputs: a API garante o
-// formato quando a resposta termina normalmente).
+// formato quando a resposta termina normalmente). `anexos` sao blocos de
+// imagem/PDF/texto que vao depois do prompt (anexosIa.ts).
 export async function gerarJsonClaude(
   prompt: string,
   schema: Record<string, unknown>,
+  anexos: Anthropic.ContentBlockParam[] = [],
 ): Promise<RespostaClaude> {
+  const content: string | Anthropic.ContentBlockParam[] = anexos.length
+    ? [{ type: "text", text: prompt }, ...anexos]
+    : prompt;
   const resp = await getClient().messages.create({
     model: CLAUDE_MODEL,
     max_tokens: 16000,
@@ -65,7 +76,7 @@ export async function gerarJsonClaude(
       effort: "low",
       format: { type: "json_schema", schema },
     },
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content }],
   });
   // Quem usa o Claude confere o preco no site (no maximo 1x/dia): assim o
   // preco acompanha o site mesmo nos dias em que ninguem abre o painel.
