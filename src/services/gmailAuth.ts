@@ -17,7 +17,7 @@ const AUTH_BASE =
   process.env.GMAIL_AUTH_BASE || "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URI =
   process.env.GMAIL_TOKEN_URI || "https://oauth2.googleapis.com/token";
-const USERINFO_URI = "https://www.googleapis.com/oauth2/v3/userinfo";
+export const USERINFO_URI = "https://www.googleapis.com/oauth2/v3/userinfo";
 const TOKENINFO_URI = "https://oauth2.googleapis.com/tokeninfo";
 
 export const GMAIL_SCOPES = [
@@ -25,6 +25,10 @@ export const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "openid",
   "email",
+  // profile = nome e foto no userinfo: a foto vai para o seletor de contas do
+  // app (googleFoto.ts). Quem conectou antes deste escopo so o ganha na proxima
+  // conexao; ate la a foto vem do diretorio da empresa.
+  "profile",
 ];
 
 // Escopos do GOOGLE CHAT (aba "Chat": abrir chamado a partir de conversas).
