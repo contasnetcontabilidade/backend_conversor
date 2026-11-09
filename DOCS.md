@@ -854,3 +854,43 @@ Google, sem biblioteca).
    instalar para outras pessoas: Marketplace SDK no mesmo projeto, ficha
    **privada** (só a empresa, sem revisão do Google) e o admin instala para um grupo.
 5. Mudou o JSON? `gcloud workspace-add-ons deployments replace <nome> --deployment-file=...`.
+
+---
+
+## Foto da conta Google (seletor de contas do app)
+
+O avatar do seletor de contas, no topo do app, mostra a foto da conta Google em vez
+da inicial. O app pede `GET /api/gmail/foto?profileToken=` e guarda a resposta junto
+da conta.
+
+- **Duas fontes, nesta ordem** (`src/services/googleFoto.ts`):
+  1. **Diretório da empresa** (People API `people:searchDirectoryPeople`, escopo
+     `directory.readonly`, que o Chat já pede). Serve quem já está conectado, sem
+     reconectar. Perfil fora do diretório volta vazio, sem erro.
+  2. **`userinfo`** (escopo `profile`, pedido no login desde 09/11/2026). Quem
+     conectou antes só ganha esse escopo na próxima conexão.
+- **Resposta:** `{ conta, foto, origem }`. `foto` é um data URL (os bytes, 96 px),
+  para o app mostrar sem rede e sem mexer na CSP. Sem foto nas duas fontes:
+  `foto: null`. O avatar de letra que o Google gera para quem não tem foto
+  (`default: true` no diretório) conta como sem foto.
+- **Erro em vez de "sem foto"** quando o diretório falha (não 403) e o `userinfo` não
+  tem foto: a foto pode existir, e o app tenta de novo depois em vez de guardar o vazio.
+- **Só pelo `profileToken`**, sem o `?email=` que as outras rotas do Gmail aceitam:
+  com a API aberta, o atalho daria a foto de qualquer conta conectada.
+- Só baixa de `*.googleusercontent.com`.
+
+### O que falta a conta liberar (aviso de reconectar)
+
+`GET /api/gmail/permissoes?profileToken=` compara os escopos que o login pede hoje
+(`escoposSolicitados`) com os que a conta liberou (`getEscoposConcedidos`, guardado no
+Redis a cada login e renovação) e devolve `{ conta, conferido, faltam }`. Cada item de
+`faltam` traz `chave`, `nome` ("a sua foto") e `para` ("mostrar a sua foto no app"): o
+app mostra esse texto na bolinha do avatar, no menu de contas e na janela de perfil.
+
+- O texto mora em `src/services/googlePermissoes.ts`. Escopo novo no futuro = uma
+  linha a mais no mapa `RECURSOS`, sem versão nova do app.
+- Escopos desconhecidos (nada no Redis e o `tokeninfo` falhou): `conferido: false`, sem
+  `faltam`. Melhor não avisar do que mandar todo mundo reconectar por uma consulta
+  que falhou.
+- `CHAT_SCOPES_ENABLED=0` tira o Chat da cobrança, como tira do login.
+- Só pelo `profileToken`, como a foto.
