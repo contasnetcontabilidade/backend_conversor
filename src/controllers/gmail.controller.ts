@@ -23,6 +23,8 @@ import {
   setPerfilToken,
 } from "../services/store";
 import { resolverContaGoogle } from "../services/googleConta";
+import { buscarFotoGoogle } from "../services/googleFoto";
+import { pendenciasDaConta } from "../services/googlePermissoes";
 import {
   gerarResumoGemini,
   resumoVazio,
@@ -358,6 +360,37 @@ export async function gmailEmailsController(req: Request, res: Response) {
   const email = await resolverContaGoogle(profileToken, emailParam);
   const emails = await listarEmailsMarcados(email);
   res.status(200).json({ ok: true, data: { conta: email, emails } });
+}
+
+// ---------------------------------------------------------------------------
+// GET /gmail/foto?profileToken= — foto da conta Google (seletor de contas)
+// ---------------------------------------------------------------------------
+
+export async function gmailFotoController(req: Request, res: Response) {
+  const profileToken =
+    typeof req.query.profileToken === "string"
+      ? req.query.profileToken.trim()
+      : "";
+  // So pelo token, sem o "?email=" que as outras rotas aceitam: com a API
+  // aberta, aquele atalho daria a foto de qualquer conta conectada.
+  const email = await resolverContaGoogle(profileToken);
+  const { foto, origem } = await buscarFotoGoogle(email);
+  res.status(200).json({ ok: true, data: { conta: email, foto, origem } });
+}
+
+// ---------------------------------------------------------------------------
+// GET /gmail/permissoes?profileToken= — o que falta a conta liberar no Google
+// ---------------------------------------------------------------------------
+
+export async function gmailPermissoesController(req: Request, res: Response) {
+  const profileToken =
+    typeof req.query.profileToken === "string"
+      ? req.query.profileToken.trim()
+      : "";
+  // So pelo token, como a foto: nao e para qualquer um consultar a conta alheia.
+  const email = await resolverContaGoogle(profileToken);
+  const { conferido, faltam } = await pendenciasDaConta(email);
+  res.status(200).json({ ok: true, data: { conta: email, conferido, faltam } });
 }
 
 // ---------------------------------------------------------------------------
