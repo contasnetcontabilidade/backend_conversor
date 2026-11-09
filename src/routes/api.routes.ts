@@ -43,6 +43,8 @@ import {
   gmailAnexoPreviaController,
   gmailCriarController,
   gmailEmailsController,
+  gmailFotoController,
+  gmailPermissoesController,
   gmailOAuthCallbackController,
   gmailOAuthDoneController,
   gmailOAuthStartController,
@@ -138,6 +140,10 @@ apiRouter.get(
 );
 apiRouter.get("/gmail/oauth/done", asyncHandler(gmailOAuthDoneController));
 apiRouter.get("/gmail/emails", asyncHandler(gmailEmailsController));
+// Foto da conta Google para o seletor de contas do app (ver googleFoto.ts).
+apiRouter.get("/gmail/foto", asyncHandler(gmailFotoController));
+// O que falta a conta liberar (aviso de reconectar no app; ver googlePermissoes.ts).
+apiRouter.get("/gmail/permissoes", asyncHandler(gmailPermissoesController));
 apiRouter.get("/gmail/anexo", asyncHandler(gmailAnexoController));
 apiRouter.get("/gmail/anexo/previa", asyncHandler(gmailAnexoPreviaController));
 apiRouter.post("/gmail/chamado/preview", asyncHandler(gmailPreviewController));
