@@ -30,6 +30,7 @@ import {
   resumoVazio,
   type ResumoJson,
 } from "../services/gemini";
+import { lerAnexosParaIa } from "../services/anexosIa";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
 import {
   previaApresentacao,
@@ -456,11 +457,24 @@ export async function gmailPreviewController(req: Request, res: Response) {
     snippet = msg.snippet;
   }
 
+  // A IA le os anexos junto com o texto (anexosIa.ts). Comeca a baixar ja,
+  // enquanto as listas do Suite carregam.
+  const anexosIaP = lerAnexosParaIa(
+    anexos.map((a) => ({
+      nome: a.nome,
+      mime: a.mime,
+      tamanho: a.tamanho,
+      baixar: () => baixarAnexo(email, a.messageId, a.attachmentId),
+    })),
+    `gmail:preview req=${requestId}`,
+  );
+
   const tiposDisponiveis = await buscarTipos().catch(() => []);
 
   // Lista de setores para a IA poder sugerir setores ADICIONAIS ao do perfil.
 
   const setoresDisponiveis = await buscarSetores().catch(() => []);
+  const anexosIa = await anexosIaP;
 
   // A IA e best-effort (retry robusto ja no gerarResumoGemini).
   let resumo: ResumoJson;
@@ -468,6 +482,7 @@ export async function gmailPreviewController(req: Request, res: Response) {
   try {
     ({ resumo } = await gerarResumoGemini({
       text: `Assunto: ${assunto}\nRemetente: ${de}\n\n${corpoTexto}`,
+      anexos: anexosIa,
       origem: "email",
       model: geminiModel,
       assuntosDisponiveis: tiposDisponiveis.map((t) => ({
