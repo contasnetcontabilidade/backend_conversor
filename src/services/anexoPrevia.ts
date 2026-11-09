@@ -76,7 +76,9 @@ export function tipoConversao(
 //
 // Regra: BOM manda; sem BOM, tenta UTF-8 e, se aparecer caractere invalido,
 // refaz como Latin-1 (que nunca falha, por ser byte a byte).
-function textoDoCsv(bytes: Buffer): string {
+// Exportada porque .txt, .xml e .ofx lidos pela IA tem o mesmo problema
+// (anexosIa.ts).
+export function textoDoCsv(bytes: Buffer): string {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
     return bytes.subarray(3).toString("utf-8");
   }
