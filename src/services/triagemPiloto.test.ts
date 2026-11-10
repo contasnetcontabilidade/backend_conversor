@@ -237,6 +237,21 @@ test("'nao e chamado' tira a sugestao e vira rotulo; sem sugestao nao anota nada
   );
 });
 
+test("'nao e para mim' e 'ja virou chamado' tem desfecho proprio, fora do negativo do aprendizado", async () => {
+  const p = await piloto();
+  assert.equal(p.desfechoDoMotivo("nao_e_para_mim"), "nao_e_para_mim");
+  assert.equal(p.desfechoDoMotivo("ja_virou_chamado"), "ja_era_chamado");
+  assert.equal(p.desfechoDoMotivo("aviso_automatico"), "nao_e_chamado");
+  assert.equal(p.desfechoDoMotivo("inventado"), null);
+  assert.equal(p.MOTIVOS_PARA_O_APP[0].rotulo, "Não é para mim");
+  assert.ok(p.MOTIVOS_PARA_O_APP.every((m) => !("desfecho" in m)), "o app nao recebe o desfecho");
+
+  await p.conferirCaixa(CONTA);
+  await p.registrarDesfecho(CONTA, "t1", p.desfechoDoMotivo("nao_e_para_mim")!, "nao_e_para_mim");
+  const ultima = JSON.parse((db.get(p.KEY_LISTA) as string[])[0]);
+  assert.deepEqual([ultima.desfecho, ultima.motivo], ["nao_e_para_mim", "nao_e_para_mim"]);
+});
+
 test("sugestao sem acao por mais de 7 dias sai como 'ignorada'", async () => {
   const p = await piloto();
   await p.conferirCaixa(CONTA);
