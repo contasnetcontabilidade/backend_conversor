@@ -339,20 +339,20 @@ test("aprende com quem dispensa: 5 'nao e chamado' sobem o limiar; 'nao e para m
     h.set(id, JSON.stringify({ threadId: id, messageId: id, assunto: "x", deNome: "", deEmail: "a@b.com", quando: Date.now(), motivo: "", categoria: "outro", confianca: 0.8, sugeridaEm: Date.now() }));
     db.set(`triagem:sug:${CONTA}`, h);
   };
-  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_SUGESTAO);
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO);
   for (let i = 1; i <= 4; i++) {
     semear(`d${i}`);
     await p.registrarDesfecho(CONTA, `d${i}`, "nao_e_chamado", "aviso_automatico");
   }
   semear("d5");
   await p.registrarDesfecho(CONTA, "d5", "nao_e_para_mim", "nao_e_para_mim");
-  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_SUGESTAO, "4 dispensas + 'nao e para mim' ainda nao sobe");
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO, "4 dispensas + 'nao e para mim' ainda nao sobe");
   semear("d6");
   await p.registrarDesfecho(CONTA, "d6", "nao_e_chamado", "outro");
   assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_QUEM_DISPENSA);
   semear("d7");
   await p.registrarDesfecho(CONTA, "d7", "virou_chamado");
-  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_SUGESTAO, "abriu chamado de uma sugestao: volta");
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO, "abriu chamado de uma sugestao: volta");
 });
 
 test("com outra conferencia em andamento, so devolve a lista (sem ler a caixa)", async () => {
