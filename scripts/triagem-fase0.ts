@@ -98,6 +98,26 @@ function ehLimiteDeTaxa(e: unknown): boolean {
   return httpStatus(e) === 429 || /rateLimitExceeded/i.test(motivo);
 }
 
+// Queda de conexao e passageira: em 10/11 "fetch failed" e "terminated"
+// derrubaram tres caixas inteiras na primeira chamada. Conta sem acesso NAO
+// entra aqui (a mensagem e outra) e falha na hora.
+function ehQuedaDeRede(e: unknown): boolean {
+  return /fetch failed|terminated|sem resposta|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket/i.test(
+    String((e as Error)?.message),
+  );
+}
+
+async function comRetentativaDeRede<T>(fn: () => Promise<T>): Promise<T> {
+  for (let tentativa = 1; ; tentativa++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!ehQuedaDeRede(e) || tentativa >= 4) throw e;
+      await esperar(2000 * 2 ** tentativa);
+    }
+  }
+}
+
 async function minhaVez() {
   const agora = Date.now();
   const vez = Math.max(agora, proximaChamada);
@@ -121,13 +141,7 @@ async function gmail<T>(fn: () => Promise<T>, oque: string): Promise<T> {
         proximaChamada = Math.max(proximaChamada, Date.now() + ESPERA_LIMITE_MS);
         continue;
       }
-      // Queda de conexao tambem e passageira: na 1a rodada do Alberto (10/11)
-      // um "fetch failed" na primeira chamada derrubou a caixa inteira. Conta
-      // sem acesso NAO entra aqui (a mensagem e outra) e falha na hora.
-      const deRede = /fetch failed|sem resposta|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket/i.test(
-        String((e as Error)?.message),
-      );
-      if ((httpStatus(e) >= 500 || deRede) && tentativa < 4) {
+      if ((httpStatus(e) >= 500 || ehQuedaDeRede(e)) && tentativa < 4) {
         await esperar(2000 * 2 ** tentativa);
         continue;
       }
@@ -184,7 +198,7 @@ async function main() {
 
   // Gabarito: os chamados de e-mail criados de verdade.
   const criados = new Map<string, { ts: string; ramal: string; usuario: string }>();
-  for (const f of await listarFeedback()) {
+  for (const f of await comRetentativaDeRede(() => listarFeedback())) {
     if (f.origem === "email" && f.tipo === "implicito" && f.id && !criados.has(f.id)) {
       criados.set(f.id, { ts: f.ts, ramal: String(f.ramal || ""), usuario: String(f.usuario || "") });
     }
