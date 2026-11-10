@@ -410,6 +410,70 @@ export async function obterThread(
 }
 
 // ---------------------------------------------------------------------------
+// Triagem: achar na caixa os e-mails que podem virar chamado
+// ---------------------------------------------------------------------------
+
+// Conversas que casam com uma busca na sintaxe da caixa do Gmail ("after:",
+// "-category:", ...). Uma pagina por vez: a varredura do historico passa de
+// milhares de conversas.
+export async function buscarThreads(
+  email: string,
+  q: string,
+  pageToken?: string,
+): Promise<{ ids: string[]; proxima?: string }> {
+  const params = new URLSearchParams({ q, maxResults: "500" });
+  if (pageToken) params.set("pageToken", pageToken);
+  const r = await gmailGet(email, `/threads?${params.toString()}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const threads: any[] = Array.isArray(r?.threads) ? r.threads : [];
+  return {
+    ids: threads.map((t) => String(t?.id || "")).filter(Boolean),
+    proxima: r?.nextPageToken ? String(r.nextPageToken) : undefined,
+  };
+}
+
+export interface MensagemParaTriagem {
+  id: string;
+  quando: number; // internalDate, em ms
+  fromNome: string;
+  fromEmail: string;
+  subject: string;
+  // SENT = a propria pessoa mandou (e o gatilho "depois da resposta" do
+  // suporte); CATEGORY_* = a aba do Gmail (Promocoes, Atualizacoes...).
+  labelIds: string[];
+  corpo: string;
+}
+
+// A conversa com o que a triagem le de cada mensagem. Os anexos ficam de fora:
+// a triagem decide pelo texto, e baixar anexo de milhares de conversas nao cabe.
+export async function obterThreadParaTriagem(
+  email: string,
+  threadId: string,
+): Promise<MensagemParaTriagem[]> {
+  const t = await gmailGet(
+    email,
+    `/threads/${encodeURIComponent(threadId)}?format=full`,
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const msgs: any[] = Array.isArray(t?.messages) ? t.messages : [];
+  return msgs
+    .map((m) => {
+      const headers = m?.payload?.headers || [];
+      const { nome, email: fromEmail } = parseFrom(header(headers, "From"));
+      return {
+        id: String(m?.id || ""),
+        quando: Number(m?.internalDate) || 0,
+        fromNome: nome,
+        fromEmail,
+        subject: header(headers, "Subject"),
+        labelIds: Array.isArray(m?.labelIds) ? m.labelIds.map(String) : [],
+        corpo: extrairCorpo(m?.payload),
+      };
+    })
+    .filter((m) => m.id);
+}
+
+// ---------------------------------------------------------------------------
 // Marcador (label): criar ao conectar e remover ao criar o chamado
 // ---------------------------------------------------------------------------
 
