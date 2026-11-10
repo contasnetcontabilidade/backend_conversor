@@ -6,7 +6,7 @@
 // Uso (na pasta do backend):
 //   ENV_FILE=../.env npx tsx scripts/triagem-fase0.ts \
 //     --contas "a@contas.com.br=Suporte,b@contas.com.br=Departamento Pessoal" \
-//     [--desde 2026-07-21] [--so-contar] [--amostra 600] [--paralelo 4] [--intervalo 3000] [--saida <pasta>]
+//     [--desde 2026-07-21] [--so-contar] [--amostra 600] [--paralelo 4] [--intervalo 3000] [--teto-usd 4.5] [--saida <pasta>]
 //
 // --so-contar: lista as conversas e acha os chamados de cada caixa, sem IA.
 // --amostra N: tria todos os chamados reais + N conversas sorteadas das demais;
@@ -62,6 +62,9 @@ function args() {
     // ms entre chamadas ao Gmail no inicio. A caixa do Gabriel estourou o
     // limite ate 2 s (10/11, em horario de uso do app): de dia, use 3000.
     intervalo: Number(val("intervalo")) || 0,
+    // Teto de gasto da rodada em US$ (pedido do dono em 10/11: "nao pode passar
+    // de 5 dolares"). Ao chegar nele, para de triar e grava o que ja gastou.
+    tetoUsd: Number(val("teto-usd")) || 0,
     saida: path.resolve(val("saida") || SAIDA_PADRAO),
   };
 }
@@ -302,11 +305,17 @@ async function main() {
     let custo = 0;
     let feitas = 0;
     let erros = 0;
+    let parouNoTeto = false;
     const linhas: Array<{ gatilho: string; virou: boolean; decisao?: string; confianca?: number }> = [];
     const semGatilho: string[] = [];
 
     try {
       await emParalelo(alvo, opt.paralelo, async (threadId) => {
+        if (opt.tetoUsd && custo >= opt.tetoUsd) {
+          if (!parouNoTeto) console.warn(`[fase0] teto de US$ ${opt.tetoUsd} atingido: parando de triar`);
+          parouNoTeto = true;
+          return;
+        }
         let msgs = cache.get(threadId);
         try {
           msgs ??= await gmail(() => gm.obterThreadParaTriagem(conta.email, threadId), "ler conversa");
@@ -421,6 +430,7 @@ async function main() {
       amostra: opt.amostra ? { sorteadas: sorteadas.length, fatorDosAlarmes: Number(fator.toFixed(2)) } : null,
       porGatilho,
       erros,
+      parouNoTeto,
       esperasPeloLimiteDoGmail: esperasPorLimite,
       intervaloFinalGmailMs: intervaloGmailMs,
       tokens: { entrada: inTok, saida: outTok },
