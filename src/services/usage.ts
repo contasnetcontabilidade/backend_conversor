@@ -20,7 +20,9 @@ function getRedis(): Redis | null {
 }
 
 export type Operacao = "transcricao" | "resumo";
-export type Fonte = "ligacao" | "email" | "resumo" | "chat" | "gravacao";
+// "triagem" = a conferencia da caixa do Gmail (sugestoes de chamado). Fica
+// separada de "email" porque nao e custo de um chamado aberto.
+export type Fonte = "ligacao" | "email" | "resumo" | "chat" | "gravacao" | "triagem";
 // "sec" = segundos de audio (provedores cobrados por minuto, ex.: Deepgram).
 type Metric = "in" | "out" | "calls" | "sec";
 
