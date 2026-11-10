@@ -118,7 +118,13 @@ async function gmail<T>(fn: () => Promise<T>, oque: string): Promise<T> {
         proximaChamada = Math.max(proximaChamada, Date.now() + ESPERA_LIMITE_MS);
         continue;
       }
-      if (httpStatus(e) >= 500 && tentativa < 4) {
+      // Queda de conexao tambem e passageira: na 1a rodada do Alberto (10/11)
+      // um "fetch failed" na primeira chamada derrubou a caixa inteira. Conta
+      // sem acesso NAO entra aqui (a mensagem e outra) e falha na hora.
+      const deRede = /fetch failed|sem resposta|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket/i.test(
+        String((e as Error)?.message),
+      );
+      if ((httpStatus(e) >= 500 || deRede) && tentativa < 4) {
         await esperar(2000 * 2 ** tentativa);
         continue;
       }
