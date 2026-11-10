@@ -345,7 +345,11 @@ async function main() {
       });
     } finally {
       out.end();
-      // Mesmo se a rodada quebrar no meio, o que ja foi gasto vai para o painel.
+      // Mesmo se a rodada quebrar no meio, o que ja foi gasto vai para o painel,
+      // num registro so por caixa (um por triagem gastaria milhares de comandos
+      // do Redis). Sem `usuario`: o painel guarda o nome do ramal pelo ultimo
+      // registro, e o 258 passaria a se chamar "Fase 0". Sem `fonte`: "email"
+      // misturaria a triagem com o custo dos chamados de e-mail.
       if (inTok || outTok) {
         await recordUsage({
           model: CLAUDE_MODEL,
@@ -353,9 +357,8 @@ async function main() {
           inputTokens: inTok,
           outputTokens: outTok,
           ramal: RAMAL_TESTE,
-          usuario: "Fase 0 da triagem",
-          fonte: "email",
         }).catch((e) => console.warn(`[fase0] gasto NAO registrado no painel: ${(e as Error).message}`));
+        console.log(`Gasto registrado no painel (ramal ${RAMAL_TESTE}): US$ ${custo.toFixed(4)}`);
       }
     }
 
