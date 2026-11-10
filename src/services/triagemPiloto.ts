@@ -102,14 +102,40 @@ export interface SugestaoTriagem {
   sugeridaEm: number;
 }
 
-export type Desfecho = "virou_chamado" | "nao_e_chamado" | "ignorada";
+// O desfecho e o ROTULO do aprendizado (Fase 2). So "nao_e_chamado" e exemplo
+// negativo; os outros dois botoes do "Nao e chamado" tem desfecho proprio:
+// - "nao_e_para_mim": caixa compartilhada; o e-mail pode ser chamado de outra
+//   pessoa (pedido do dono em 10/11/2026). Como negativo, ensinaria o modelo
+//   que pedido de verdade nao e chamado.
+// - "ja_era_chamado": virou chamado por outro caminho (ligacao, Chat, outra
+//   caixa). Para o modelo, e um acerto da sugestao.
+export type Desfecho =
+  | "virou_chamado"
+  | "ja_era_chamado"
+  | "nao_e_para_mim"
+  | "nao_e_chamado"
+  | "ignorada";
 
-export const MOTIVOS_NAO_E_CHAMADO = [
-  "aviso_automatico",
-  "ja_virou_chamado",
-  "nao_e_pedido",
-  "outro",
-] as const;
+// O app mostra esta lista (vem na resposta da conferencia): motivo novo nao
+// precisa de versao nova do app.
+export const MOTIVOS_NAO_E_CHAMADO: ReadonlyArray<{
+  valor: string;
+  rotulo: string;
+  desfecho: Desfecho;
+}> = [
+  { valor: "nao_e_para_mim", rotulo: "Não é para mim", desfecho: "nao_e_para_mim" },
+  { valor: "aviso_automatico", rotulo: "Propaganda ou aviso automático", desfecho: "nao_e_chamado" },
+  { valor: "ja_virou_chamado", rotulo: "Já virou chamado", desfecho: "ja_era_chamado" },
+  { valor: "nao_e_pedido", rotulo: "Não é pedido de cliente", desfecho: "nao_e_chamado" },
+  { valor: "outro", rotulo: "Outro", desfecho: "nao_e_chamado" },
+];
+
+export function desfechoDoMotivo(motivo: string): Desfecho | null {
+  return MOTIVOS_NAO_E_CHAMADO.find((m) => m.valor === motivo)?.desfecho ?? null;
+}
+
+// O que o app precisa para desenhar os botoes (sem o desfecho, que e interno).
+export const MOTIVOS_PARA_O_APP = MOTIVOS_NAO_E_CHAMADO.map(({ valor, rotulo }) => ({ valor, rotulo }));
 
 function lerSugestao(v: unknown): SugestaoTriagem | null {
   try {
