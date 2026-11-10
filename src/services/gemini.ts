@@ -61,8 +61,8 @@ export const PROMPT_VERSION = "2026-11-09";
 // nao confundir com quem e ATENDIDO — o feedback real mostrou o cliente sendo
 // trocado em 9 de 10 e-mails, e o caso classico e o e-mail encaminhado por
 // alguem de dentro (o remetente vira "cliente" por engano).
-const NOME_ESCRITORIO = process.env.ESCRITORIO_NOME || "Contas Contabilidade";
-const DOMINIOS_ESCRITORIO =
+export const NOME_ESCRITORIO = process.env.ESCRITORIO_NOME || "Contas Contabilidade";
+export const DOMINIOS_ESCRITORIO =
   process.env.ESCRITORIO_DOMINIOS || "contas.com.br, contasnet.com.br";
 
 let geminiClient: GoogleGenAI | null = null;
