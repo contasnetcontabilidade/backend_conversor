@@ -5,6 +5,7 @@ import {
   conferirCaixa,
   desfechoDoMotivo,
   estaNoPiloto,
+  limiarDaPessoa,
   listarSugestoes,
   MOTIVOS_PARA_O_APP,
   registrarDesfecho,
@@ -28,16 +29,19 @@ export async function triagemConferirController(req: Request, res: Response) {
   }
   // Abrir a aba so lista o que ja foi achado; a conferencia de verdade (que le
   // a caixa e gasta IA) vem do relogio do app.
+  // "limiar" = confianca minima desta pessoa (sobe para quem dispensa muito).
+  // O app esconde as sugestoes abaixo dele e so avisa das que passam.
   if (body.apenasListar === true) {
-    const sugestoes = await listarSugestoes(email);
+    const [sugestoes, limiar] = await Promise.all([listarSugestoes(email), limiarDaPessoa(email)]);
     res.status(200).json({
       ok: true,
-      data: { ativo: true, sugestoes, conferidoEm: null, motivos: MOTIVOS_PARA_O_APP },
+      data: { ativo: true, sugestoes, conferidoEm: null, motivos: MOTIVOS_PARA_O_APP, limiar },
     });
     return;
   }
   const r = await conferirCaixa(email, { setor: getOptionalString(body, "setor") });
-  res.status(200).json({ ok: true, data: { ativo: true, ...r, motivos: MOTIVOS_PARA_O_APP } });
+  const limiar = await limiarDaPessoa(email);
+  res.status(200).json({ ok: true, data: { ativo: true, ...r, motivos: MOTIVOS_PARA_O_APP, limiar } });
 }
 
 // POST /gmail/triagem/desfecho { profileToken, threadId, motivo }
