@@ -6,7 +6,7 @@
 // Uso (na pasta do backend):
 //   ENV_FILE=../.env npx tsx scripts/triagem-fase0.ts \
 //     --contas "a@contas.com.br=Suporte,b@contas.com.br=Departamento Pessoal" \
-//     [--desde 2026-07-21] [--so-contar] [--amostra 600] [--paralelo 4] [--saida <pasta>]
+//     [--desde 2026-07-21] [--so-contar] [--amostra 600] [--paralelo 4] [--intervalo 3000] [--saida <pasta>]
 //
 // --so-contar: lista as conversas e acha os chamados de cada caixa, sem IA.
 // --amostra N: tria todos os chamados reais + N conversas sorteadas das demais;
@@ -59,6 +59,9 @@ function args() {
     soContar: a.includes("--so-contar"),
     amostra: Number(val("amostra")) || 0,
     paralelo: Math.min(8, Math.max(1, Number(val("paralelo")) || 4)),
+    // ms entre chamadas ao Gmail no inicio. A caixa do Gabriel estourou o
+    // limite ate 2 s (10/11, em horario de uso do app): de dia, use 3000.
+    intervalo: Number(val("intervalo")) || 0,
     saida: path.resolve(val("saida") || SAIDA_PADRAO),
   };
 }
@@ -165,6 +168,7 @@ function diasUteis(deMs: number, ateMs: number): number {
 
 async function main() {
   const opt = args();
+  if (opt.intervalo) intervaloGmailMs = Math.min(INTERVALO_MAXIMO_MS, opt.intervalo);
   // Import depois do dotenv: os servicos leem o ambiente ao carregar.
   const { listarFeedback } = await import("../src/services/feedback");
   const gm = await import("../src/services/gmailApi");
