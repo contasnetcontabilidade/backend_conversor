@@ -31,6 +31,7 @@ import {
   type ResumoJson,
 } from "../services/gemini";
 import { lerAnexosParaIa } from "../services/anexosIa";
+import { registrarDesfecho } from "../services/triagemPiloto";
 import { fluxoCriarChamado } from "../services/chamadoFluxo";
 import {
   previaApresentacao,
@@ -647,6 +648,18 @@ async function removerMarcadorPosCriar(
   }
 }
 
+// Se a conversa estava nos "Sugeridos" da triagem, o chamado criado e o rotulo
+// "virou chamado" do aprendizado e tira a sugestao da lista do app. Best-effort:
+// falha aqui nao pode desfazer um chamado que ja existe.
+async function anotarSugestaoQueVirouChamado(chave?: string, threadId?: string) {
+  if (!chave || !threadId) return;
+  const conta = await getContaDoEmail(chave).catch(() => null);
+  if (!conta) return;
+  await registrarDesfecho(conta, threadId, "virou_chamado").catch((e) =>
+    console.warn(`[gmail:criar] desfecho da triagem nao anotado: ${getErrorMessage(e)}`),
+  );
+}
+
 export async function gmailCriarController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
   const messageId = getOptionalString(body, "messageId");
@@ -678,6 +691,7 @@ export async function gmailCriarController(req: Request, res: Response) {
     depois: async ({ dryRun }) => {
       if (dryRun) return;
       await removerMarcadorPosCriar(chave, threadId);
+      await anotarSugestaoQueVirouChamado(chave, threadId);
     },
   });
 }
