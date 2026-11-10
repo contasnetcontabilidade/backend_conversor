@@ -937,8 +937,13 @@ a pessoa, pela revisão de sempre.
 - **Busca:** fora só as abas Promoções e Social. A aba Fóruns entra, porque 5 dos 36
   chamados do Gabriel na Fase 0 vieram de lá (e-mail mandado para grupo).
 - **Desfechos** (o rótulo do aprendizado): "virou chamado" é anotado quando o chamado
-  de e-mail é criado de uma conversa sugerida (`gmail.controller`); "não é chamado"
-  vem do app com o motivo; "ignorada" quando a sugestão passa 7 dias sem ação.
+  de e-mail é criado de uma conversa sugerida (`gmail.controller`); "ignorada" quando a
+  sugestão passa 7 dias sem ação; os botões do "Não é chamado" gravam o desfecho do
+  motivo (`MOTIVOS_NAO_E_CHAMADO`). **Só `nao_e_chamado` é exemplo negativo.** "Não é
+  para mim" (`nao_e_para_mim`, caixa compartilhada: pode ser chamado de outra pessoa) e
+  "Já virou chamado" (`ja_era_chamado`) ficam de fora do negativo no treino.
+- A lista de motivos vai na resposta da conferência: motivo novo não precisa de
+  versão nova do app.
 
 ### Quem participa
 Só as contas do SET `triagem:piloto` no Redis. Fora dele a rota responde
@@ -955,7 +960,7 @@ ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts sair fulano@contas.com.br
 - `POST /api/gmail/triagem/conferir` `{ profileToken, setor?, apenasListar? }`:
   `apenasListar` só devolve as sugestões já achadas (abrir a aba); sem ele, lê a caixa.
 - `POST /api/gmail/triagem/desfecho` `{ profileToken, threadId, motivo }`, com
-  motivo `aviso_automatico | ja_virou_chamado | nao_e_pedido | outro`.
+  motivo `nao_e_para_mim | aviso_automatico | ja_virou_chamado | nao_e_pedido | outro`.
 
 As duas aceitam só o `profileToken`, como a foto: a resposta tem assunto e
 remetente da caixa de alguém.
