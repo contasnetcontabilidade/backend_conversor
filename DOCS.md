@@ -931,9 +931,18 @@ a pessoa, pela revisão de sempre.
 - `triagemPiloto.ts`: a conferência. Lê as conversas novas desde a última vez
   (cursor por conta), tria no máximo 10 por vez (o resto fica para a próxima) e
   guarda a sugestão quando a IA diz "sim" com confiança ≥ 0,7.
-- **Gatilho:** só a chegada do e-mail, para todos os setores. Na Fase 0, a chegada
-  achou quase todos os chamados reais, inclusive os do suporte que são registrados
-  depois da resposta. A sugestão fica na lista até a pessoa agir.
+- **Gatilhos (bandeja + aviso, desde 10/11/2026):** na **chegada**, o e-mail que parece
+  pedido vai para a bandeja do app, em silêncio (cobre o pedido que ninguém respondeu).
+  Quando a pessoa **responde**, a sugestão vira `respondeu: true` e o app mostra o aviso
+  (janela igual à de ligação encerrada). Se a chegada não tinha sugerido, a resposta é
+  triada com o texto dela e a sugestão já nasce respondida. Na Fase 0, 38 de 41 chamados
+  reais tinham resposta, contra 18 das 609 sugestões sem chamado do Alberto.
+- **Confiança mínima por pessoa:** a sugestão é guardada a partir de 0,7; 5 "não é
+  chamado" seguidos sobem o limiar da pessoa para 0,85 (o app esconde as de baixo, com
+  "Mostrar todas", e só avisa das que passam); abrir chamado de uma sugestão volta para
+  0,7. "Não é para mim" e "Já virou chamado" não contam.
+- **Conversa encerrada** (qualquer desfecho menos "ignorada") não volta a ser sugerida
+  por 30 dias, nem com resposta nova.
 - **Busca:** fora só as abas Promoções e Social. A aba Fóruns entra, porque 5 dos 36
   chamados do Gabriel na Fase 0 vieram de lá (e-mail mandado para grupo).
 - **Desfechos** (o rótulo do aprendizado): "virou chamado" é anotado quando o chamado
