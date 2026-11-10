@@ -1478,7 +1478,8 @@ function render(){
   // Cores bem separadas no circulo cromatico: verde (ligacao), ambar (e-mail),
   // roxo (chat) e magenta (resumo). O antigo #2f9e6b era quase o mesmo verde do
   // --accent das ligacoes e as duas fatias se confundiam no grafico.
-  var FONTES=[["Ligações","ligacao",accent],["E-mails","email",gold],["Chat","chat","#7c5cff"],["Gravação","gravacao","#2aa9d6"],["Resumo (gravação)","resumo","#e0509a"]];
+  // Triagem (marrom) = conferencia da caixa do Gmail no piloto das sugestoes.
+  var FONTES=[["Ligações","ligacao",accent],["E-mails","email",gold],["Chat","chat","#7c5cff"],["Gravação","gravacao","#2aa9d6"],["Resumo (gravação)","resumo","#e0509a"],["Triagem de e-mail","triagem","#a0522d"]];
   var fLinhas=FONTES.map(function(f){var a=fAgg[f[1]]||{custoBrl:0,itens:0};return {nome:f[0],itens:a.itens||0,brl:a.custoBrl||0,cor:f[2]};});
   var totF=fLinhas.reduce(function(x,y){return x+y.brl},0);
   chart("chartFonte",{type:"doughnut",data:{labels:fLinhas.map(function(x){return x.nome}),datasets:[{data:fLinhas.map(function(x){return +x.brl.toFixed(4)}),backgroundColor:fLinhas.map(function(x){return x.cor}),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:muted}}}}});
@@ -1710,7 +1711,7 @@ function montarSecoes(de,ate,incluir3dias,incluirMes){
 
   var lf=[[Sc("fonte"),Sc("itens"),Sc("custo_usd"),Sc("custo_brl"),Sc("pct")]];
   var fAgg={};fonteRows.forEach(function(r){var a=fAgg[r.fonte]||(fAgg[r.fonte]={usd:0,brl:0,itens:0});a.usd+=r.custoUsd;a.brl+=brl(r);if(r.op==="resumo")a.itens+=r.calls;});
-  var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Chat","chat"],["Gravacao","gravacao"],["Resumo (gravacao)","resumo"]];
+  var fLista=[["Ligacoes","ligacao"],["E-mails","email"],["Chat","chat"],["Gravacao","gravacao"],["Resumo (gravacao)","resumo"],["Triagem de e-mail","triagem"]];
   var totF=0;fLista.forEach(function(f){totF+=(fAgg[f[1]]&&fAgg[f[1]].usd)||0;});
   fLista.forEach(function(f){var a=fAgg[f[1]]||{usd:0,brl:0,itens:0};var p=totF>0?Math.round(a.usd/totF*100):0;lf.push([Sc(f[0]),Nc(a.itens,0),Nc(a.usd,6),Nc(a.brl,4),Sc(p+"%")]);});
   secoes.push({nome:"Por fonte",linhas:lf});
