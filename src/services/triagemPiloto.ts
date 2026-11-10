@@ -28,14 +28,25 @@ import { recordUsage } from "./usage";
 // rede, onde vira a base do aprendizado. Cada registro guarda o TRECHO que a IA
 // leu (decisao do dono: guardar por tempo indeterminado).
 
-// Medidas da Fase 0 (10/11/2026, caixas do suporte): na chegada a triagem
-// achou 40 de 41 chamados reais; depois da resposta ela sugere ~70% de tudo o
-// que a pessoa respondeu. A sugestao fica na lista ate a pessoa agir, entao a
-// chegada ja cobre quem so registra depois de responder.
-const GATILHOS_DO_PILOTO: readonly TipoGatilho[] = ["chegada"];
+// Dois gatilhos (redesenho de 10/11/2026, "bandeja + aviso"):
+// - chegada: o e-mail que parece pedido vai para a bandeja, em silencio. Cobre
+//   o pedido que ninguem respondeu (pedido do dono).
+// - resposta: quando a pessoa responde, a sugestao vira "respondida" e o app
+//   avisa. Na Fase 0, 38 de 41 chamados reais tinham resposta, e so 18 das 609
+//   sugestoes sem chamado do Alberto: e o momento em que o chamado nasce.
+const GATILHOS_DO_PILOTO: readonly TipoGatilho[] = ["chegada", "resposta"];
 // Confianca minima para virar sugestao. Abaixo disso a triagem fica so
 // registrada (ainda serve de exemplo para o aprendizado).
 export const LIMIAR_SUGESTAO = 0.7;
+// "Aprende com quem dispensa": DISPENSAS_PARA_SUBIR "nao e chamado" seguidos
+// sobem a confianca minima DA PESSOA; abrir chamado de uma sugestao desce de
+// volta. O backend guarda as sugestoes a partir de 0,7 e o app esconde as que
+// ficam abaixo do limiar da pessoa (com "Mostrar todas").
+export const LIMIAR_QUEM_DISPENSA = 0.85;
+const DISPENSAS_PARA_SUBIR = 5;
+// Conversa com desfecho (virou chamado, nao e chamado...) nao volta a ser
+// sugerida por 30 dias, nem quando chega resposta nova nela.
+const ENCERRADA_SEG = 30 * 24 * 3600;
 // A Fase 0 achou 5 dos 36 chamados do Gabriel na aba Foruns (e-mail mandado
 // para endereco de grupo): so Promocoes e Social ficam fora.
 const BUSCA_FORA = "-category:promotions -category:social";
@@ -60,6 +71,8 @@ const keyVistas = (conta: string) => `triagem:vistas:${conta}`;
 const VISTAS_SEG = 2 * 24 * 3600;
 const keyTrava = (conta: string) => `triagem:trava:${conta}`;
 const keyFeito = (conta: string, messageId: string) => `triagem:feito:${conta}:${messageId}`;
+const keyEncerrada = (conta: string, threadId: string) => `triagem:encerrada:${conta}:${threadId}`;
+const keyDispensas = (conta: string) => `triagem:dispensas:${conta}`;
 
 let redis: Redis | null = null;
 function getRedis(): Redis {
@@ -100,6 +113,10 @@ export interface SugestaoTriagem {
   categoria: string;
   confianca: number;
   sugeridaEm: number;
+  // A pessoa respondeu a conversa: e o que dispara o aviso no app. Ausente em
+  // sugestao gravada antes do redesenho de 10/11 (= nao respondida).
+  respondeu?: boolean;
+  respondidaEm?: number;
 }
 
 // O desfecho e o ROTULO do aprendizado (Fase 2). So "nao_e_chamado" e exemplo
@@ -166,7 +183,17 @@ export async function listarSugestoes(email: string): Promise<SugestaoTriagem[]>
     }
     validas.push(s);
   }
-  return validas.sort((a, b) => b.quando - a.quando);
+  // Respondidas primeiro (sao as do aviso), depois as mais novas.
+  return validas.sort(
+    (a, b) => Number(!!b.respondeu) - Number(!!a.respondeu) || b.quando - a.quando,
+  );
+}
+
+// Confianca minima desta pessoa: sobe para quem dispensa muito (ver
+// LIMIAR_QUEM_DISPENSA). O app usa para esconder as de baixo e para o aviso.
+export async function limiarDaPessoa(email: string): Promise<number> {
+  const n = Number(await getRedis().get(keyDispensas(conta(email)))) || 0;
+  return n >= DISPENSAS_PARA_SUBIR ? LIMIAR_QUEM_DISPENSA : LIMIAR_SUGESTAO;
 }
 
 // Tira a sugestao da lista e anota o que a pessoa fez com ela. false = nao
@@ -178,9 +205,22 @@ export async function registrarDesfecho(
   motivo?: string,
 ): Promise<boolean> {
   const c = conta(email);
-  const removidas = await getRedis().hdel(keySugestoes(c), threadId);
+  const r = getRedis();
+  const removidas = await r.hdel(keySugestoes(c), threadId);
   if (!removidas) return false;
   await registrarNaLista({ tipo: "desfecho", conta: c, threadId, desfecho, ...(motivo ? { motivo } : {}) });
+  // "Ignorada" nao encerra: se a pessoa responder depois, a conversa pode
+  // voltar como respondida (e ai sim avisar).
+  if (desfecho !== "ignorada") {
+    await r.set(keyEncerrada(c, threadId), "1", { ex: ENCERRADA_SEG });
+  }
+  // So o "nao e chamado" de verdade conta como dispensa. "Nao e para mim" e
+  // "ja virou chamado" nao dizem que a IA errou.
+  if (desfecho === "nao_e_chamado") {
+    await r.incr(keyDispensas(c));
+  } else if (desfecho === "virou_chamado") {
+    await r.del(keyDispensas(c));
+  }
   return true;
 }
 
@@ -217,10 +257,16 @@ export async function conferirCaixa(
     }
     const desde = cursor - SOBREPOSICAO_MS;
     const { ids } = await buscarThreads(c, `after:${Math.floor(desde / 1000)} -in:chats ${BUSCA_FORA}`);
+    // As que ja estao na bandeja tambem entram: atividade nova nelas pode ser
+    // a resposta da pessoa, que e o que dispara o aviso (sem gastar IA).
     const pendentes = await r.hgetall<Record<string, unknown>>(keySugestoes(c));
-    const jaSugeridas = new Set(Object.keys(pendentes || {}));
+    const naBandeja = new Map<string, SugestaoTriagem>();
+    for (const v of Object.values(pendentes || {})) {
+      const s = lerSugestao(v);
+      if (s) naBandeja.set(s.threadId, s);
+    }
     const vistas = new Set((await r.smembers(keyVistas(c))) || []);
-    const fila = ids.filter((t) => !jaSugeridas.has(t) && !vistas.has(t));
+    const fila = ids.filter((t) => !vistas.has(t));
     const agora = fila.slice(0, MAX_CONVERSAS);
 
     let prox = 0;
@@ -228,7 +274,7 @@ export async function conferirCaixa(
       Array.from({ length: Math.min(PARALELO, agora.length) }, async () => {
         while (prox < agora.length) {
           const threadId = agora[prox++];
-          const gasto = await triarConversa(c, threadId, desde, ctx.setor).catch((e) => {
+          const gasto = await triarConversa(c, threadId, desde, ctx.setor, naBandeja.get(threadId)).catch((e) => {
             // Conversa que nao abre (apagada no meio) nao derruba as outras.
             console.warn(`[triagem] ${threadId} nao triada: ${getErrorMessage(e)}`);
             return null;
@@ -279,14 +325,33 @@ async function triarConversa(
   threadId: string,
   desde: number,
   setor?: string,
+  naBandeja?: SugestaoTriagem,
 ): Promise<{ inTok: number; outTok: number; triadas: number; novas: number }> {
   const msgs = await obterThreadParaTriagem(c, threadId);
-  const gatilhos = gatilhosDaThread(
-    msgs.map((m) => paraTriagem(m, c)),
-    desde,
-  ).filter((g) => GATILHOS_DO_PILOTO.includes(g.tipo));
+  const mt = msgs.map((m) => paraTriagem(m, c));
   const total = { inTok: 0, outTok: 0, triadas: 0, novas: 0 };
+
+  // Ja esta na bandeja: so falta saber se a pessoa respondeu. Sem IA.
+  if (naBandeja) {
+    if (!naBandeja.respondeu) {
+      const resposta = mt
+        .filter((m) => m.daConta && m.quando > naBandeja.quando)
+        .sort((a, b) => a.quando - b.quando)[0];
+      if (resposta) await marcarRespondida(c, naBandeja, resposta.quando);
+    }
+    return total;
+  }
+  if (await getRedis().get(keyEncerrada(c, threadId))) return total;
+
+  const gatilhos = gatilhosDaThread(mt, desde).filter((g) => GATILHOS_DO_PILOTO.includes(g.tipo));
+  // Virou sugestao pela chegada nesta mesma conferencia: a resposta que vem
+  // depois so marca como respondida, sem pagar a IA de novo.
+  let sugerida: SugestaoTriagem | null = null;
   for (const g of gatilhos) {
+    if (g.tipo === "resposta" && sugerida) {
+      await marcarRespondida(c, sugerida, g.quando);
+      continue;
+    }
     const primeiraVez = (await getRedis().set(keyFeito(c, g.messageId), "1", { nx: true, ex: FEITO_SEG })) === "OK";
     if (!primeiraVez) continue;
     const msg = msgs.find((m) => m.id === g.recebida.id) || msgs[0];
@@ -312,19 +377,19 @@ async function triarConversa(
       total.inTok += res.inputTokens;
       total.outTok += res.outputTokens;
       total.triadas++;
-      const sugerida = res.decisao === "sim" && res.confianca >= LIMIAR_SUGESTAO;
+      const ehSugestao = res.decisao === "sim" && res.confianca >= LIMIAR_SUGESTAO;
       await registrarNaLista({
         ...base,
         decisao: res.decisao,
         confianca: res.confianca,
         categoria: res.categoria,
         motivo: res.motivo,
-        sugerida,
+        sugerida: ehSugestao,
         inputTokens: res.inputTokens,
         outputTokens: res.outputTokens,
       });
-      if (sugerida) {
-        await salvarSugestao(c, g, threadId, assunto, res);
+      if (ehSugestao) {
+        sugerida = await salvarSugestao(c, g, threadId, assunto, res);
         total.novas++;
       }
     } catch (e) {
@@ -349,24 +414,37 @@ async function triarConversa(
   return total;
 }
 
+// "quando" e sempre o do e-mail RECEBIDO (tambem no gatilho de resposta): e
+// com ele que se descobre, depois, se a pessoa respondeu.
 async function salvarSugestao(
   c: string,
   g: Gatilho,
   threadId: string,
   assunto: string,
   res: { motivo: string; categoria: string; confianca: number },
-): Promise<void> {
+): Promise<SugestaoTriagem> {
   const s: SugestaoTriagem = {
     threadId,
-    messageId: g.messageId,
+    messageId: g.recebida.id,
     assunto,
     deNome: g.recebida.fromNome,
     deEmail: g.recebida.fromEmail,
-    quando: g.quando,
+    quando: g.recebida.quando,
     motivo: res.motivo,
     categoria: res.categoria,
     confianca: res.confianca,
     sugeridaEm: Date.now(),
+    ...(g.tipo === "resposta" ? { respondeu: true, respondidaEm: g.quando } : {}),
   };
   await getRedis().hset(keySugestoes(c), { [threadId]: JSON.stringify(s) });
+  return s;
+}
+
+// A pessoa respondeu uma conversa que ja estava na bandeja. Vai tambem para a
+// lista do aprendizado: "respondeu" e o sinal mais forte da Fase 0.
+async function marcarRespondida(c: string, s: SugestaoTriagem, quando: number): Promise<void> {
+  const nova: SugestaoTriagem = { ...s, respondeu: true, respondidaEm: quando };
+  await getRedis().hset(keySugestoes(c), { [s.threadId]: JSON.stringify(nova) });
+  await registrarNaLista({ tipo: "resposta", conta: c, threadId: s.threadId, quando: new Date(quando).toISOString() });
+  Object.assign(s, nova);
 }
