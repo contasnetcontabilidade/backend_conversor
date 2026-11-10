@@ -35,14 +35,17 @@ import { recordUsage } from "./usage";
 //   avisa. Na Fase 0, 38 de 41 chamados reais tinham resposta, e so 18 das 609
 //   sugestoes sem chamado do Alberto: e o momento em que o chamado nasce.
 const GATILHOS_DO_PILOTO: readonly TipoGatilho[] = ["chegada", "resposta"];
-// Confianca minima para virar sugestao. Abaixo disso a triagem fica so
-// registrada (ainda serve de exemplo para o aprendizado).
+// Confianca minima para virar sugestao (guardada na bandeja). Abaixo disso a
+// triagem fica so registrada (ainda serve de exemplo para o aprendizado).
 export const LIMIAR_SUGESTAO = 0.7;
+// O que a pessoa VE e o que dispara o aviso: o app esconde as abaixo do limiar
+// dela, atras do "Mostrar todas". 0,85 pela revisao humana da Fase 0 (dono,
+// 10/11/2026): de 0,85 para cima, 12 eram chamado e 0 alarme falso; entre 0,70
+// e 0,85, 3 eram chamado e 8 nao eram.
+export const LIMIAR_PADRAO = 0.85;
 // "Aprende com quem dispensa": DISPENSAS_PARA_SUBIR "nao e chamado" seguidos
-// sobem a confianca minima DA PESSOA; abrir chamado de uma sugestao desce de
-// volta. O backend guarda as sugestoes a partir de 0,7 e o app esconde as que
-// ficam abaixo do limiar da pessoa (com "Mostrar todas").
-export const LIMIAR_QUEM_DISPENSA = 0.85;
+// sobem o limiar DA PESSOA; abrir chamado de uma sugestao desce de volta.
+export const LIMIAR_QUEM_DISPENSA = 0.9;
 const DISPENSAS_PARA_SUBIR = 5;
 // Conversa com desfecho (virou chamado, nao e chamado...) nao volta a ser
 // sugerida por 30 dias, nem quando chega resposta nova nela.
@@ -193,7 +196,7 @@ export async function listarSugestoes(email: string): Promise<SugestaoTriagem[]>
 // LIMIAR_QUEM_DISPENSA). O app usa para esconder as de baixo e para o aviso.
 export async function limiarDaPessoa(email: string): Promise<number> {
   const n = Number(await getRedis().get(keyDispensas(conta(email)))) || 0;
-  return n >= DISPENSAS_PARA_SUBIR ? LIMIAR_QUEM_DISPENSA : LIMIAR_SUGESTAO;
+  return n >= DISPENSAS_PARA_SUBIR ? LIMIAR_QUEM_DISPENSA : LIMIAR_PADRAO;
 }
 
 // Tira a sugestao da lista e anota o que a pessoa fez com ela. false = nao
