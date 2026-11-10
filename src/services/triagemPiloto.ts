@@ -53,6 +53,11 @@ const KEY_PILOTO = "triagem:piloto";
 export const KEY_LISTA = "triagem:list";
 const keySugestoes = (conta: string) => `triagem:sug:${conta}`;
 const keyCursor = (conta: string) => `triagem:cursor:${conta}`;
+// Conversas ja vistas na janela que ainda nao fechou (mais de MAX_CONVERSAS de
+// uma vez). Sem isto a conferencia pegava sempre as mesmas 10 do topo da busca
+// e nunca chegava nas outras (achado no 1o dia do piloto, 10/11/2026).
+const keyVistas = (conta: string) => `triagem:vistas:${conta}`;
+const VISTAS_SEG = 2 * 24 * 3600;
 const keyTrava = (conta: string) => `triagem:trava:${conta}`;
 const keyFeito = (conta: string, messageId: string) => `triagem:feito:${conta}:${messageId}`;
 
@@ -177,12 +182,19 @@ export async function conferirCaixa(
   let triadas = 0;
   let novas = 0;
   try {
-    const cursor = Number(await r.get(keyCursor(c))) || 0;
-    const desde = cursor ? cursor - SOBREPOSICAO_MS : inicio - PRIMEIRA_VEZ_MS;
+    // Conta nova no piloto: a janela comeca 24 h atras e fica FIXA ate ser
+    // vista inteira (por isso o cursor ja e gravado aqui).
+    let cursor = Number(await r.get(keyCursor(c))) || 0;
+    if (!cursor) {
+      cursor = inicio - PRIMEIRA_VEZ_MS + SOBREPOSICAO_MS;
+      await r.set(keyCursor(c), String(cursor));
+    }
+    const desde = cursor - SOBREPOSICAO_MS;
     const { ids } = await buscarThreads(c, `after:${Math.floor(desde / 1000)} -in:chats ${BUSCA_FORA}`);
     const pendentes = await r.hgetall<Record<string, unknown>>(keySugestoes(c));
     const jaSugeridas = new Set(Object.keys(pendentes || {}));
-    const fila = ids.filter((t) => !jaSugeridas.has(t));
+    const vistas = new Set((await r.smembers(keyVistas(c))) || []);
+    const fila = ids.filter((t) => !jaSugeridas.has(t) && !vistas.has(t));
     const agora = fila.slice(0, MAX_CONVERSAS);
 
     let prox = 0;
@@ -205,9 +217,17 @@ export async function conferirCaixa(
     );
 
     const sobrou = fila.length - agora.length;
-    // O cursor so anda quando tudo foi visto: o que sobrou entra na proxima,
-    // e as ja triadas sao puladas pela marca de "feito".
-    if (!sobrou) await r.set(keyCursor(c), String(inicio));
+    // O cursor so anda quando a janela foi vista inteira. Ate la, as conversas
+    // ja vistas ficam anotadas e a proxima conferencia continua da seguinte.
+    if (sobrou) {
+      if (agora.length) {
+        await r.sadd(keyVistas(c), agora[0], ...agora.slice(1));
+        await r.expire(keyVistas(c), VISTAS_SEG);
+      }
+    } else {
+      await r.set(keyCursor(c), String(inicio));
+      await r.del(keyVistas(c));
+    }
     return { sugestoes: await listarSugestoes(c), conferidoEm: inicio, triadas, novas, pendentes: sobrou };
   } finally {
     await r.del(keyTrava(c)).catch(() => undefined);
