@@ -42,6 +42,11 @@ function redis(cmd: string[]): unknown {
       return db.delete(chave) ? 1 : 0;
     case "expire":
       return 1;
+    case "incr": {
+      const n = (Number(db.get(chave)) || 0) + 1;
+      db.set(chave, String(n));
+      return n;
+    }
     case "sismember":
       return conj().has(a[0]) ? 1 : 0;
     case "sadd": {
@@ -283,6 +288,71 @@ test("mais de 10 conversas: a proxima conferencia continua de onde parou e so en
   assert.equal(chamadasIa, 12, "cada e-mail pago uma vez so");
   assert.ok(Number(db.get(`triagem:cursor:${CONTA}`)) > cursor1, "janela vista inteira: cursor andou");
   assert.equal(db.has(`triagem:vistas:${CONTA}`), false, "anotacao das vistas apagada");
+});
+
+const responder = (threadId: string, corpo = "Resolvido, pode testar.") =>
+  threads[threadId].push({ id: `${threadId}-resp`, de: `Eu <${CONTA}>`, quando: Date.now() + 1000, assunto: "Re:", corpo, enviada: true });
+
+test("resposta numa sugestao da bandeja marca 'respondeu' sem pagar a IA de novo", async () => {
+  const p = await piloto();
+  await p.conferirCaixa(CONTA);
+  assert.equal((await p.listarSugestoes(CONTA))[0].respondeu, undefined);
+  responder("t1");
+  const r = await p.conferirCaixa(CONTA);
+  assert.equal(chamadasIa, 2, "so as triagens da primeira conferencia");
+  const s = r.sugestoes.find((x) => x.threadId === "t1")!;
+  assert.equal(s.respondeu, true);
+  assert.ok(s.respondidaEm! > s.quando);
+  const ultima = JSON.parse((db.get(p.KEY_LISTA) as string[])[0]);
+  assert.deepEqual([ultima.tipo, ultima.threadId], ["resposta", "t1"]);
+});
+
+test("resposta numa conversa que a chegada nao sugeriu: tria com a resposta e ja nasce respondida", async () => {
+  const p = await piloto();
+  threads.t4 = [{ id: "m4", de: "Colega <colega@contas.com.br>", quando: Date.now() - 1800_000, assunto: "Sistema", corpo: "O sistema esta lento hoje." }];
+  await p.conferirCaixa(CONTA);
+  assert.equal(chamadasIa, 3);
+  assert.equal((await p.listarSugestoes(CONTA)).some((s) => s.threadId === "t4"), false);
+  responder("t4", "PEDIDO atendido: reiniciei o servico e liberei o acesso.");
+  const r = await p.conferirCaixa(CONTA);
+  assert.equal(chamadasIa, 4, "uma triagem nova, a da resposta");
+  const s = r.sugestoes.find((x) => x.threadId === "t4")!;
+  assert.equal(s.respondeu, true);
+  assert.equal(s.messageId, "m4", "aponta para o e-mail recebido");
+  assert.equal(r.sugestoes[0].threadId, "t4", "respondidas vem primeiro");
+});
+
+test("conversa encerrada ('nao e chamado') nao volta, nem com resposta nova", async () => {
+  const p = await piloto();
+  await p.conferirCaixa(CONTA);
+  await p.registrarDesfecho(CONTA, "t1", "nao_e_chamado", "outro");
+  responder("t1", "PEDIDO? nao, era so um aviso.");
+  const r = await p.conferirCaixa(CONTA);
+  assert.equal(chamadasIa, 2);
+  assert.deepEqual(r.sugestoes, []);
+});
+
+test("aprende com quem dispensa: 5 'nao e chamado' sobem o limiar; 'nao e para mim' nao conta; virar chamado desce", async () => {
+  const p = await piloto();
+  const semear = (id: string) => {
+    const h = (db.get(`triagem:sug:${CONTA}`) as Map<string, string>) || new Map<string, string>();
+    h.set(id, JSON.stringify({ threadId: id, messageId: id, assunto: "x", deNome: "", deEmail: "a@b.com", quando: Date.now(), motivo: "", categoria: "outro", confianca: 0.8, sugeridaEm: Date.now() }));
+    db.set(`triagem:sug:${CONTA}`, h);
+  };
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_SUGESTAO);
+  for (let i = 1; i <= 4; i++) {
+    semear(`d${i}`);
+    await p.registrarDesfecho(CONTA, `d${i}`, "nao_e_chamado", "aviso_automatico");
+  }
+  semear("d5");
+  await p.registrarDesfecho(CONTA, "d5", "nao_e_para_mim", "nao_e_para_mim");
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_SUGESTAO, "4 dispensas + 'nao e para mim' ainda nao sobe");
+  semear("d6");
+  await p.registrarDesfecho(CONTA, "d6", "nao_e_chamado", "outro");
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_QUEM_DISPENSA);
+  semear("d7");
+  await p.registrarDesfecho(CONTA, "d7", "virou_chamado");
+  assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_SUGESTAO, "abriu chamado de uma sugestao: volta");
 });
 
 test("com outra conferencia em andamento, so devolve a lista (sem ler a caixa)", async () => {
