@@ -917,3 +917,65 @@ os anexos (`src/services/anexosIa.ts`). Antes a IA só via o texto, e o anexo vi
 - **Não entra:** ligação, gravação e o "Revisar aqui no Gmail" do complemento. Neste
   último, o Google corta a resposta em poucos segundos, e baixar anexo não cabe.
 - O log (`[anexos-ia]`) traz só contagem e tipo, nunca conteúdo.
+
+## Sugestões de chamado pela caixa do Gmail (triagem) — PILOTO
+
+O app confere a caixa do Gmail a cada ~12 min e mostra no topo da aba E-mails as
+conversas que podem virar chamado ("Sugeridos pela IA"). **Só sugere:** quem cria é
+a pessoa, pela revisão de sempre.
+
+### Como funciona
+- `triagem.ts`: o prompt (versão `TRIAGEM_PROMPT_VERSION`), os gatilhos e o
+  **trecho**. A IA lê só o trecho (~500 caracteres do e-mail, sem a citação da
+  mensagem anterior), que é o mesmo que fica guardado para o aprendizado.
+- `triagemPiloto.ts`: a conferência. Lê as conversas novas desde a última vez
+  (cursor por conta), tria no máximo 10 por vez (o resto fica para a próxima) e
+  guarda a sugestão quando a IA diz "sim" com confiança ≥ 0,7.
+- **Gatilho:** só a chegada do e-mail, para todos os setores. Na Fase 0, a chegada
+  achou quase todos os chamados reais, inclusive os do suporte que são registrados
+  depois da resposta. A sugestão fica na lista até a pessoa agir.
+- **Busca:** fora só as abas Promoções e Social. A aba Fóruns entra, porque 5 dos 36
+  chamados do Gabriel na Fase 0 vieram de lá (e-mail mandado para grupo).
+- **Desfechos** (o rótulo do aprendizado): "virou chamado" é anotado quando o chamado
+  de e-mail é criado de uma conversa sugerida (`gmail.controller`); "não é chamado"
+  vem do app com o motivo; "ignorada" quando a sugestão passa 7 dias sem ação.
+
+### Quem participa
+Só as contas do SET `triagem:piloto` no Redis. Fora dele a rota responde
+`{ ativo: false }` sem ler a caixa nem gastar IA, e o app esconde a seção (e só
+pergunta de novo a cada 6 h). Para mudar, sem deploy:
+
+```bash
+ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts listar
+ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts entrar fulano@contas.com.br
+ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts sair fulano@contas.com.br
+```
+
+### Endpoints
+- `POST /api/gmail/triagem/conferir` `{ profileToken, setor?, apenasListar? }`:
+  `apenasListar` só devolve as sugestões já achadas (abrir a aba); sem ele, lê a caixa.
+- `POST /api/gmail/triagem/desfecho` `{ profileToken, threadId, motivo }`, com
+  motivo `aviso_automatico | ja_virou_chamado | nao_e_pedido | outro`.
+
+As duas aceitam só o `profileToken`, como a foto: a resposta tem assunto e
+remetente da caixa de alguém.
+
+### Dados e custo
+- `triagem:list` (LPUSH, sem teto durante o piloto) recebe cada triagem (assunto,
+  domínio do remetente, **trecho**, decisão, confiança, motivo, versão do prompt) e
+  cada desfecho. A cópia diária (`copia-analise`) leva para a tabela `triagem` do
+  DuckDB. Guardar o trecho por tempo indeterminado foi decisão do dono (09 e
+  10/11/2026).
+- Chaves auxiliares: `triagem:sug:<conta>` (sugestões pendentes),
+  `triagem:cursor:<conta>`, `triagem:trava:<conta>` (uma conferência por vez) e
+  `triagem:feito:<conta>:<messageId>` (30 dias, para não pagar IA duas vezes).
+- **Custo:** ~1.530 tokens de entrada e ~70 de saída por triagem, US$ 0,0002 (Fase 0).
+  Fica no painel na fonte **"Triagem de e-mail"**, num registro por conferência
+  e **sem ramal**: com ramal, entraria no "IA sem chamado".
+
+### Fase 0 (medição no histórico)
+`scripts/triagem-fase0.ts` roda a triagem nas caixas desde uma data e compara com os
+chamados de e-mail reais do feedback. Grava resultado + trecho em
+`Desktop\Database\data\fase0\` (fora do git) e o gasto no painel com o ramal 258.
+**Cuidado com o limite do Gmail:** 6.000 unidades de consulta por minuto **por
+pessoa**, o mesmo que o app usa. De dia, rode com `--intervalo 3000`.
