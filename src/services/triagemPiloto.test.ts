@@ -248,6 +248,28 @@ test("sugestao sem acao por mais de 7 dias sai como 'ignorada'", async () => {
   assert.deepEqual([ultima.tipo, ultima.threadId, ultima.desfecho], ["desfecho", "t1", "ignorada"]);
 });
 
+test("mais de 10 conversas: a proxima conferencia continua de onde parou e so entao o cursor anda", async () => {
+  const p = await piloto();
+  const agora = Date.now();
+  threads = {};
+  for (let i = 1; i <= 12; i++) {
+    threads[`n${i}`] = [{ id: `nm${i}`, de: "Banco <aviso@banco.com.br>", quando: agora - i * 60_000, assunto: `Aviso ${i}`, corpo: "Seu boleto foi emitido." }];
+  }
+  const r1 = await p.conferirCaixa(CONTA);
+  assert.equal(r1.triadas, 10);
+  assert.equal(r1.pendentes, 2);
+  const cursor1 = Number(db.get(`triagem:cursor:${CONTA}`));
+  assert.ok(cursor1 > 0 && cursor1 < agora - 23 * 3600_000, "janela fixa comecando ~24 h atras");
+  assert.equal((db.get(`triagem:vistas:${CONTA}`) as Set<string>).size, 10);
+
+  const r2 = await p.conferirCaixa(CONTA);
+  assert.equal(r2.triadas, 2, "triou so as 2 que faltavam");
+  assert.equal(r2.pendentes, 0);
+  assert.equal(chamadasIa, 12, "cada e-mail pago uma vez so");
+  assert.ok(Number(db.get(`triagem:cursor:${CONTA}`)) > cursor1, "janela vista inteira: cursor andou");
+  assert.equal(db.has(`triagem:vistas:${CONTA}`), false, "anotacao das vistas apagada");
+});
+
 test("com outra conferencia em andamento, so devolve a lista (sem ler a caixa)", async () => {
   const p = await piloto();
   db.set(`triagem:trava:${CONTA}`, "1");
