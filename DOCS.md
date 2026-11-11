@@ -960,8 +960,8 @@ a pessoa, pela revisão de sempre.
 ### Quem participa
 Só as contas do SET `triagem:piloto` no Redis. Fora dele a rota responde
 `{ ativo: false }` sem ler a caixa nem gastar IA, e o app esconde a seção (e só
-pergunta de novo a cada 6 h). A resposta fica 10 min na memória da função, então
-entrar ou sair vale em até 10 min. Para mudar, sem deploy:
+pergunta de novo a cada 6 h). A resposta fica 30 min na memória da função, então
+sair vale em até 30 min (entrar, na próxima pergunta do app). Para mudar, sem deploy:
 
 ```bash
 ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts listar
@@ -995,7 +995,8 @@ remetente da caixa de alguém.
   conferência até 11/11/2026): uma conferência sem nada novo gasta 3 (cursor +
   dispensas, bandeja, cursor novo; o teste "conferencia sem nada novo" fixa isso),
   mais 1 do token do Gmail e até 2 do `profileToken` e do piloto, quando a função da
-  Vercel não os tem na memória (10 min para os dois, 55 s para o token). Cada e-mail
+  Vercel não os tem na memória (12 h e 30 min; o token do Gmail, 55 s, só poupa
+  dentro da mesma conferência). Cada e-mail
   novo soma ~3 (feito, encerrada, registro), e a conferência que chamou a IA soma 6
   do registro de uso.
 - **Custo:** ~1.530 tokens de entrada e ~70 de saída por triagem, US$ 0,0002 (Fase 0).
