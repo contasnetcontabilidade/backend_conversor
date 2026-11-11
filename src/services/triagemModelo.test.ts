@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { normalizar, notaDoModelo, termos, type ModeloTriagem } from "./triagemModelo";
 
 // Modelo e textos INVENTADOS (nada de e-mail real): o scikit-learn treinou este
-// modelo de brinquedo e calculou as notas esperadas (scratchpad/ml-filtro/
-// exportar.py). O teste garante que a conta do backend e a mesma do Python:
+// modelo de brinquedo e calculou as notas esperadas (ml/exportar.py no
+// repositorio copia-analise, Desktop/Database). O teste garante que a conta do backend e a mesma do Python:
 // se a limpeza do texto ou o TF-IDF divergirem, o filtro erra sem dar erro.
 const MODELO: ModeloTriagem = {
   "versao": "teste",
