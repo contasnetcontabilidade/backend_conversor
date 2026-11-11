@@ -994,4 +994,21 @@ remetente da caixa de alguém.
 chamados de e-mail reais do feedback. Grava resultado + trecho em
 `Desktop\Database\data\fase0\` (fora do git) e o gasto no painel com o ramal 258.
 **Cuidado com o limite do Gmail:** 6.000 unidades de consulta por minuto **por
-pessoa**, o mesmo que o app usa. De dia, rode com `--intervalo 3000`.
+pessoa**, o mesmo que o app usa. De dia, rode com `--intervalo 3000`. `--teto-usd`
+para a rodada ao chegar no valor.
+
+### Robozinho: filtro com auditoria (desde 11/11/2026)
+Um modelo pequeno (`triagemModelo.ts`: regressão logística sobre TF-IDF de palavras
+genéricas) imita a decisão da IA e dá a nota de cada e-mail **antes** de chamá-la.
+- Nota abaixo do corte (0,02): o e-mail é descartado sem IA (`filtrado: true` na
+  `triagem:list`). **1 em cada 10 desses vai para a IA mesmo assim** (`auditoria: true`):
+  é o que mede o erro do robozinho em produção. Taxa em `TRIAGEM_AUDITORIA` (padrão 0,1).
+- Todo registro leva `notaModelo` e `versaoModelo`.
+- **O modelo mora no Redis (`triagem:modelo`), não no código:** este repositório é
+  público e o vocabulário, mesmo genérico, tem sobrenomes. Sem modelo, nada é filtrado.
+  `scripts/triagem-modelo.ts ver | subir <modelo.json> | tirar` (tirar = desligar já).
+- Treino em Python (scikit-learn) com os e-mails da Fase 0, fora do git. A conta do
+  backend é a mesma do Python: o teste sintético (`triagemModelo.test.ts`) confere até
+  1e-9, e nos 11.003 e-mails reais a maior diferença foi 5,6e-16.
+- Medido na Fase 0 (prova = 3 caixas do DP que o modelo não viu): descartou ~40% sem
+  perder nenhuma sugestão visível (0 de 919) nem chamado real (0 de 32); suporte, ~62%.
