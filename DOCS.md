@@ -1007,7 +1007,7 @@ genéricas) imita a decisão da IA e dá a nota de cada e-mail **antes** de cham
 - **O modelo mora no Redis (`triagem:modelo`), não no código:** este repositório é
   público e o vocabulário, mesmo genérico, tem sobrenomes. Sem modelo, nada é filtrado.
   `scripts/triagem-modelo.ts ver | subir <modelo.json> | tirar` (tirar = desligar já).
-- Treino em Python (scikit-learn) com os e-mails da Fase 0, fora do git. A conta do
+- Treino em Python (scikit-learn): `ml/exportar.py` do repositório privado `copia-analise` (Desktop/Database), com os e-mails da Fase 0 fora do git. A conta do
   backend é a mesma do Python: o teste sintético (`triagemModelo.test.ts`) confere até
   1e-9, e nos 11.003 e-mails reais a maior diferença foi 5,6e-16.
 - Medido na Fase 0 (prova = 3 caixas do DP que o modelo não viu): descartou ~40% sem
