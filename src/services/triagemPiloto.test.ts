@@ -13,6 +13,9 @@ const DIA = 86_400_000;
 
 type Valor = string | Map<string, string> | Set<string> | string[];
 const db = new Map<string, Valor>();
+// Cada comando que chegou ao Redis falso, em ordem: o Upstash gratuito cobra
+// por comando, e o teste do orcamento da conferencia confere esta lista.
+let comandos: string[] = [];
 let chamadasIa = 0;
 let threads: Record<string, Array<{ id: string; de: string; quando: number; assunto: string; corpo: string; enviada?: boolean }>> = {};
 
@@ -29,9 +32,12 @@ function redis(cmd: string[]): unknown {
   const op = nome.toLowerCase();
   const hash = () => (db.get(chave) as Map<string, string>) || new Map<string, string>();
   const conj = () => (db.get(chave) as Set<string>) || new Set<string>();
+  comandos.push(op);
   switch (op) {
     case "get":
       return typeof db.get(chave) === "string" ? db.get(chave) : null;
+    case "mget":
+      return [chave, ...a].map((k) => (typeof db.get(k) === "string" ? db.get(k) : null));
     case "set": {
       const nx = a.some((x) => x.toLowerCase() === "nx");
       if (nx && db.has(chave)) return null;
@@ -169,6 +175,7 @@ before(() => {
 
 beforeEach(() => {
   db.clear();
+  comandos = [];
   chamadasIa = 0;
   db.set(`gmail:access:${CONTA}`, "token-de-teste");
   const agora = Date.now();
@@ -183,6 +190,8 @@ async function piloto() {
   return import("./triagemPiloto");
 }
 
+const cursorGravado = () => JSON.parse(db.get(`triagem:cursor:${CONTA}`) as string);
+
 test("fora do piloto a conta nao entra; entrar e sair mudam na hora", async () => {
   const p = await piloto();
   assert.equal(await p.estaNoPiloto(CONTA), false);
@@ -191,6 +200,16 @@ test("fora do piloto a conta nao entra; entrar e sair mudam na hora", async () =
   assert.deepEqual(await p.listarPiloto(), [CONTA]);
   await p.sairDoPiloto(CONTA);
   assert.equal(await p.estaNoPiloto(CONTA), false);
+});
+
+test("a resposta do piloto fica na memoria: perguntar de novo nao gasta comando", async () => {
+  const p = await piloto();
+  await p.entrarNoPiloto(CONTA);
+  await p.estaNoPiloto(CONTA);
+  comandos = [];
+  assert.equal(await p.estaNoPiloto(CONTA), true);
+  assert.deepEqual(comandos, []);
+  await p.sairDoPiloto(CONTA);
 });
 
 test("conferencia sugere o pedido, registra tudo e paga a IA uma vez so", async () => {
@@ -210,8 +229,9 @@ test("conferencia sugere o pedido, registra tudo e paga a IA uma vez so", async 
   assert.ok(lista.every((l) => l.tipo === "triagem" && l.trecho && l.versaoPrompt));
   assert.equal(lista.find((l) => l.threadId === "t1").sugerida, true);
   assert.equal(lista.find((l) => l.threadId === "t2").sugerida, false);
-  assert.ok(Number(db.get(`triagem:cursor:${CONTA}`)) > 0, "cursor anda quando tudo foi visto");
-  assert.equal(db.has(`triagem:trava:${CONTA}`), false, "trava liberada");
+  assert.ok(cursorGravado().janela > 0, "cursor anda quando tudo foi visto");
+  assert.deepEqual(cursorGravado().vistas, []);
+  assert.equal(r.limiar, p.LIMIAR_PADRAO, "o limiar vem junto");
 
   // Gasto: um registro so, na fonte "triagem" e sem ramal.
   const dia = new Date().toISOString().slice(0, 10);
@@ -278,16 +298,45 @@ test("mais de 10 conversas: a proxima conferencia continua de onde parou e so en
   const r1 = await p.conferirCaixa(CONTA);
   assert.equal(r1.triadas, 10);
   assert.equal(r1.pendentes, 2);
-  const cursor1 = Number(db.get(`triagem:cursor:${CONTA}`));
-  assert.ok(cursor1 > 0 && cursor1 < agora - 23 * 3600_000, "janela fixa comecando ~24 h atras");
-  assert.equal((db.get(`triagem:vistas:${CONTA}`) as Set<string>).size, 10);
+  const cursor1 = cursorGravado();
+  assert.ok(cursor1.janela > 0 && cursor1.janela < agora - 23 * 3600_000, "janela fixa comecando ~24 h atras");
+  assert.equal(cursor1.vistas.length, 10);
 
   const r2 = await p.conferirCaixa(CONTA);
   assert.equal(r2.triadas, 2, "triou so as 2 que faltavam");
   assert.equal(r2.pendentes, 0);
   assert.equal(chamadasIa, 12, "cada e-mail pago uma vez so");
-  assert.ok(Number(db.get(`triagem:cursor:${CONTA}`)) > cursor1, "janela vista inteira: cursor andou");
-  assert.equal(db.has(`triagem:vistas:${CONTA}`), false, "anotacao das vistas apagada");
+  assert.ok(cursorGravado().janela > cursor1.janela, "janela vista inteira: cursor andou");
+  assert.deepEqual(cursorGravado().vistas, [], "anotacao das vistas zerada");
+});
+
+test("cursor no formato antigo (so o numero) continua valendo", async () => {
+  const p = await piloto();
+  const antigo = Date.now() - 2 * 3600_000;
+  db.set(`triagem:cursor:${CONTA}`, String(antigo));
+  // Uma conversa de 3 h atras, antes do cursor: nao entra no gatilho.
+  threads.t1[0].quando = Date.now() - 3 * 3600_000;
+  const r = await p.conferirCaixa(CONTA);
+  assert.equal(r.triadas, 1, "so o boleto, que chegou depois do cursor");
+  assert.ok(cursorGravado().janela > antigo);
+});
+
+test("conferencia sem nada novo: 4 comandos do Redis", async () => {
+  const p = await piloto();
+  // O boleto chegou ha 1 min: volta na proxima busca, pela sobreposicao.
+  threads.t2[0].quando = Date.now() - 60_000;
+  await p.conferirCaixa(CONTA);
+  // A primeira chamada a IA dispara, em segundo plano, a conferencia diaria do
+  // preco (precoClaude.ts), que aqui falha e grava em erros:list. Nao e da
+  // conferencia: espera terminar antes de contar.
+  await new Promise((r) => setTimeout(r, 50));
+  comandos = [];
+  const r = await p.conferirCaixa(CONTA);
+  assert.equal(r.triadas, 0);
+  // Cursor + dispensas, a bandeja, o "feito" do boleto que voltou (para ali,
+  // sem perguntar se a conversa esta encerrada), e o cursor novo. O pedido
+  // esta na bandeja e nao le nada; o token do Gmail ficou na memoria.
+  assert.deepEqual(comandos, ["mget", "hgetall", "set", "set"]);
 });
 
 const responder = (threadId: string, corpo = "Resolvido, pode testar.") =>
@@ -418,11 +467,10 @@ test("robozinho: sem modelo no Redis, tudo vai para a IA como antes", async () =
   assert.equal(t2.notaModelo, undefined);
 });
 
-test("com outra conferencia em andamento, so devolve a lista (sem ler a caixa)", async () => {
+test("duas conferencias ao mesmo tempo (app em 2 PCs) pagam a IA uma vez so por e-mail", async () => {
   const p = await piloto();
-  db.set(`triagem:trava:${CONTA}`, "1");
-  const r = await p.conferirCaixa(CONTA);
-  assert.equal(r.conferidoEm, null);
-  assert.equal(chamadasIa, 0);
-  assert.equal(db.get(`triagem:trava:${CONTA}`), "1", "nao solta a trava dos outros");
+  const [a, b] = await Promise.all([p.conferirCaixa(CONTA), p.conferirCaixa(CONTA)]);
+  assert.equal(chamadasIa, 2, "o pedido e o boleto, uma vez cada");
+  assert.equal(a.triadas + b.triadas, 2);
+  assert.deepEqual((await p.listarSugestoes(CONTA)).map((s) => s.threadId), ["t1"]);
 });
