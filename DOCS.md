@@ -920,7 +920,8 @@ os anexos (`src/services/anexosIa.ts`). Antes a IA só via o texto, e o anexo vi
 
 ## Sugestões de chamado pela caixa do Gmail (triagem) — PILOTO
 
-O app confere a caixa do Gmail a cada ~12 min e mostra no topo da aba E-mails as
+O app confere a caixa do Gmail a cada ~20 min, em dia útil das 8h às 18h (app 1.9.4;
+era a cada 12 min, o dia todo), e mostra no topo da aba E-mails as
 conversas que podem virar chamado ("Sugeridos pela IA"). **Só sugere:** quem cria é
 a pessoa, pela revisão de sempre.
 
@@ -959,7 +960,8 @@ a pessoa, pela revisão de sempre.
 ### Quem participa
 Só as contas do SET `triagem:piloto` no Redis. Fora dele a rota responde
 `{ ativo: false }` sem ler a caixa nem gastar IA, e o app esconde a seção (e só
-pergunta de novo a cada 6 h). Para mudar, sem deploy:
+pergunta de novo a cada 6 h). A resposta fica 10 min na memória da função, então
+entrar ou sair vale em até 10 min. Para mudar, sem deploy:
 
 ```bash
 ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts listar
@@ -977,14 +979,25 @@ As duas aceitam só o `profileToken`, como a foto: a resposta tem assunto e
 remetente da caixa de alguém.
 
 ### Dados e custo
-- `triagem:list` (LPUSH, sem teto durante o piloto) recebe cada triagem (assunto,
-  domínio do remetente, **trecho**, decisão, confiança, motivo, versão do prompt) e
-  cada desfecho. A cópia diária (`copia-analise`) leva para a tabela `triagem` do
-  DuckDB. Guardar o trecho por tempo indeterminado foi decisão do dono (09 e
-  10/11/2026).
+- `triagem:list` (LPUSH) recebe cada triagem (assunto, domínio do remetente,
+  **trecho**, decisão, confiança, motivo, versão do prompt) e cada desfecho. A
+  `copia-analise` leva para a tabela `triagem` do DuckDB a cada 2 h e **apaga do
+  Redis o que já copiou** (fica só o registro mais novo, de marcador). O backend
+  só grava nessa lista, nunca lê. Guardar o trecho por tempo indeterminado foi
+  decisão do dono (09 e 10/11/2026); quem guarda é o DuckDB.
 - Chaves auxiliares: `triagem:sug:<conta>` (sugestões pendentes),
-  `triagem:cursor:<conta>`, `triagem:trava:<conta>` (uma conferência por vez) e
-  `triagem:feito:<conta>:<messageId>` (30 dias, para não pagar IA duas vezes).
+  `triagem:cursor:<conta>` (JSON `{ janela, vistas }`: onde a próxima busca começa e
+  as conversas já vistas da janela, quando havia mais de 10) e
+  `triagem:feito:<conta>:<messageId>` (30 dias, para não pagar IA duas vezes; é ele
+  que impede duas conferências juntas, app aberto em 2 PCs, de pagar a IA duas
+  vezes). A `triagem:trava:<conta>` e a `triagem:vistas:<conta>` saíram em 11/11/2026.
+- **Comandos do Redis** (o Upstash gratuito dá ~500 mil por mês; eram ~12 por
+  conferência até 11/11/2026): uma conferência sem nada novo gasta 3 (cursor +
+  dispensas, bandeja, cursor novo; o teste "conferencia sem nada novo" fixa isso),
+  mais 1 do token do Gmail e até 2 do `profileToken` e do piloto, quando a função da
+  Vercel não os tem na memória (10 min para os dois, 55 s para o token). Cada e-mail
+  novo soma ~3 (feito, encerrada, registro), e a conferência que chamou a IA soma 6
+  do registro de uso.
 - **Custo:** ~1.530 tokens de entrada e ~70 de saída por triagem, US$ 0,0002 (Fase 0).
   Fica no painel na fonte **"Triagem de e-mail"**, num registro por conferência
   e **sem ramal**: com ramal, entraria no "IA sem chamado".
