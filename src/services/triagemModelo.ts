@@ -55,7 +55,7 @@ export function termos(texto: string): string[] {
   return [...palavras, ...pares];
 }
 
-// Etiquetas: o regex de "colega" e o mesmo do treino (exportar.py), de proposito.
+// Etiquetas: o regex de "colega" e o mesmo do treino (ml/exportar.py do copia-analise), de proposito.
 function etiquetas(e: EntradaModelo): string[] {
   const colega = /contas(net)?\.com\.br$/.test(String(e.remetenteDominio || "").toLowerCase());
   return [colega ? "colega" : "externo", `gat_${e.gatilho}`, ...e.abas].map((t) => t.toLowerCase());
