@@ -24,10 +24,14 @@ import { recordUsage } from "./usage";
 // sem deploy para mudar quem participa. Fora da lista, a rota responde
 // "inativo" sem ler a caixa nem gastar IA.
 //
-// Tudo que a triagem ve e decide vai para `triagem:list` (append-only, sem
-// teto durante o piloto, como o feedback): a copia diaria leva para o DuckDB da
-// rede, onde vira a base do aprendizado. Cada registro guarda o TRECHO que a IA
-// leu (decisao do dono: guardar por tempo indeterminado).
+// Tudo que a triagem ve e decide vai para `triagem:list` (append-only): a
+// copia-analise leva para o DuckDB da rede, onde vira a base do aprendizado, e
+// desde 11/11/2026 apaga do Redis o que ja copiou. Cada registro guarda o
+// TRECHO que a IA leu (decisao do dono: guardar por tempo indeterminado).
+//
+// Comandos do Redis: o Upstash gratuito da ~500 mil por mes, e a conferencia
+// roda a cada 20 min em cada app do piloto. Por isso cada leitura aqui foi
+// contada (teste "conferencia sem nada novo" em triagemPiloto.test.ts).
 
 // Dois gatilhos (redesenho de 10/11/2026, "bandeja + aviso"):
 // - chegada: o e-mail que parece pedido vai para a bandeja, em silencio. Cobre
@@ -60,7 +64,10 @@ const MAX_CONVERSAS = 10;
 const PARALELO = 3;
 const PRIMEIRA_VEZ_MS = 24 * 3600_000; // conta nova no piloto olha so o ultimo dia
 const SOBREPOSICAO_MS = 5 * 60_000; // e-mail que chega no meio de uma conferencia
-const TRAVA_SEG = 120; // uma conferencia por vez por conta (app aberto em 2 PCs)
+// Sem trava de "uma conferencia por vez" (havia ate 11/11/2026): o "feito"
+// abaixo, com SET NX, ja garante que duas conferencias juntas (app aberto em 2
+// PCs) paguem a IA uma vez so por e-mail, e a trava custava 2 comandos em toda
+// conferencia.
 const FEITO_SEG = 30 * 24 * 3600; // a mensagem-gatilho ja triada nao paga IA de novo
 const VALIDADE_SUGESTAO_MS = 7 * 24 * 3600_000; // sem acao em 7 dias = "ignorada"
 
@@ -68,12 +75,6 @@ const KEY_PILOTO = "triagem:piloto";
 export const KEY_LISTA = "triagem:list";
 const keySugestoes = (conta: string) => `triagem:sug:${conta}`;
 const keyCursor = (conta: string) => `triagem:cursor:${conta}`;
-// Conversas ja vistas na janela que ainda nao fechou (mais de MAX_CONVERSAS de
-// uma vez). Sem isto a conferencia pegava sempre as mesmas 10 do topo da busca
-// e nunca chegava nas outras (achado no 1o dia do piloto, 10/11/2026).
-const keyVistas = (conta: string) => `triagem:vistas:${conta}`;
-const VISTAS_SEG = 2 * 24 * 3600;
-const keyTrava = (conta: string) => `triagem:trava:${conta}`;
 const keyFeito = (conta: string, messageId: string) => `triagem:feito:${conta}:${messageId}`;
 const keyEncerrada = (conta: string, threadId: string) => `triagem:encerrada:${conta}:${threadId}`;
 const keyDispensas = (conta: string) => `triagem:dispensas:${conta}`;
@@ -93,17 +94,58 @@ function getRedis(): Redis {
 
 const conta = (email: string) => String(email || "").trim().toLowerCase();
 
+// Quem esta no piloto muda raramente e e perguntado em toda conferencia de
+// todo app. A resposta fica 10 min na memoria da funcao da Vercel: entrar ou
+// sair do piloto pelo script vale em ate 10 min.
+const PILOTO_CACHE_MS = 10 * 60_000;
+const pilotoEmCache = new Map<string, { dentro: boolean; em: number }>();
+
 export async function estaNoPiloto(email: string): Promise<boolean> {
-  return (await getRedis().sismember(KEY_PILOTO, conta(email))) === 1;
+  const c = conta(email);
+  const guardado = pilotoEmCache.get(c);
+  if (guardado && Date.now() - guardado.em < PILOTO_CACHE_MS) return guardado.dentro;
+  const dentro = (await getRedis().sismember(KEY_PILOTO, c)) === 1;
+  pilotoEmCache.set(c, { dentro, em: Date.now() });
+  return dentro;
 }
 export async function listarPiloto(): Promise<string[]> {
   return ((await getRedis().smembers(KEY_PILOTO)) || []).sort();
 }
 export async function entrarNoPiloto(email: string): Promise<void> {
   await getRedis().sadd(KEY_PILOTO, conta(email));
+  pilotoEmCache.delete(conta(email));
 }
 export async function sairDoPiloto(email: string): Promise<void> {
   await getRedis().srem(KEY_PILOTO, conta(email));
+  pilotoEmCache.delete(conta(email));
+}
+
+// O cursor da conferencia: onde comeca a janela da proxima busca e, enquanto a
+// janela nao foi vista inteira (mais de MAX_CONVERSAS de uma vez), as conversas
+// dela ja vistas. Sem as vistas, a conferencia pegava sempre as mesmas 10 do
+// topo da busca e nunca chegava nas outras (1o dia do piloto, 10/11/2026).
+// Tudo numa chave so desde 11/11/2026: eram o cursor e um SET de vistas,
+// 4 comandos por conferencia; agora sao 1 leitura e 1 gravacao.
+interface CursorDaConta {
+  janela: number; // ms
+  vistas: string[];
+}
+
+function lerCursor(v: unknown): CursorDaConta {
+  let bruto = v;
+  if (typeof bruto === "string" && bruto.startsWith("{")) {
+    try {
+      bruto = JSON.parse(bruto);
+    } catch {
+      bruto = null;
+    }
+  }
+  if (bruto && typeof bruto === "object") {
+    const o = bruto as Partial<CursorDaConta>;
+    return { janela: Number(o.janela) || 0, vistas: Array.isArray(o.vistas) ? o.vistas.map(String) : [] };
+  }
+  // Formato de antes de 11/11/2026: so o numero.
+  return { janela: Number(bruto) || 0, vistas: [] };
 }
 
 export interface SugestaoTriagem {
@@ -171,16 +213,24 @@ async function registrarNaLista(registro: Record<string, unknown>): Promise<void
   await getRedis().lpush(KEY_LISTA, JSON.stringify({ ts: new Date().toISOString(), ...registro }));
 }
 
+async function lerBandeja(c: string): Promise<SugestaoTriagem[]> {
+  const bruto = (await getRedis().hgetall<Record<string, unknown>>(keySugestoes(c))) || {};
+  return Object.values(bruto)
+    .map(lerSugestao)
+    .filter((s): s is SugestaoTriagem => !!s);
+}
+
 // Sugestoes pendentes, mais novas primeiro. As vencidas saem aqui mesmo e
 // viram desfecho "ignorada": isso tambem e rotulo para o aprendizado.
 export async function listarSugestoes(email: string): Promise<SugestaoTriagem[]> {
   const c = conta(email);
-  const bruto = (await getRedis().hgetall<Record<string, unknown>>(keySugestoes(c))) || {};
+  return organizarSugestoes(c, await lerBandeja(c));
+}
+
+async function organizarSugestoes(c: string, bandeja: SugestaoTriagem[]): Promise<SugestaoTriagem[]> {
   const agora = Date.now();
   const validas: SugestaoTriagem[] = [];
-  for (const v of Object.values(bruto)) {
-    const s = lerSugestao(v);
-    if (!s) continue;
+  for (const s of bandeja) {
     if (agora - (s.sugeridaEm || s.quando) > VALIDADE_SUGESTAO_MS) {
       await registrarDesfecho(c, s.threadId, "ignorada");
       continue;
@@ -196,8 +246,11 @@ export async function listarSugestoes(email: string): Promise<SugestaoTriagem[]>
 // Confianca minima desta pessoa: sobe para quem dispensa muito (ver
 // LIMIAR_QUEM_DISPENSA). O app usa para esconder as de baixo e para o aviso.
 export async function limiarDaPessoa(email: string): Promise<number> {
-  const n = Number(await getRedis().get(keyDispensas(conta(email)))) || 0;
-  return n >= DISPENSAS_PARA_SUBIR ? LIMIAR_QUEM_DISPENSA : LIMIAR_PADRAO;
+  return limiarPelasDispensas(await getRedis().get(keyDispensas(conta(email))));
+}
+
+function limiarPelasDispensas(dispensas: unknown): number {
+  return (Number(dispensas) || 0) >= DISPENSAS_PARA_SUBIR ? LIMIAR_QUEM_DISPENSA : LIMIAR_PADRAO;
 }
 
 // Tira a sugestao da lista e anota o que a pessoa fez com ela. false = nao
@@ -230,11 +283,12 @@ export async function registrarDesfecho(
 
 export interface ResultadoConferencia {
   sugestoes: SugestaoTriagem[];
-  conferidoEm: number | null; // null = outra conferencia desta conta estava em andamento
+  conferidoEm: number;
   triadas: number;
   novas: number;
   filtradas: number; // descartadas pelo robozinho, sem chamar a IA
   pendentes: number; // conversas que ficaram para a proxima conferencia
+  limiar: number; // o de limiarDaPessoa, lido junto com o cursor
 }
 
 export async function conferirCaixa(
@@ -243,10 +297,6 @@ export async function conferirCaixa(
 ): Promise<ResultadoConferencia> {
   const c = conta(email);
   const r = getRedis();
-  const pegou = await r.set(keyTrava(c), "1", { nx: true, ex: TRAVA_SEG });
-  if (pegou !== "OK") {
-    return { sugestoes: await listarSugestoes(c), conferidoEm: null, triadas: 0, novas: 0, filtradas: 0, pendentes: 0 };
-  }
   const inicio = Date.now();
   let inTok = 0;
   let outTok = 0;
@@ -254,24 +304,21 @@ export async function conferirCaixa(
   let novas = 0;
   let filtradas = 0;
   try {
+    // Cursor e dispensas (o limiar da pessoa) numa leitura so.
+    const [cursorBruto, dispensas] = await r.mget<[unknown, unknown]>(keyCursor(c), keyDispensas(c));
+    const cursor = lerCursor(cursorBruto);
     // Conta nova no piloto: a janela comeca 24 h atras e fica FIXA ate ser
-    // vista inteira (por isso o cursor ja e gravado aqui).
-    let cursor = Number(await r.get(keyCursor(c))) || 0;
-    if (!cursor) {
-      cursor = inicio - PRIMEIRA_VEZ_MS + SOBREPOSICAO_MS;
-      await r.set(keyCursor(c), String(cursor));
-    }
-    const desde = cursor - SOBREPOSICAO_MS;
+    // vista inteira.
+    const janela = cursor.janela || inicio - PRIMEIRA_VEZ_MS + SOBREPOSICAO_MS;
+    const desde = janela - SOBREPOSICAO_MS;
     const { ids } = await buscarThreads(c, `after:${Math.floor(desde / 1000)} -in:chats ${BUSCA_FORA}`);
     // As que ja estao na bandeja tambem entram: atividade nova nelas pode ser
-    // a resposta da pessoa, que e o que dispara o aviso (sem gastar IA).
-    const pendentes = await r.hgetall<Record<string, unknown>>(keySugestoes(c));
-    const naBandeja = new Map<string, SugestaoTriagem>();
-    for (const v of Object.values(pendentes || {})) {
-      const s = lerSugestao(v);
-      if (s) naBandeja.set(s.threadId, s);
-    }
-    const vistas = new Set((await r.smembers(keyVistas(c))) || []);
+    // a resposta da pessoa, que e o que dispara o aviso (sem gastar IA). O
+    // mapa e atualizado durante a conferencia e vira a resposta no fim, sem
+    // ler a bandeja de novo.
+    const bandeja = new Map<string, SugestaoTriagem>();
+    for (const s of await lerBandeja(c)) bandeja.set(s.threadId, s);
+    const vistas = new Set(cursor.vistas);
     const fila = ids.filter((t) => !vistas.has(t));
     const agora = fila.slice(0, MAX_CONVERSAS);
 
@@ -280,7 +327,7 @@ export async function conferirCaixa(
       Array.from({ length: Math.min(PARALELO, agora.length) }, async () => {
         while (prox < agora.length) {
           const threadId = agora[prox++];
-          const gasto = await triarConversa(c, threadId, desde, ctx.setor, naBandeja.get(threadId)).catch((e) => {
+          const gasto = await triarConversa(c, threadId, desde, ctx.setor, bandeja).catch((e) => {
             // Conversa que nao abre (apagada no meio) nao derruba as outras.
             console.warn(`[triagem] ${threadId} nao triada: ${getErrorMessage(e)}`);
             return null;
@@ -298,20 +345,23 @@ export async function conferirCaixa(
     const sobrou = fila.length - agora.length;
     // O cursor so anda quando a janela foi vista inteira. Ate la, as conversas
     // ja vistas ficam anotadas e a proxima conferencia continua da seguinte.
-    if (sobrou) {
-      if (agora.length) {
-        await r.sadd(keyVistas(c), agora[0], ...agora.slice(1));
-        await r.expire(keyVistas(c), VISTAS_SEG);
-      }
-    } else {
-      await r.set(keyCursor(c), String(inicio));
-      await r.del(keyVistas(c));
-    }
-    return { sugestoes: await listarSugestoes(c), conferidoEm: inicio, triadas, novas, filtradas, pendentes: sobrou };
+    const proximo: CursorDaConta = sobrou
+      ? { janela, vistas: [...cursor.vistas, ...agora] }
+      : { janela: inicio, vistas: [] };
+    await r.set(keyCursor(c), JSON.stringify(proximo));
+    return {
+      sugestoes: await organizarSugestoes(c, [...bandeja.values()]),
+      conferidoEm: inicio,
+      triadas,
+      novas,
+      filtradas,
+      pendentes: sobrou,
+      limiar: limiarPelasDispensas(dispensas),
+    };
   } finally {
-    await r.del(keyTrava(c)).catch(() => undefined);
     // Um registro por conferencia, nao por e-mail: cada registro de uso custa
-    // ~10 comandos do Redis, e o plano gratuito nao aguentaria um por triagem.
+    // ~6 comandos do Redis (usage.ts), e o plano gratuito nao aguentaria um
+    // por triagem.
     // SEM ramal de proposito: o /admin calcula "IA sem chamado" por ramal
     // (gasto - o que virou chamado), e a triagem nunca vira chamado por si.
     // Ela aparece no total e na fonte "Triagem de e-mail".
@@ -331,14 +381,15 @@ async function triarConversa(
   c: string,
   threadId: string,
   desde: number,
-  setor?: string,
-  naBandeja?: SugestaoTriagem,
+  setor: string | undefined,
+  bandeja: Map<string, SugestaoTriagem>,
 ): Promise<{ inTok: number; outTok: number; triadas: number; novas: number; filtradas: number }> {
   const msgs = await obterThreadParaTriagem(c, threadId);
   const mt = msgs.map((m) => paraTriagem(m, c));
   const total = { inTok: 0, outTok: 0, triadas: 0, novas: 0, filtradas: 0 };
 
   // Ja esta na bandeja: so falta saber se a pessoa respondeu. Sem IA.
+  const naBandeja = bandeja.get(threadId);
   if (naBandeja) {
     if (!naBandeja.respondeu) {
       const resposta = mt
@@ -348,12 +399,14 @@ async function triarConversa(
     }
     return total;
   }
-  if (await getRedis().get(keyEncerrada(c, threadId))) return total;
-
   const gatilhos = gatilhosDaThread(mt, desde).filter((g) => GATILHOS_DO_PILOTO.includes(g.tipo));
   // Virou sugestao pela chegada nesta mesma conferencia: a resposta que vem
   // depois so marca como respondida, sem pagar a IA de novo.
   let sugerida: SugestaoTriagem | null = null;
+  // So pergunta se a conversa esta encerrada quando ha e-mail novo para triar:
+  // a que so voltou pela sobreposicao da busca para no "feito", sem outra
+  // leitura do Redis.
+  let encerrada: boolean | null = null;
   for (const g of gatilhos) {
     if (g.tipo === "resposta" && sugerida) {
       await marcarRespondida(c, sugerida, g.quando);
@@ -361,6 +414,8 @@ async function triarConversa(
     }
     const primeiraVez = (await getRedis().set(keyFeito(c, g.messageId), "1", { nx: true, ex: FEITO_SEG })) === "OK";
     if (!primeiraVez) continue;
+    if (encerrada === null) encerrada = !!(await getRedis().get(keyEncerrada(c, threadId)));
+    if (encerrada) return total;
     const msg = msgs.find((m) => m.id === g.recebida.id) || msgs[0];
     const assunto = msg?.subject || "";
     const trecho = montarTrecho(g);
@@ -422,6 +477,7 @@ async function triarConversa(
       });
       if (ehSugestao) {
         sugerida = await salvarSugestao(c, g, threadId, assunto, res);
+        bandeja.set(threadId, sugerida);
         total.novas++;
       }
     } catch (e) {
