@@ -27,6 +27,7 @@ export type Fonte = "ligacao" | "email" | "resumo" | "chat" | "gravacao" | "tria
 type Metric = "in" | "out" | "calls" | "sec";
 
 const KEY_DIAS = "uso:dias";
+let diaJaAnotado = ""; // ultimo dia que esta instancia ja pos em KEY_DIAS
 const KEY_RAMAIS = "uso:ramais"; // HASH ramal -> nome do usuario
 // Uso acumulado de UM item (ligacao/e-mail). E o que permite dizer, na hora em
 // que o chamado e criado, quanto custou aquele atendimento — e daí atribuir o
@@ -85,7 +86,13 @@ export async function recordUsage(params: {
   const fonte = params.fonte;
 
   try {
-    await r.sadd(KEY_DIAS, dia);
+    // O dia so entra no SET uma vez; repetir o SADD em todo registro era um
+    // comando do Redis a toa (a triagem registra a cada conferencia). Nada
+    // apaga uso:dias, entao lembrar na memoria da funcao basta.
+    if (dia !== diaJaAnotado) {
+      await r.sadd(KEY_DIAS, dia);
+      diaJaAnotado = dia;
+    }
     const k = keyDia(dia);
     const ops: Promise<unknown>[] = [
       r.hincrby(k, field(model, params.op, "in"), inTok),
