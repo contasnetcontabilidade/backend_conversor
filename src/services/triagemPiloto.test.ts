@@ -355,6 +355,69 @@ test("aprende com quem dispensa: 5 'nao e chamado' sobem o limiar; 'nao e para m
   assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO, "abriu chamado de uma sugestao: volta");
 });
 
+// Robozinho de brinquedo: "boleto" derruba a nota (~0,00002); o resto fica em
+// ~0,27, acima do corte de 0,02.
+async function ligarRobozinho(auditoria: string) {
+  const m = await import("./triagemModelo");
+  db.set(m.KEY_MODELO, JSON.stringify({ versao: "teste", corte: 0.02, intercepto: -1, palavras: { boleto: [1, -10] }, meta: {} }));
+  m.esquecerModeloEmCache();
+  process.env.TRIAGEM_AUDITORIA = auditoria;
+  return m;
+}
+async function desligarRobozinho() {
+  const m = await import("./triagemModelo");
+  m.esquecerModeloEmCache();
+  delete process.env.TRIAGEM_AUDITORIA;
+}
+
+test("robozinho: abaixo do corte descarta sem chamar a IA e grava a nota", async () => {
+  const p = await piloto();
+  await ligarRobozinho("0");
+  try {
+    const r = await p.conferirCaixa(CONTA);
+    assert.equal(chamadasIa, 1, "so o pedido foi para a IA; o boleto foi descartado");
+    assert.equal(r.filtradas, 1);
+    const lista = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l));
+    const boleto = lista.find((l) => l.threadId === "t2");
+    assert.equal(boleto.filtrado, true);
+    assert.ok(boleto.notaModelo < 0.02);
+    assert.equal(boleto.versaoModelo, "teste");
+    assert.equal(boleto.decisao, undefined, "sem decisao da IA");
+    assert.ok(boleto.trecho, "o trecho fica, para o aprendizado");
+    const pedido = lista.find((l) => l.threadId === "t1");
+    assert.ok(pedido.notaModelo > 0.02 && pedido.decisao === "sim");
+    assert.equal(pedido.auditoria, undefined);
+  } finally {
+    await desligarRobozinho();
+  }
+});
+
+test("robozinho: na auditoria o descartado vai para a IA mesmo assim, marcado", async () => {
+  const p = await piloto();
+  await ligarRobozinho("1");
+  try {
+    const r = await p.conferirCaixa(CONTA);
+    assert.equal(chamadasIa, 2);
+    assert.equal(r.filtradas, 0);
+    const boleto = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l)).find((l) => l.threadId === "t2");
+    assert.equal(boleto.auditoria, true);
+    assert.equal(boleto.decisao, "nao");
+    assert.ok(boleto.notaModelo < 0.02);
+  } finally {
+    await desligarRobozinho();
+  }
+});
+
+test("robozinho: sem modelo no Redis, tudo vai para a IA como antes", async () => {
+  const p = await piloto();
+  await desligarRobozinho();
+  const r = await p.conferirCaixa(CONTA);
+  assert.equal(chamadasIa, 2);
+  assert.equal(r.filtradas, 0);
+  const t2 = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l)).find((l) => l.threadId === "t2");
+  assert.equal(t2.notaModelo, undefined);
+});
+
 test("com outra conferencia em andamento, so devolve a lista (sem ler a caixa)", async () => {
   const p = await piloto();
   db.set(`triagem:trava:${CONTA}`, "1");
