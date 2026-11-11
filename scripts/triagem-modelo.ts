@@ -7,7 +7,7 @@
 //   ENV_FILE=../.env npx tsx scripts/triagem-modelo.ts subir <modelo.json>
 //   ENV_FILE=../.env npx tsx scripts/triagem-modelo.ts tirar     (desliga o filtro)
 //
-// O modelo.json sai do treino em Python (exportar.py, fora do git) e fica na
+// O modelo.json sai do treino em Python (ml/exportar.py do repositorio copia-analise, em Desktop/Database) e fica na
 // pasta de dados da Fase 0 (Desktop\Database\data\fase0, tambem fora do git).
 import dotenv from "dotenv";
 import { readFileSync } from "fs";
