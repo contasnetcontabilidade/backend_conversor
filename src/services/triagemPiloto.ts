@@ -13,6 +13,7 @@ import {
   type Gatilho,
   type TipoGatilho,
 } from "./triagem";
+import { carregarModelo, notaDoModelo, taxaAuditoria } from "./triagemModelo";
 import { recordUsage } from "./usage";
 
 // Piloto da triagem (Fase 1, decisoes de 09 e 10/11/2026): o app confere a
@@ -232,6 +233,7 @@ export interface ResultadoConferencia {
   conferidoEm: number | null; // null = outra conferencia desta conta estava em andamento
   triadas: number;
   novas: number;
+  filtradas: number; // descartadas pelo robozinho, sem chamar a IA
   pendentes: number; // conversas que ficaram para a proxima conferencia
 }
 
@@ -243,13 +245,14 @@ export async function conferirCaixa(
   const r = getRedis();
   const pegou = await r.set(keyTrava(c), "1", { nx: true, ex: TRAVA_SEG });
   if (pegou !== "OK") {
-    return { sugestoes: await listarSugestoes(c), conferidoEm: null, triadas: 0, novas: 0, pendentes: 0 };
+    return { sugestoes: await listarSugestoes(c), conferidoEm: null, triadas: 0, novas: 0, filtradas: 0, pendentes: 0 };
   }
   const inicio = Date.now();
   let inTok = 0;
   let outTok = 0;
   let triadas = 0;
   let novas = 0;
+  let filtradas = 0;
   try {
     // Conta nova no piloto: a janela comeca 24 h atras e fica FIXA ate ser
     // vista inteira (por isso o cursor ja e gravado aqui).
@@ -287,6 +290,7 @@ export async function conferirCaixa(
           outTok += gasto.outTok;
           triadas += gasto.triadas;
           novas += gasto.novas;
+          filtradas += gasto.filtradas;
         }
       }),
     );
@@ -303,7 +307,7 @@ export async function conferirCaixa(
       await r.set(keyCursor(c), String(inicio));
       await r.del(keyVistas(c));
     }
-    return { sugestoes: await listarSugestoes(c), conferidoEm: inicio, triadas, novas, pendentes: sobrou };
+    return { sugestoes: await listarSugestoes(c), conferidoEm: inicio, triadas, novas, filtradas, pendentes: sobrou };
   } finally {
     await r.del(keyTrava(c)).catch(() => undefined);
     // Um registro por conferencia, nao por e-mail: cada registro de uso custa
@@ -329,10 +333,10 @@ async function triarConversa(
   desde: number,
   setor?: string,
   naBandeja?: SugestaoTriagem,
-): Promise<{ inTok: number; outTok: number; triadas: number; novas: number }> {
+): Promise<{ inTok: number; outTok: number; triadas: number; novas: number; filtradas: number }> {
   const msgs = await obterThreadParaTriagem(c, threadId);
   const mt = msgs.map((m) => paraTriagem(m, c));
-  const total = { inTok: 0, outTok: 0, triadas: 0, novas: 0 };
+  const total = { inTok: 0, outTok: 0, triadas: 0, novas: 0, filtradas: 0 };
 
   // Ja esta na bandeja: so falta saber se a pessoa respondeu. Sem IA.
   if (naBandeja) {
@@ -375,6 +379,30 @@ async function triarConversa(
       versaoPrompt: TRIAGEM_PROMPT_VERSION,
       modelo: CLAUDE_MODEL,
     };
+    // Robozinho (triagemModelo.ts): nota antes de pagar a IA. Abaixo do corte,
+    // o e-mail e descartado; 1 em 10 desses vai para a IA mesmo assim
+    // ("auditoria"), e e isso que mede o erro do robozinho em producao. A nota
+    // fica gravada sempre, ao lado da decisao da IA.
+    const robo = await carregarModelo();
+    const nota = robo
+      ? notaDoModelo(robo, {
+          assunto,
+          trecho,
+          remetenteDominio: base.remetenteDominio,
+          gatilho: g.tipo,
+          abas: base.abaGmail,
+        })
+      : null;
+    const descartar = !!robo && nota !== null && nota < robo.corte;
+    const auditoria = descartar && Math.random() < taxaAuditoria();
+    const doRobo = robo
+      ? { notaModelo: nota, versaoModelo: robo.versao, ...(auditoria ? { auditoria: true } : {}) }
+      : {};
+    if (descartar && !auditoria) {
+      await registrarNaLista({ ...base, ...doRobo, filtrado: true });
+      total.filtradas++;
+      continue;
+    }
     try {
       const res = await triarEmail({ setor, assunto, gatilho: g, trecho });
       total.inTok += res.inputTokens;
@@ -383,6 +411,7 @@ async function triarConversa(
       const ehSugestao = res.decisao === "sim" && res.confianca >= LIMIAR_SUGESTAO;
       await registrarNaLista({
         ...base,
+        ...doRobo,
         decisao: res.decisao,
         confianca: res.confianca,
         categoria: res.categoria,
@@ -402,7 +431,7 @@ async function triarConversa(
       }
       const mensagem = getErrorMessage(e);
       console.error(`[triagem] falhou em ${threadId}: ${mensagem}`);
-      await registrarNaLista({ ...base, erro: mensagem });
+      await registrarNaLista({ ...base, ...doRobo, erro: mensagem });
       // A marca de "feito" fica: repetir a cada 12 min uma triagem que o
       // modelo recusa so gastaria. O erro fica visivel no /admin/erros.
       await registrarErro({
