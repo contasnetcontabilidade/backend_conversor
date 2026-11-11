@@ -95,9 +95,11 @@ function getRedis(): Redis {
 const conta = (email: string) => String(email || "").trim().toLowerCase();
 
 // Quem esta no piloto muda raramente e e perguntado em toda conferencia de
-// todo app. A resposta fica 10 min na memoria da funcao da Vercel: entrar ou
-// sair do piloto pelo script vale em ate 10 min.
-const PILOTO_CACHE_MS = 10 * 60_000;
+// todo app. A resposta fica 30 min na memoria da funcao da Vercel (mais que
+// os 20 min entre conferencias, senao nunca acertaria): sair do piloto pelo
+// script vale em ate 30 min. Entrar vale na proxima pergunta do app, que fora
+// do piloto e a cada 6 h.
+const PILOTO_CACHE_MS = 30 * 60_000;
 const pilotoEmCache = new Map<string, { dentro: boolean; em: number }>();
 
 export async function estaNoPiloto(email: string): Promise<boolean> {
