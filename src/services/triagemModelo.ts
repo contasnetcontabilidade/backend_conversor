@@ -49,7 +49,8 @@ export function normalizar(texto: string): string {
 // Palavras e pares de palavras, como o token_pattern (?u)\b\w\w+\b com
 // ngram_range=(1, 2): sequencias de letra/numero/_ com 2+ caracteres.
 export function termos(texto: string): string[] {
-  const palavras = (normalizar(texto).match(/[\p{L}\p{N}_]+/gu) || []).filter((t) => t.length >= 2);
+  const achadas: string[] = normalizar(texto).match(/[\p{L}\p{N}_]+/gu) || [];
+  const palavras = achadas.filter((t) => t.length >= 2);
   const pares: string[] = [];
   for (let i = 0; i + 1 < palavras.length; i++) pares.push(`${palavras[i]} ${palavras[i + 1]}`);
   return [...palavras, ...pares];
