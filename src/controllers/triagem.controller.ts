@@ -17,9 +17,11 @@ import { ensureBodyObject, getOptionalString } from "../utils/request";
 // resposta traz assunto e remetente da caixa de alguem.
 
 // O profileToken -> e-mail nunca muda (nada apaga gmail:profile:*), e todo app
-// pergunta a cada conferencia: guardar 10 min na memoria da funcao poupa um
-// comando do Redis por conferencia. So guarda o que resolveu.
-const CONTA_CACHE_MS = 10 * 60_000;
+// pergunta a cada conferencia: guardar na memoria da funcao poupa um comando
+// do Redis por conferencia. 12 h, e nao minutos, porque cada app pergunta a
+// cada 20 min: um cache mais curto que isso nunca acertaria. So guarda o que
+// resolveu.
+const CONTA_CACHE_MS = 12 * 3600_000;
 const contaDoToken = new Map<string, { email: string; em: number }>();
 
 async function contaDaTriagem(profileToken: string): Promise<string> {
