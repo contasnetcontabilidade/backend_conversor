@@ -16,13 +16,27 @@ import { ensureBodyObject, getOptionalString } from "../utils/request";
 // So pelo profileToken, sem o "?email=" que as rotas antigas aceitam: a
 // resposta traz assunto e remetente da caixa de alguem.
 
+// O profileToken -> e-mail nunca muda (nada apaga gmail:profile:*), e todo app
+// pergunta a cada conferencia: guardar 10 min na memoria da funcao poupa um
+// comando do Redis por conferencia. So guarda o que resolveu.
+const CONTA_CACHE_MS = 10 * 60_000;
+const contaDoToken = new Map<string, { email: string; em: number }>();
+
+async function contaDaTriagem(profileToken: string): Promise<string> {
+  const guardada = profileToken ? contaDoToken.get(profileToken) : undefined;
+  if (guardada && Date.now() - guardada.em < CONTA_CACHE_MS) return guardada.email;
+  const email = await resolverContaGoogle(profileToken);
+  contaDoToken.set(profileToken, { email, em: Date.now() });
+  return email;
+}
+
 // POST /gmail/triagem/conferir { profileToken, setor?, apenasListar? }
 // Fora do piloto responde { ativo: false } sem ler a caixa: e assim que o app
 // sabe se mostra a secao "Sugeridos". No piloto, a resposta leva tambem os
 // motivos do "Nao e chamado", para o app desenhar os botoes.
 export async function triagemConferirController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
-  const email = await resolverContaGoogle(getOptionalString(body, "profileToken") || "");
+  const email = await contaDaTriagem(getOptionalString(body, "profileToken") || "");
   if (!(await estaNoPiloto(email))) {
     res.status(200).json({ ok: true, data: { ativo: false } });
     return;
@@ -39,9 +53,9 @@ export async function triagemConferirController(req: Request, res: Response) {
     });
     return;
   }
+  // O limiar vem dentro do resultado (lido junto com o cursor).
   const r = await conferirCaixa(email, { setor: getOptionalString(body, "setor") });
-  const limiar = await limiarDaPessoa(email);
-  res.status(200).json({ ok: true, data: { ativo: true, ...r, motivos: MOTIVOS_PARA_O_APP, limiar } });
+  res.status(200).json({ ok: true, data: { ativo: true, ...r, motivos: MOTIVOS_PARA_O_APP } });
 }
 
 // POST /gmail/triagem/desfecho { profileToken, threadId, motivo }
@@ -51,7 +65,7 @@ export async function triagemConferirController(req: Request, res: Response) {
 // criacao do chamado (gmail.controller), e "ignorada" quando a sugestao vence.
 export async function triagemDesfechoController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
-  const email = await resolverContaGoogle(getOptionalString(body, "profileToken") || "");
+  const email = await contaDaTriagem(getOptionalString(body, "profileToken") || "");
   const threadId = getOptionalString(body, "threadId");
   const motivo = getOptionalString(body, "motivo") || "";
   if (!threadId) {
