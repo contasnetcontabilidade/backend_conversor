@@ -230,7 +230,15 @@ export async function getValidAccessToken(email: string): Promise<string> {
   if (cached && Date.now() < cached.expiresAt) return cached.token;
   try {
     const stored = await getGmailAccess(email);
-    if (stored) return stored;
+    if (stored) {
+      // Sem guardar na memoria, cada chamada ao Gmail lia o Redis: a
+      // conferencia da triagem abre ate 10 conversas, e eram ate 11 leituras
+      // do mesmo token. 55 s e seguro: o Redis apaga o token 60 s antes de o
+      // Google expirar (saveGmailAccess), entao o que ainda esta la vale por
+      // pelo menos mais 60 s.
+      memAccess.set(email, { token: stored, expiresAt: Date.now() + 55_000 });
+      return stored;
+    }
   } catch (error) {
     console.warn("[gmail] cache de token indisponivel:", getErrorMessage(error));
   }
