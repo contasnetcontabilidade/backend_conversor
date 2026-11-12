@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import { AppError } from "../lib/errors";
+import { registrarVistoAppNoFundo } from "../services/appOnline";
 import { resolverContaGoogle } from "../services/googleConta";
+import { ramalDaConta } from "./gmailAddon.controller";
 import {
   conferirCaixa,
   desfechoDoMotivo,
@@ -39,6 +41,15 @@ async function contaDaTriagem(profileToken: string): Promise<string> {
 export async function triagemConferirController(req: Request, res: Response) {
   const body = ensureBodyObject(req.body);
   const email = await contaDaTriagem(getOptionalString(body, "profileToken") || "");
+  // Aba "Online" do /admin: esta conferencia sai sozinha ~20 s depois de o app
+  // abrir, de todo mundo com conta Google (no piloto ou nao), e traz o setor.
+  // Em segundo plano: nao atrasa a resposta.
+  registrarVistoAppNoFundo({
+    userAgent: req.header("user-agent"),
+    conta: email,
+    setor: getOptionalString(body, "setor"),
+    ramalDaConta: () => ramalDaConta(email),
+  });
   if (!(await estaNoPiloto(email))) {
     res.status(200).json({ ok: true, data: { ativo: false } });
     return;
