@@ -23,6 +23,7 @@ import {
   adminFeedbackController,
   adminErrosController,
   adminErrosLimparController,
+  adminOnlineController,
   feedbackController,
   erroController,
 } from "../controllers/admin.controller";
@@ -70,6 +71,7 @@ import {
 } from "../controllers/chat.controller";
 import { uploadAudioMiddleware } from "../middlewares/upload";
 import { appAuth } from "../middlewares/appAuth";
+import { versaoApp } from "../middlewares/versaoApp";
 import { asyncHandler } from "../utils/http";
 import { runWithSuiteEnv } from "../lib/suiteEnv";
 
@@ -77,6 +79,8 @@ export const apiRouter = Router();
 
 // Autenticacao por token do app (dormante ate API_AUTH_TOKEN ser definido).
 apiRouter.use(appAuth);
+// Versao do app para a aba "Online" do /admin (so anota; nunca barra nada).
+apiRouter.use(versaoApp);
 
 // Ambiente do Suite por requisicao: header `x-suite-env: dev` roteia as chamadas
 // ao Suite360 para o ambiente de desenvolvimento (SuiteWeb DEV). So afeta o
@@ -189,6 +193,7 @@ apiRouter.get("/admin/uso", asyncHandler(adminUsoController));
 apiRouter.get("/admin/feedback", asyncHandler(adminFeedbackController));
 apiRouter.get("/admin/erros", asyncHandler(adminErrosController));
 apiRouter.post("/admin/erros/limpar", asyncHandler(adminErrosLimparController));
+apiRouter.get("/admin/online", asyncHandler(adminOnlineController));
 
 // Feedback do resumo da IA (enviado pelo app; passa pelo x-app-token normal).
 apiRouter.post("/feedback", asyncHandler(feedbackController));
