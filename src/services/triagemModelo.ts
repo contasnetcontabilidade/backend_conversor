@@ -17,7 +17,10 @@ import { getErrorMessage } from "../lib/errors";
 // chamado real (0 de 32); no suporte, ~62%.
 
 export const KEY_MODELO = "triagem:modelo";
-const CACHE_MS = 10 * 60_000; // trocar o modelo no Redis vale em ate 10 min
+// 6 h, nao 10 min (12/11/2026): sao 176 KB, e com conferencias de 20 em 20
+// min o cache de 10 min quase nunca acertava (1 GET a cada conferencia com
+// e-mail novo, em cada instancia). O modelo muda uma vez por mes.
+const CACHE_MS = 6 * 3600_000; // trocar o modelo no Redis vale em ate 6 h
 
 export interface ModeloTriagem {
   versao: string;
