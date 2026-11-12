@@ -73,6 +73,35 @@ export async function publishAbrirChat(
   await channel.publish("abrir-chat", payload);
 }
 
+// Ramais com o app aberto agora -> em quantas maquinas (aba "Online" do /admin).
+// Todo app aberto, ate minimizado na bandeja, assina o canal do seu ramal; a
+// ocupacao do canal e metadado do Ably, entao isto funciona sem o app mudar.
+// Uma chamada so: a versao 2 da API REST com by=value devolve a ocupacao junto
+// com a lista (a 3 so devolve os nomes, e ai seria uma chamada por canal).
+// Canal ativo com 0 assinantes = o app acabou de sair, ou o backend acabou de
+// publicar nele; fica de fora. Timeout: o padrao do cliente REST (10 s).
+export async function ramaisConectados(): Promise<Map<string, number>> {
+  const resp = await getRest().request("get", "/channels", 2, {
+    prefix: CHANNEL_PREFIX,
+    by: "value",
+    limit: 1000, // o teto da GoTo e 180 ramais: cabe numa pagina
+  });
+  if (!resp.success) {
+    throw new Error(
+      `Ably respondeu ${resp.statusCode} ao listar os canais: ${resp.errorMessage || "sem detalhe"}`,
+    );
+  }
+  const conectados = new Map<string, number>();
+  for (const canal of resp.items || []) {
+    const nome = String(canal?.channelId || canal?.name || "");
+    const assinantes = Number(canal?.status?.occupancy?.metrics?.subscribers) || 0;
+    if (nome.startsWith(CHANNEL_PREFIX) && assinantes > 0) {
+      conectados.set(nome.slice(CHANNEL_PREFIX.length), assinantes);
+    }
+  }
+  return conectados;
+}
+
 // Gera um TokenRequest com capacidade limitada a assinar o canal do ramal.
 // O desktop usa isso (via authUrl) para conectar sem ver a root key.
 export async function createRamalTokenRequest(
