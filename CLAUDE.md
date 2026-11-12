@@ -105,3 +105,13 @@ ambiente antes de ler o código.
 
 Armadilhas e decisões deste projeto ainda não foram registradas aqui. Ao
 descobrir por que algo quebrou, **escreva neste arquivo**.
+
+## Armadilhas registradas
+
+- **Worktree sem `node_modules` próprio usa o da pasta principal.** O Node
+  procura `node_modules` subindo as pastas, então um `zz_wt_*` sem
+  `npm install` roda com o de `backend_conversor`, que pode estar velho. Em
+  12/11/2026 faltava o `pdf-lib` lá, e os testes da triagem caíam com
+  "Cannot find module 'pdf-lib'", o que parecia culpa da mudança em teste.
+  Rode com `NODE_PATH` apontando para o `node_modules` de um worktree
+  atualizado, ou faça `npm install` no worktree.
