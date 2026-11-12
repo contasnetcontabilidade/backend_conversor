@@ -103,9 +103,16 @@ async function main() {
     if (janela) await banco.gravarCursor(c, janela, vistas);
     // O banco so sabe somar uma e zerar: soma uma a uma (sao poucas).
     for (let i = 0; i < (Number(dispensas) || 0); i++) await banco.contarDispensa(c, false);
-    const bandeja = (await redis.hgetall<Record<string, string>>(`triagem:sug:${c}`)) || {};
-    for (const [threadId, texto] of Object.entries(bandeja)) {
-      await banco.gravarSugestao(c, threadId, JSON.parse(String(texto)));
+    // Sem desserializar, o HGETALL vem cru: [campo, valor, campo, valor...].
+    const bruto: unknown = await redis.hgetall(`triagem:sug:${c}`);
+    const pares: Array<[string, string]> = [];
+    if (Array.isArray(bruto)) {
+      for (let i = 0; i + 1 < bruto.length; i += 2) pares.push([String(bruto[i]), String(bruto[i + 1])]);
+    } else if (bruto && typeof bruto === "object") {
+      for (const [k, v] of Object.entries(bruto)) pares.push([k, typeof v === "string" ? v : JSON.stringify(v)]);
+    }
+    for (const [threadId, texto] of pares) {
+      await banco.gravarSugestao(c, threadId, JSON.parse(texto));
       sugestoes++;
     }
   }
