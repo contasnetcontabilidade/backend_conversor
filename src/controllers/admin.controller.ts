@@ -23,6 +23,7 @@ import {
   precoClaudeVigente,
 } from "../services/precoClaude";
 import { getErrorMessage } from "../lib/errors";
+import { montarPainelOnline } from "../services/appOnline";
 
 function senhaAdmin(): string {
   return process.env.ADMIN_PASSWORD || "Contas@2074";
@@ -168,6 +169,18 @@ export async function adminErrosLimparController(req: Request, res: Response) {
   }
   await limparErros().catch(() => undefined);
   res.status(200).json({ ok: true });
+}
+
+// GET /api/admin/online — aba "Online": quem esta com o app aberto agora, em
+// qual versao e de qual setor (protegido pela senha do admin). O que nao deu
+// para ler (Ably, Redis, GitHub) vem em `avisos`, e a aba mostra.
+export async function adminOnlineController(req: Request, res: Response) {
+  if (!isAdmin(req)) {
+    res.status(401).json({ ok: false, message: "Nao autorizado." });
+    return;
+  }
+  const data = await montarPainelOnline();
+  res.status(200).json({ ok: true, data });
 }
 
 // GET /api/admin/feedback — lista os feedbacks (protegido pela senha do admin).
@@ -558,6 +571,58 @@ body.electron .titlebar{position:fixed;top:0;left:0;right:0;height:40px;z-index:
 .titlebar .ic-restore{display:none}
 body.win-max .titlebar .ic-max{display:none}
 body.win-max .titlebar .ic-restore{display:inline}
+/* ---- Aba Online -----------------------------------------------------------
+   Verde e dourado como texto nao passam contraste no tema claro: la usam um
+   tom mais escuro. As bolinhas de status ficam iguais nos dois temas. */
+html[data-theme=dark]{--on-ok:#1fa971;--on-old:#e0a93b;--on-maq:#9cc7ef}
+html[data-theme=light]{--on-ok:#137a50;--on-old:#8a5c00;--on-maq:#12578f}
+.on-status{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.on-erro{font-size:12.5px;color:var(--text);background:rgba(229,72,77,.1);border:1px solid rgba(229,72,77,.4);border-radius:9px;padding:9px 12px;margin-bottom:10px}
+.on-top{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:18px}
+.on-top>.panel{flex:1 1 340px;margin-bottom:0}
+.on-resumo{display:flex;align-items:center;gap:18px}
+.on-anel{flex:0 0 auto}
+.on-anel .trilho{stroke:var(--border)}.on-anel .arco{stroke:var(--accent)}
+.on-anel .n{fill:var(--text);font-size:30px;font-weight:700}.on-anel .de{fill:var(--muted);font-size:13px}
+.on-big{font-size:20px;font-weight:700}
+.on-sub{font-size:13px;color:var(--muted);margin-top:4px;line-height:1.6}
+.on-vers{display:flex;flex-direction:column;gap:9px}
+.on-ver{display:grid;grid-template-columns:72px minmax(0,1fr) 28px;gap:10px;align-items:center;font-size:12.5px}
+.on-ver .bar{height:10px;background:var(--border);border-radius:999px;overflow:hidden}
+.on-ver .bar i{display:block;height:100%;border-radius:999px}
+.on-ok{color:var(--on-ok)}.on-old{color:var(--on-old)}.on-nd{color:var(--muted)}
+.bg-ok{background:var(--accent)}.bg-old{background:var(--gold)}.bg-nd{background:var(--muted)}
+.on-alerta{background:rgba(224,169,59,.08);border:1px solid rgba(224,169,59,.35);border-radius:var(--radius);padding:14px 16px;margin-bottom:22px}
+.on-alerta.tudo-ok{background:var(--accent-soft);border-color:var(--border)}
+.on-alerta .tit{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;color:var(--on-old);margin-bottom:10px}
+.on-alerta.tudo-ok .tit{color:var(--on-ok);margin-bottom:0}
+.on-alerta .tit svg.lucide{width:17px;height:17px}
+.on-chips{display:flex;flex-wrap:wrap;gap:8px}
+.on-chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;background:var(--card);border:1px solid var(--border);border-radius:999px;padding:5px 12px}
+.on-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:#5b6880}
+.on-dot.online{background:#1fa971}.on-dot.saiu{background:#e0a93b}
+.on-sec{margin-bottom:26px}
+.on-sec-h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.on-sec-h h2{font-size:16px}
+.on-sec-h .n{font-size:12.5px;color:var(--muted)}
+.on-sec-h .bar{flex:0 1 160px;min-width:80px;height:6px;background:var(--border);border-radius:999px;overflow:hidden}
+.on-sec-h .bar i{display:block;height:100%;background:var(--accent)}
+.on-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.on-card{background:linear-gradient(180deg,var(--card-2),var(--card));border:1px solid var(--border);border-radius:12px;padding:12px;min-width:0}
+.on-card.fora{background:transparent;border-style:dashed}
+.on-card .cab{display:flex;align-items:center;gap:10px}
+.on-av{position:relative;flex:0 0 auto;width:38px;height:38px;border-radius:50%;background:var(--brand-2);color:#fff;display:grid;place-items:center;font-size:13px;font-weight:700}
+.on-card.fora .on-av{background:#2c3b52}
+.on-av .on-dot{position:absolute;right:-1px;bottom:-1px;width:12px;height:12px;border:2px solid var(--card)}
+.on-nome{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.on-linha{font-size:12px;color:var(--muted)}
+.on-linha.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:8px}
+.on-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.on-tag{font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:999px}
+.on-tag.ok{background:var(--accent-soft);color:var(--on-ok)}
+.on-tag.old{background:rgba(224,169,59,.14);color:var(--on-old)}
+.on-tag.nd{background:rgba(147,160,189,.14);color:var(--muted)}
+.on-tag.maq{background:rgba(18,87,143,.2);color:var(--on-maq)}
 </style>
 </head>
 <body>
@@ -607,6 +672,7 @@ body.win-max .titlebar .ic-restore{display:inline}
     <button data-v="custos" class="on"><i data-lucide="wallet"></i> Custos</button>
     <button data-v="feedback"><i data-lucide="message-square"></i> Feedback da IA</button>
     <button data-v="erros"><i data-lucide="triangle-alert"></i> Erros do app <span id="nav-erros-n" class="badge erro hidden">0</span></button>
+    <button data-v="online"><i data-lucide="wifi"></i> Online <span id="nav-online-n" class="badge hidden">0</span></button>
   </div>
 
   <div id="view-custos">
@@ -797,6 +863,21 @@ body.win-max .titlebar .ic-restore{display:inline}
   </div>
   </div><!-- /view-erros -->
 
+  <div id="view-online" class="hidden">
+    <div class="on-status">
+      <span class="pill" id="on-atualizado">Carregando…</span>
+      <button class="mini-btn" id="on-refresh" title="Atualizar agora"><i data-lucide="refresh-cw"></i> Atualizar</button>
+    </div>
+    <div id="on-avisos"></div>
+    <div class="on-top">
+      <div class="panel on-resumo" id="on-resumo"><span class="muted">Carregando…</span></div>
+      <div class="panel"><h3><i data-lucide="layers"></i> <span id="on-vers-tit">Versões de quem está online</span></h3><div class="on-vers" id="on-vers"></div></div>
+    </div>
+    <div id="on-alerta"></div>
+    <div id="on-setores"></div>
+    <div class="note"><b>Online</b> = app conectado ao aviso de ligações, mesmo minimizado na bandeja. <b>Versão</b> = a última que o app usou numa chamada ao servidor, anotada no máximo 1 vez por hora por pessoa (para poupar o Redis). Quem não tem conta Google só ganha versão quando usa o app (prévia, chamado, resumo). Setor vem do perfil de quem tem conta Google. Contorno tracejado = fora agora.</div>
+  </div><!-- /view-online -->
+
   <!-- Novidades do painel de custos (changelog proprio; aparece ao acessar) -->
   <div id="nov-overlay" class="nov-ov hidden">
     <div class="nov-card">
@@ -967,8 +1048,8 @@ document.getElementById("tema").onclick=function(){
   trocarTema(next);
 };
 
-// Abas: Custos x Feedback da IA x Erros do app
-var VIEWS=["custos","feedback","erros"];
+// Abas: Custos x Feedback da IA x Erros do app x Online
+var VIEWS=["custos","feedback","erros","online"];
 (function(){var nav=document.getElementById("nav-view");if(!nav)return;var btns=nav.querySelectorAll("button");
   for(var i=0;i<btns.length;i++){btns[i].onclick=function(){
     var v=this.getAttribute("data-v");
@@ -976,6 +1057,7 @@ var VIEWS=["custos","feedback","erros"];
     for(var k=0;k<VIEWS.length;k++){var el=document.getElementById("view-"+VIEWS[k]);if(el)el.classList.toggle("hidden",VIEWS[k]!==v);}
     if(v==="feedback")carregarFeedback();
     if(v==="erros")carregarErros();
+    if(v==="online")carregarOnline();
   };}})();
 
 var fmtBRL=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2,maximumFractionDigits:2});
@@ -1137,14 +1219,16 @@ async function carregar(){
   render();
   carregarFeedback();
   carregarErros(); // mantem o contador de erros da aba sempre atual
+  carregarOnline(); // idem, o numero de quem esta online na aba
   checarNovidadesPainel();
 }
 
 // ---- Novidades do painel de custos (changelog proprio, so deste painel) ----
 // Bump PAINEL_NOV_VER quando adicionar novidades -> reaparece 1x ao acessar.
-var PAINEL_NOV_VER="2026-11a";
+var PAINEL_NOV_VER="2026-11b";
 // ic = nome do icone no lucide (mesma biblioteca do app).
 var PAINEL_NOV=[
+  {ic:"wifi",tx:"Aba <b>Online</b>: quem está com o app aberto agora, separado por setor, com a <b>versão</b> de cada um e a lista de quem <b>precisa atualizar</b>. A versão começa a aparecer conforme cada pessoa usa o app."},
   {ic:"banknote",tx:"Os valores em <b>R$</b> agora usam o <b>câmbio de fechamento de cada dia</b>: quando o dólar mexe, os dias que já passaram não mudam mais. Hoje usa a cotação atual. O campo <b>Câmbio R$</b> vazio segue o câmbio de cada dia; com um valor, simula todos os dias com ele."},
   {ic:"bot",tx:"O resumo agora é feito pelo <b>Claude Haiku 5.5</b> (o Gemini fica de reserva). Novo cartão <b>Claude</b> com o <b>saldo estimado do mês</b> — a Anthropic não informa saldo, então é a franquia menos o gasto registrado aqui."},
   {ic:"file-text",tx:"Novos <b>Relatório completo</b> e <b>Relatório do período</b> (CSV) com todas as seções: resumo geral, por dia, por ramal, por fonte, por modelo e transcrição × resumo."},
@@ -1835,6 +1919,111 @@ document.getElementById("refresh").onclick=carregar;
   if(window.winCtl.estaMaximizada)window.winCtl.estaMaximizada().then(setMax);
   if(window.winCtl.onEstado)window.winCtl.onEstado(setMax);
 })();
+
+// ---- Aba Online: quem esta com o app aberto, por setor, e em qual versao ----
+// Os dados vem de /api/admin/online (Ably + versao anotada no Redis). Atualiza
+// a cada 1 min so com a aba aberta e a janela visivel: cada leitura custa 3
+// comandos do Redis.
+var ONLINE=null,onlineTimer=null;
+var ONLINE_MS=60000;
+var PESO_STATUS={online:0,saiu:1,offline:2};
+function onlineVisivel(){var v=document.getElementById("view-online");return !!v&&!v.classList.contains("hidden")&&!document.hidden;}
+async function carregarOnline(){
+  clearTimeout(onlineTimer);
+  var st=document.getElementById("on-atualizado");
+  try{
+    var r=await fetch("/api/admin/online",{headers:{Authorization:"Bearer "+senha()}});
+    if(!r.ok){ if(st)st.textContent="Falha ao carregar (HTTP "+r.status+")"; }
+    else{ var d=await r.json(); ONLINE=d&&d.data; renderOnline(); }
+  }catch(e){ if(st)st.textContent="Falha de rede ao carregar"; console.warn("[online]",e); }
+  onlineTimer=setTimeout(function(){if(onlineVisivel())carregarOnline();else onlineTimer=null;},ONLINE_MS);
+}
+document.addEventListener("visibilitychange",function(){if(onlineVisivel()&&!onlineTimer)carregarOnline();});
+(function(){var b=document.getElementById("on-refresh");if(b)b.onclick=carregarOnline;})();
+function escAttr(s){return escFb(s).replace(/"/g,"&quot;");}
+function horaBR(ms){try{return new Date(ms).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});}catch(e){return "";}}
+// "às 13:10" (hoje), "ontem às 17:52", "10/11 às 18:03"
+function quandoBR(ms){
+  if(!ms)return "";
+  var d=new Date(ms),h=new Date(),ontem=new Date(h.getFullYear(),h.getMonth(),h.getDate()-1);
+  if(d.toDateString()===h.toDateString())return "às "+horaBR(ms);
+  if(d.toDateString()===ontem.toDateString())return "ontem às "+horaBR(ms);
+  return d.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})+" às "+horaBR(ms);
+}
+function iniciais(nome){var p=String(nome||"").split(" ").filter(Boolean);return ((p[0]||"?").charAt(0)+(p[1]?p[1].charAt(0):"")).toUpperCase();}
+function cmpVer(a,b){var x=String(a).split("."),y=String(b).split(".");for(var i=0;i<Math.max(x.length,y.length);i++){var d=(Number(x[i])||0)-(Number(y[i])||0);if(d)return d;}return 0;}
+function tipoVer(v,nova){return !v?"nd":(!nova||cmpVer(v,nova)>=0)?"ok":"old";}
+function ordemPessoas(a,b){return (PESO_STATUS[a.status]-PESO_STATUS[b.status])||String(a.ramal||"~").localeCompare(String(b.ramal||"~"),"pt-BR",{numeric:true});}
+function renderOnline(){
+  var d=ONLINE;if(!d)return;
+  var nova=d.versaoMaisNova||"";
+  var ps=(d.pessoas||[]).slice().sort(ordemPessoas);
+  var on=ps.filter(function(p){return p.status==="online";});
+  var saiu=ps.filter(function(p){return p.status==="saiu";}).length;
+  var off=ps.filter(function(p){return p.status==="offline";}).length;
+  var nb=document.getElementById("nav-online-n");if(nb){nb.textContent=on.length;nb.classList.remove("hidden");}
+  var st=document.getElementById("on-atualizado");if(st)st.textContent="Atualizado às "+horaBR(d.geradoEm)+" · a cada 1 min";
+  var av=document.getElementById("on-avisos");if(av)av.innerHTML=(d.avisos||[]).map(function(a){return '<div class="on-erro">'+escFb(a)+'</div>';}).join("");
+
+  // Anel: quem esta online entre todos que ja apareceram
+  var total=ps.length,circ=2*Math.PI*50,arco=total?circ*on.length/total:0;
+  var maq=on.filter(function(p){return p.maquinas>1;}).length;
+  var res=document.getElementById("on-resumo");
+  if(res)res.innerHTML='<svg class="on-anel" role="img" aria-label="'+on.length+' de '+total+' online" width="104" height="104" viewBox="0 0 120 120">'
+    +'<circle class="trilho" cx="60" cy="60" r="50" fill="none" stroke-width="12"></circle>'
+    +(arco?'<circle class="arco" cx="60" cy="60" r="50" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="'+arco.toFixed(1)+' '+circ.toFixed(1)+'" transform="rotate(-90 60 60)"></circle>':'')
+    +'<text class="n" x="60" y="62" text-anchor="middle">'+on.length+'</text><text class="de" x="60" y="82" text-anchor="middle">de '+total+'</text></svg>'
+    +'<div><div class="on-big">'+(on.length===1?"1 pessoa online agora":on.length+" pessoas online agora")+'</div>'
+    +'<div class="on-sub">'+saiu+' saíram hoje · '+off+' offline'
+    +(maq?'<br>'+maq+(maq===1?' ramal aberto':' ramais abertos')+' em mais de uma máquina':'')+'</div></div>';
+
+  // Barras por versao (so de quem esta online)
+  var g={};on.forEach(function(p){var k=p.versao||"";g[k]=(g[k]||0)+1;});
+  var ks=Object.keys(g).sort(function(a,b){if(!a)return 1;if(!b)return -1;return cmpVer(b,a);});
+  var vt=document.getElementById("on-vers-tit");if(vt)vt.textContent="Versões de quem está online"+(nova?" · mais nova "+nova:"");
+  var vs=document.getElementById("on-vers");
+  if(vs)vs.innerHTML=ks.length?ks.map(function(k){
+    var t=tipoVer(k,nova),w=(g[k]/on.length*100).toFixed(1);
+    return '<div class="on-ver"><b class="on-'+t+'">'+escFb(k||"sem versão")+'</b><div class="bar"><i class="bg-'+t+'" style="width:'+w+'%"></i></div><span class="right">'+g[k]+'</span></div>';
+  }).join(""):'<div class="muted">Ninguém online agora.</div>';
+
+  // Quem precisa atualizar (online ou nao)
+  var desat=ps.filter(function(p){return tipoVer(p.versao,nova)==="old";});
+  var al=document.getElementById("on-alerta");
+  if(al)al.innerHTML=desat.length
+    ?'<div class="on-alerta"><div class="tit"><i data-lucide="triangle-alert"></i> '+(desat.length===1?"1 pessoa precisa atualizar":desat.length+" pessoas precisam atualizar")+'</div><div class="on-chips">'
+      +desat.map(function(p){return '<span class="on-chip"><span class="on-dot '+p.status+'"></span><b>'+escFb(p.nome)+'</b><span class="muted">'+escFb((p.ramal||"sem ramal")+" · "+p.versao)+'</span></span>';}).join("")+'</div></div>'
+    :(nova&&ps.some(function(p){return p.versao;})?'<div class="on-alerta tudo-ok"><div class="tit"><i data-lucide="circle-check"></i> Todo mundo com versão conhecida está na '+escFb(nova)+'</div></div>':'');
+
+  // Cartoes por setor (sem setor por ultimo)
+  var por={};ps.forEach(function(p){var s=p.setor||"";(por[s]=por[s]||[]).push(p);});
+  var setores=Object.keys(por).sort(function(a,b){if(!a)return 1;if(!b)return -1;return a.localeCompare(b,"pt-BR");});
+  var sc=document.getElementById("on-setores");
+  if(sc)sc.innerHTML=setores.length?setores.map(function(s){
+    var lista=por[s],n=lista.filter(function(p){return p.status==="online";}).length;
+    return '<section class="on-sec"><div class="on-sec-h"><h2>'+escFb(s||"Sem setor informado")+'</h2><span class="n">'+n+' de '+lista.length+' online</span>'
+      +'<div class="bar"><i style="width:'+Math.round(n/lista.length*100)+'%"></i></div></div>'
+      +'<div class="on-grid">'+lista.map(function(p){return cartaoOnline(p,nova);}).join("")+'</div></section>';
+  }).join(""):'<div class="panel muted">Ninguém apareceu ainda.</div>';
+  icones();
+}
+function cartaoOnline(p,nova){
+  var t=tipoVer(p.versao,nova);
+  var rot={online:"online",saiu:"saiu hoje",offline:"offline"}[p.status]||"";
+  var tempo=p.status==="online"?(p.abriuEm?"Abriu às "+horaBR(p.abriuEm):"Online agora")
+    :p.status==="saiu"?("Visto "+quandoBR(p.vistoEm||p.abriuEm)+(p.abriuEm?" · abriu às "+horaBR(p.abriuEm):""))
+    :(p.vistoEm?"Visto "+quandoBR(p.vistoEm):"Ainda sem versão anotada");
+  var contas=p.contas||[];
+  var conta=contas.length?contas[0]+(contas.length>1?" +"+(contas.length-1):""):"sem conta Google conhecida";
+  return '<div class="on-card'+(p.status==="online"?"":" fora")+'"><div class="cab">'
+    +'<div class="on-av">'+escFb(iniciais(p.nome))+'<span class="on-dot '+p.status+'"></span></div>'
+    +'<div style="min-width:0"><div class="on-nome" title="'+escAttr(p.nome)+'">'+escFb(p.nome)+'</div>'
+    +'<div class="on-linha">'+(p.ramal?"Ramal "+escFb(p.ramal)+" · ":"")+rot+'</div></div></div>'
+    +'<div class="on-tags"><span class="on-tag '+t+'">'+escFb(p.versao||"sem versão")+'</span>'
+    +(p.maquinas>1?'<span class="on-tag maq">'+p.maquinas+' máquinas</span>':'')+'</div>'
+    +'<div class="on-linha ell" title="'+escAttr(contas.join(", "))+'">'+escFb(conta)+'</div>'
+    +'<div class="on-linha">'+escFb(tempo)+'</div></div>';
+}
 
 icones(); // primeira passada: icones estaticos (topbar, abas, cards, botoes)
 if(senha())carregar();
