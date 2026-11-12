@@ -1,9 +1,13 @@
 import { test, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-// Ponta a ponta do piloto sem tocar em nada real: Redis (Upstash), Gmail e
-// Claude respondem por um fetch falso. O Redis falso guarda o estado em
-// memoria e responde no formato do Upstash (base64, como o cliente pede).
+// Ponta a ponta do piloto sem tocar em nada real. O estado da triagem fica
+// num banco em memoria no lugar do Supabase (usarBancoDeTeste); Redis
+// (Upstash, onde ainda moram o token do Gmail e o robozinho), Gmail e Claude
+// respondem por um fetch falso. O Redis falso responde no formato do Upstash
+// (base64, como o cliente pede).
+import type { BancoDaTriagem, UsoDaTriagem } from "./triagemBanco";
+import { usarBancoDeTeste } from "./triagemBanco";
 process.env.KV_REST_API_URL = "https://redis.teste";
 process.env.KV_REST_API_TOKEN = "teste";
 process.env.ANTHROPIC_API_KEY = "teste";
@@ -14,10 +18,97 @@ const DIA = 86_400_000;
 type Valor = string | Map<string, string> | Set<string> | string[];
 const db = new Map<string, Valor>();
 // Cada comando que chegou ao Redis falso, em ordem: o Upstash gratuito cobra
-// por comando, e o teste do orcamento da conferencia confere esta lista.
+// por comando, e o teste "conferencia sem nada novo" confere esta lista.
 let comandos: string[] = [];
 let chamadasIa = 0;
 let threads: Record<string, Array<{ id: string; de: string; quando: number; assunto: string; corpo: string; enviada?: boolean }>> = {};
+
+// O Supabase em memoria, com o mesmo comportamento que importa: o "feito" so
+// entra uma vez, a encerrada vence, os registros ficam na ordem de chegada.
+class BancoFalso implements BancoDaTriagem {
+  piloto = new Set<string>();
+  contas = new Map<string, { janela: number; vistas: string[]; dispensas: number }>();
+  sugestoes = new Map<string, Map<string, unknown>>();
+  feito = new Set<string>();
+  encerradas = new Map<string, number>();
+  registros: string[] = [];
+  uso = new Map<string, UsoDaTriagem>();
+  limpezas = 0;
+  private conta(c: string) {
+    return this.contas.get(c) || { janela: 0, vistas: [], dispensas: 0 };
+  }
+  private bandeja(c: string) {
+    const b = this.sugestoes.get(c) || new Map<string, unknown>();
+    this.sugestoes.set(c, b);
+    return b;
+  }
+  async estaNoPiloto(c: string) {
+    return this.piloto.has(c);
+  }
+  async listarPiloto() {
+    return [...this.piloto].sort();
+  }
+  async entrarNoPiloto(c: string) {
+    this.piloto.add(c);
+  }
+  async sairDoPiloto(c: string) {
+    this.piloto.delete(c);
+  }
+  async lerConta(c: string) {
+    const x = this.conta(c);
+    return { ...x, vistas: [...x.vistas] };
+  }
+  async gravarCursor(c: string, janela: number, vistas: string[]) {
+    this.contas.set(c, { ...this.conta(c), janela, vistas: [...vistas] });
+  }
+  async contarDispensa(c: string, zerar: boolean) {
+    const x = this.conta(c);
+    this.contas.set(c, { ...x, dispensas: zerar ? 0 : x.dispensas + 1 });
+  }
+  async lerBandeja(c: string) {
+    return [...this.bandeja(c).values()].map((d) => JSON.parse(JSON.stringify(d)));
+  }
+  async gravarSugestao(c: string, threadId: string, dados: object) {
+    this.bandeja(c).set(threadId, JSON.parse(JSON.stringify(dados)));
+  }
+  async tirarSugestao(c: string, threadId: string) {
+    return this.bandeja(c).delete(threadId);
+  }
+  async marcarFeito(c: string, messageId: string) {
+    const k = `${c}|${messageId}`;
+    if (this.feito.has(k)) return false;
+    this.feito.add(k);
+    return true;
+  }
+  async estaEncerrada(c: string, threadId: string) {
+    return (this.encerradas.get(`${c}|${threadId}`) || 0) > Date.now();
+  }
+  async encerrar(c: string, threadId: string, expiraEm: Date) {
+    this.encerradas.set(`${c}|${threadId}`, expiraEm.getTime());
+  }
+  async registrar(registro: string) {
+    this.registros.push(registro);
+  }
+  async somarUso(u: Omit<UsoDaTriagem, "chamadas">) {
+    const k = `${u.dia}|${u.modelo}|${u.op}`;
+    const a = this.uso.get(k) || { ...u, inputTokens: 0, outputTokens: 0, chamadas: 0 };
+    this.uso.set(k, {
+      ...a,
+      inputTokens: a.inputTokens + u.inputTokens,
+      outputTokens: a.outputTokens + u.outputTokens,
+      chamadas: a.chamadas + 1,
+    });
+  }
+  async lerUso() {
+    return [...this.uso.values()];
+  }
+  async limparVencidos() {
+    this.limpezas++;
+  }
+}
+let banco = new BancoFalso();
+// Os registros como a lista do Redis mostrava: o mais novo primeiro.
+const registros = () => banco.registros.map((l) => JSON.parse(l)).reverse();
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 const b64url = (s: string) => Buffer.from(s).toString("base64url");
@@ -175,6 +266,8 @@ before(() => {
 
 beforeEach(() => {
   db.clear();
+  banco = new BancoFalso();
+  usarBancoDeTeste(banco);
   comandos = [];
   chamadasIa = 0;
   db.set(`gmail:access:${CONTA}`, "token-de-teste");
@@ -190,7 +283,7 @@ async function piloto() {
   return import("./triagemPiloto");
 }
 
-const cursorGravado = () => JSON.parse(db.get(`triagem:cursor:${CONTA}`) as string);
+const cursorGravado = () => banco.contas.get(CONTA)!;
 
 test("fora do piloto a conta nao entra; entrar e sair mudam na hora", async () => {
   const p = await piloto();
@@ -200,16 +293,6 @@ test("fora do piloto a conta nao entra; entrar e sair mudam na hora", async () =
   assert.deepEqual(await p.listarPiloto(), [CONTA]);
   await p.sairDoPiloto(CONTA);
   assert.equal(await p.estaNoPiloto(CONTA), false);
-});
-
-test("a resposta do piloto fica na memoria: perguntar de novo nao gasta comando", async () => {
-  const p = await piloto();
-  await p.entrarNoPiloto(CONTA);
-  await p.estaNoPiloto(CONTA);
-  comandos = [];
-  assert.equal(await p.estaNoPiloto(CONTA), true);
-  assert.deepEqual(comandos, []);
-  await p.sairDoPiloto(CONTA);
 });
 
 test("conferencia sugere o pedido, registra tudo e paga a IA uma vez so", async () => {
@@ -224,7 +307,7 @@ test("conferencia sugere o pedido, registra tudo e paga a IA uma vez so", async 
     r.sugestoes.map((s) => [s.threadId, s.assunto, s.deEmail]),
     [["t1", "Ferias", "c@empresa.com.br"]],
   );
-  const lista = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l));
+  const lista = registros();
   assert.equal(lista.length, 2);
   assert.ok(lista.every((l) => l.tipo === "triagem" && l.trecho && l.versaoPrompt));
   assert.equal(lista.find((l) => l.threadId === "t1").sugerida, true);
@@ -233,12 +316,12 @@ test("conferencia sugere o pedido, registra tudo e paga a IA uma vez so", async 
   assert.deepEqual(cursorGravado().vistas, []);
   assert.equal(r.limiar, p.LIMIAR_PADRAO, "o limiar vem junto");
 
-  // Gasto: um registro so, na fonte "triagem" e sem ramal.
+  // Gasto: um registro so, no Supabase (o /admin soma), nada no uso:* do Redis.
   const dia = new Date().toISOString().slice(0, 10);
-  const porFonte = db.get(`uso:df:${dia}`) as Map<string, string>;
-  assert.equal(porFonte.get("triagem::claude-haiku-5-5::resumo::in"), "3000");
-  assert.equal(porFonte.get("triagem::claude-haiku-5-5::resumo::calls"), "1");
-  assert.equal(db.has(`uso:du:${dia}`), false, "sem ramal: fora do 'IA sem chamado'");
+  assert.deepEqual(await banco.lerUso(), [
+    { dia, modelo: "claude-haiku-5-5", op: "resumo", inputTokens: 3000, outputTokens: 140, chamadas: 1 },
+  ]);
+  assert.equal([...db.keys()].some((k) => k.startsWith("uso:")), false);
 
   // Segunda conferencia: nada novo na caixa, nada pago de novo.
   const r2 = await p.conferirCaixa(CONTA, { setor: "Suporte" });
@@ -253,9 +336,7 @@ test("'nao e chamado' tira a sugestao e vira rotulo; sem sugestao nao anota nada
   assert.equal(await p.registrarDesfecho(CONTA, "t1", "nao_e_chamado", "aviso_automatico"), true);
   assert.deepEqual(await p.listarSugestoes(CONTA), []);
   assert.equal(await p.registrarDesfecho(CONTA, "t1", "virou_chamado"), false);
-  const desfechos = (db.get(p.KEY_LISTA) as string[])
-    .map((l) => JSON.parse(l))
-    .filter((l) => l.tipo === "desfecho");
+  const desfechos = registros().filter((l) => l.tipo === "desfecho");
   assert.deepEqual(
     desfechos.map((d) => [d.threadId, d.desfecho, d.motivo]),
     [["t1", "nao_e_chamado", "aviso_automatico"]],
@@ -273,18 +354,17 @@ test("'nao e para mim' e 'ja virou chamado' tem desfecho proprio, fora do negati
 
   await p.conferirCaixa(CONTA);
   await p.registrarDesfecho(CONTA, "t1", p.desfechoDoMotivo("nao_e_para_mim")!, "nao_e_para_mim");
-  const ultima = JSON.parse((db.get(p.KEY_LISTA) as string[])[0]);
+  const ultima = registros()[0];
   assert.deepEqual([ultima.desfecho, ultima.motivo], ["nao_e_para_mim", "nao_e_para_mim"]);
 });
 
 test("sugestao sem acao por mais de 7 dias sai como 'ignorada'", async () => {
   const p = await piloto();
   await p.conferirCaixa(CONTA);
-  const h = db.get(`triagem:sug:${CONTA}`) as Map<string, string>;
-  const s = JSON.parse(h.get("t1") as string);
-  h.set("t1", JSON.stringify({ ...s, sugeridaEm: Date.now() - 8 * DIA }));
+  const [s] = (await banco.lerBandeja(CONTA)) as Array<Record<string, unknown>>;
+  await banco.gravarSugestao(CONTA, "t1", { ...s, sugeridaEm: Date.now() - 8 * DIA });
   assert.deepEqual(await p.listarSugestoes(CONTA), []);
-  const ultima = JSON.parse((db.get(p.KEY_LISTA) as string[])[0]);
+  const ultima = registros()[0];
   assert.deepEqual([ultima.tipo, ultima.threadId, ultima.desfecho], ["desfecho", "t1", "ignorada"]);
 });
 
@@ -310,18 +390,7 @@ test("mais de 10 conversas: a proxima conferencia continua de onde parou e so en
   assert.deepEqual(cursorGravado().vistas, [], "anotacao das vistas zerada");
 });
 
-test("cursor no formato antigo (so o numero) continua valendo", async () => {
-  const p = await piloto();
-  const antigo = Date.now() - 2 * 3600_000;
-  db.set(`triagem:cursor:${CONTA}`, String(antigo));
-  // Uma conversa de 3 h atras, antes do cursor: nao entra no gatilho.
-  threads.t1[0].quando = Date.now() - 3 * 3600_000;
-  const r = await p.conferirCaixa(CONTA);
-  assert.equal(r.triadas, 1, "so o boleto, que chegou depois do cursor");
-  assert.ok(cursorGravado().janela > antigo);
-});
-
-test("conferencia sem nada novo: 4 comandos do Redis", async () => {
+test("conferencia sem nada novo nao usa o Redis", async () => {
   const p = await piloto();
   // O boleto chegou ha 1 min: volta na proxima busca, pela sobreposicao.
   threads.t2[0].quando = Date.now() - 60_000;
@@ -333,10 +402,9 @@ test("conferencia sem nada novo: 4 comandos do Redis", async () => {
   comandos = [];
   const r = await p.conferirCaixa(CONTA);
   assert.equal(r.triadas, 0);
-  // Cursor + dispensas, a bandeja, o "feito" do boleto que voltou (para ali,
-  // sem perguntar se a conversa esta encerrada), e o cursor novo. O pedido
-  // esta na bandeja e nao le nada; o token do Gmail ficou na memoria.
-  assert.deepEqual(comandos, ["mget", "hgetall", "set", "set"]);
+  // O estado esta no Supabase; o token do Gmail e o robozinho ficaram na
+  // memoria. O Upstash gratuito cobra por comando: aqui tem que dar zero.
+  assert.deepEqual(comandos, []);
 });
 
 const responder = (threadId: string, corpo = "Resolvido, pode testar.") =>
@@ -352,7 +420,7 @@ test("resposta numa sugestao da bandeja marca 'respondeu' sem pagar a IA de novo
   const s = r.sugestoes.find((x) => x.threadId === "t1")!;
   assert.equal(s.respondeu, true);
   assert.ok(s.respondidaEm! > s.quando);
-  const ultima = JSON.parse((db.get(p.KEY_LISTA) as string[])[0]);
+  const ultima = registros()[0];
   assert.deepEqual([ultima.tipo, ultima.threadId], ["resposta", "t1"]);
 });
 
@@ -383,23 +451,20 @@ test("conversa encerrada ('nao e chamado') nao volta, nem com resposta nova", as
 
 test("aprende com quem dispensa: 5 'nao e chamado' sobem o limiar; 'nao e para mim' nao conta; virar chamado desce", async () => {
   const p = await piloto();
-  const semear = (id: string) => {
-    const h = (db.get(`triagem:sug:${CONTA}`) as Map<string, string>) || new Map<string, string>();
-    h.set(id, JSON.stringify({ threadId: id, messageId: id, assunto: "x", deNome: "", deEmail: "a@b.com", quando: Date.now(), motivo: "", categoria: "outro", confianca: 0.8, sugeridaEm: Date.now() }));
-    db.set(`triagem:sug:${CONTA}`, h);
-  };
+  const semear = (id: string) =>
+    banco.gravarSugestao(CONTA, id, { threadId: id, messageId: id, assunto: "x", deNome: "", deEmail: "a@b.com", quando: Date.now(), motivo: "", categoria: "outro", confianca: 0.8, sugeridaEm: Date.now() });
   assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO);
   for (let i = 1; i <= 4; i++) {
-    semear(`d${i}`);
+    await semear(`d${i}`);
     await p.registrarDesfecho(CONTA, `d${i}`, "nao_e_chamado", "aviso_automatico");
   }
-  semear("d5");
+  await semear("d5");
   await p.registrarDesfecho(CONTA, "d5", "nao_e_para_mim", "nao_e_para_mim");
   assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO, "4 dispensas + 'nao e para mim' ainda nao sobe");
-  semear("d6");
+  await semear("d6");
   await p.registrarDesfecho(CONTA, "d6", "nao_e_chamado", "outro");
   assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_QUEM_DISPENSA);
-  semear("d7");
+  await semear("d7");
   await p.registrarDesfecho(CONTA, "d7", "virou_chamado");
   assert.equal(await p.limiarDaPessoa(CONTA), p.LIMIAR_PADRAO, "abriu chamado de uma sugestao: volta");
 });
@@ -426,7 +491,7 @@ test("robozinho: abaixo do corte descarta sem chamar a IA e grava a nota", async
     const r = await p.conferirCaixa(CONTA);
     assert.equal(chamadasIa, 1, "so o pedido foi para a IA; o boleto foi descartado");
     assert.equal(r.filtradas, 1);
-    const lista = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l));
+    const lista = registros();
     const boleto = lista.find((l) => l.threadId === "t2");
     assert.equal(boleto.filtrado, true);
     assert.ok(boleto.notaModelo < 0.02);
@@ -448,7 +513,7 @@ test("robozinho: na auditoria o descartado vai para a IA mesmo assim, marcado", 
     const r = await p.conferirCaixa(CONTA);
     assert.equal(chamadasIa, 2);
     assert.equal(r.filtradas, 0);
-    const boleto = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l)).find((l) => l.threadId === "t2");
+    const boleto = registros().find((l) => l.threadId === "t2");
     assert.equal(boleto.auditoria, true);
     assert.equal(boleto.decisao, "nao");
     assert.ok(boleto.notaModelo < 0.02);
@@ -463,7 +528,7 @@ test("robozinho: sem modelo no Redis, tudo vai para a IA como antes", async () =
   const r = await p.conferirCaixa(CONTA);
   assert.equal(chamadasIa, 2);
   assert.equal(r.filtradas, 0);
-  const t2 = (db.get(p.KEY_LISTA) as string[]).map((l) => JSON.parse(l)).find((l) => l.threadId === "t2");
+  const t2 = registros().find((l) => l.threadId === "t2");
   assert.equal(t2.notaModelo, undefined);
 });
 
