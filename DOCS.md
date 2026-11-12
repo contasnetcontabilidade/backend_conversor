@@ -221,6 +221,19 @@ src/
 | ------- | -------------- | --------------------------------------------------------------------------------------------------- |
 | `GET` | `/admin`     | Painel HTML autossuficiente de custos de IA (login próprio, gráficos).*(isento de auth de app)* |
 | `GET` | `/admin/uso` | Relatório JSON de uso/custo; exige`Authorization: Bearer <ADMIN_PASSWORD>`. *(isento)*         |
+| `GET` | `/admin/online` | Aba "Online": quem está com o app aberto, em qual versão e de qual setor; mesma senha. *(isento)* |
+
+### Aba "Online" do `/admin` (`appOnline.ts`)
+
+Mostra quem está com o app aberto agora, separado por setor, com a versão de cada um e a lista de quem precisa atualizar. **Não depende de versão nova do app.**
+
+- **Online** = ocupação do canal `ramal:<ramal>` no Ably (`ramaisConectados`, uma chamada só à API REST v2 com `by=value`). Todo app aberto, até minimizado na bandeja, assina o canal do ramal; o número de assinantes é o de máquinas. Quem não configurou ramal não conecta no Ably e não aparece como online.
+- **Versão** = o Electron põe `<nome-do-app>/<versão>` no `User-Agent` de toda chamada feita pela **tela** do app. As do processo principal (vínculo, foto, token do Ably) saem como `node` e não servem. A versão é anotada em dois pontos:
+  - middleware `versaoApp`: chamadas com `ramal` no corpo JSON ou na query (prévia, criar chamado, resumo, feedback);
+  - conferência das Sugestões (`/gmail/triagem/conferir`): roda sozinha ~20 s depois de o app abrir, para todo mundo com conta Google, e traz o setor. O ramal da conta vem do vínculo (`ramalDaConta`).
+- **Versão mais nova** = o `RELEASES` do release `latest` no GitHub, o mesmo arquivo que o app lê para se atualizar (cache de 10 min). Se o GitHub não responder, vale a maior versão vista, e a aba avisa.
+- **Redis** (o gratuito já está apertado): `online:visto` (HASH `r:<ramal>`/`c:<conta>` → `{v, t, r?, s?}`) é gravado **no máximo 1 vez por hora por pessoa** por instância (versão ou setor novos gravam na hora), mais `online:abriu:<dia>` (HSETNX, 1 vez por dia, TTL de 3 dias). Por isso a "última atividade" tem precisão de 1 h. Cada leitura do painel custa 3 comandos (os dois HASHes + `uso:ramais`); a aba atualiza a cada 1 min, só aberta e visível.
+- **Status:** `online` (Ably), `saiu` (fora agora, mas usou o app hoje) e `offline`. O que não deu para ler (Ably, Redis, GitHub) volta em `avisos` e aparece na aba.
 
 ### Formato de resposta
 
@@ -245,6 +258,7 @@ src/
 
 - A **root key `ABLY_API_KEY` fica só no backend**. Ele publica o evento `call-ended` no canal `ramal:<ramal>`.
 - O desktop **nunca** recebe a root key: ele pede um **token temporário escopado** em `GET /goto/ably-token?ramal=<ramal>` (capability só de `subscribe` no próprio canal). Se `ABLY_API_KEY` estiver vazia, o push em tempo real é desligado.
+- A root key também lê a **ocupação dos canais** (quantas conexões em cada `ramal:<ramal>`): é o "online" da aba Online do `/admin`.
 
 ### Upstash Redis / Vercel KV (storage)
 
