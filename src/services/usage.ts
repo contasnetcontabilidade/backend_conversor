@@ -1,5 +1,7 @@
 import { Redis } from "@upstash/redis";
 import { getErrorMessage } from "../lib/errors";
+import { registrarErro } from "./erros";
+import { bancoDaTriagem } from "./triagemBanco";
 
 // Contagem de tokens da IA (Gemini) para o painel de custos.
 // Guarda no Upstash: um SET de dias + um HASH por dia com os totais por
@@ -415,6 +417,8 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
     for (const it of doDiaFonte.values()) porFonte.push(it);
   }
 
+  await somarGastoDaTriagem(agg, porDia, porDiaModelo, porFonte);
+
   return {
     linhas: Array.from(agg.values()),
     porDia,
@@ -423,4 +427,63 @@ export async function getRelatorioUso(): Promise<RelatorioUso> {
     porFonte,
     configurado: true,
   };
+}
+
+// A triagem de e-mail grava o gasto no Supabase desde 12/11/2026
+// (triagemPiloto.ts): no uso:* do Redis eram 6 comandos por conferencia, e o
+// gratuito do Upstash nao aguentaria todo mundo no piloto. O que ela gravou
+// antes continua no Redis e ja entrou acima; cada conferencia grava num lugar
+// so, entao somar nao conta duas vezes. Entra no total, por dia, por modelo e
+// na fonte "triagem" (sem ramal, como antes).
+async function somarGastoDaTriagem(
+  agg: Map<string, UsoLinha>,
+  porDia: UsoPorDia[],
+  porDiaModelo: UsoPorDiaModelo[],
+  porFonte: UsoPorFonte[],
+): Promise<void> {
+  let usos;
+  try {
+    usos = await bancoDaTriagem().lerUso();
+  } catch (error) {
+    // O resto do custo continua no painel, mas sem a triagem o total sai a
+    // menos: fica no log e no /admin/erros.
+    const mensagem = `gasto da triagem fora do painel de custos: ${getErrorMessage(error)}`;
+    console.error(`[usage] ${mensagem}`);
+    await registrarErro({
+      ts: new Date().toISOString(),
+      origem: "backend",
+      tipo: "erro",
+      mensagem,
+      contexto: "admin:uso",
+    }).catch((e) => console.error("[usage] nem o registro do erro foi:", getErrorMessage(e)));
+    return;
+  }
+  const zerado = { inputTokens: 0, outputTokens: 0, calls: 0, audioSec: 0 };
+  for (const u of usos) {
+    const op = u.op as Operacao;
+    const somar = (alvo: { inputTokens: number; outputTokens: number; calls: number }) => {
+      alvo.inputTokens += u.inputTokens;
+      alvo.outputTokens += u.outputTokens;
+      alvo.calls += u.chamadas;
+    };
+    const chave = `${u.modelo}::${op}`;
+    const linha = agg.get(chave) || { model: u.modelo, op, ...zerado };
+    somar(linha);
+    agg.set(chave, linha);
+
+    let dia = porDia.find((d) => d.dia === u.dia);
+    if (!dia) porDia.push((dia = { dia: u.dia, ...zerado }));
+    somar(dia);
+
+    let dm = porDiaModelo.find((d) => d.dia === u.dia && d.model === u.modelo && d.op === op);
+    if (!dm) porDiaModelo.push((dm = { dia: u.dia, model: u.modelo, op, ...zerado }));
+    somar(dm);
+
+    let df = porFonte.find(
+      (d) => d.dia === u.dia && d.fonte === "triagem" && d.model === u.modelo && d.op === op,
+    );
+    if (!df) porFonte.push((df = { dia: u.dia, fonte: "triagem", model: u.modelo, op, ...zerado }));
+    somar(df);
+  }
+  porDia.sort((a, b) => a.dia.localeCompare(b.dia));
 }
