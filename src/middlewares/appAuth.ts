@@ -18,7 +18,8 @@ function isExempt(path: string): boolean {
 
     path === "/admin" || // pagina do painel (login proprio)
     path === "/admin/uso" || // protegida por senha (Authorization Bearer)
-    path === "/admin/feedback" // idem (senha do admin no navegador)
+    path === "/admin/feedback" || // idem (senha do admin no navegador)
+    path === "/admin/online" // idem
   );
 }
 
