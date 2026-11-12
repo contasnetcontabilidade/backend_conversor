@@ -1,6 +1,6 @@
 // O "robozinho" da triagem mora no Redis (triagem:modelo), nao no codigo: o
-// repositorio e publico. Este script sobe, mostra ou tira o modelo. Vale na
-// conferencia seguinte (cache de ate 10 min em cada instancia da Vercel).
+// repositorio e publico. Este script sobe, mostra ou tira o modelo. Vale em
+// ate 6 h (o cache de cada instancia da Vercel, triagemModelo.ts).
 //
 // Uso (na pasta do backend):
 //   ENV_FILE=../.env npx tsx scripts/triagem-modelo.ts ver
