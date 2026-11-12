@@ -592,6 +592,8 @@ Hoje, no volume atual, quase tudo cabe na **faixa gratuita**. A tabela abaixo mo
 | `UPSTASH_REDIS_REST_TOKEN` 🔒 | Token REST do Redis.                                        | Idem.                                           |
 | `KV_REST_API_URL`             | Alias da integração KV da Vercel (fallback da URL acima). | Opc.                                            |
 | `KV_REST_API_TOKEN` 🔒        | Alias da integração KV da Vercel (fallback do token).     | Opc.                                            |
+| `SUPABASE_URL`                | URL do projeto Supabase da triagem de e-mails (`https://<id>.supabase.co`). | Obrig. para a triagem.            |
+| `SUPABASE_SECRET_KEY` 🔒      | Chave secreta (`sb_secret_...`): lê e grava tudo no banco, só no backend.   | Idem.                             |
 
 > Se **nenhum** estiver setado, o backend usa memória volátil: **não persiste** entre invocações serverless (quebra persistência, não a inicialização).
 
@@ -972,10 +974,10 @@ a pessoa, pela revisão de sempre.
   versão nova do app.
 
 ### Quem participa
-Só as contas do SET `triagem:piloto` no Redis. Fora dele a rota responde
+Só as contas da tabela `triagem_piloto` (Supabase). Fora dela a rota responde
 `{ ativo: false }` sem ler a caixa nem gastar IA, e o app esconde a seção (e só
-pergunta de novo a cada 6 h). A resposta fica 30 min na memória da função, então
-sair vale em até 30 min (entrar, na próxima pergunta do app). Para mudar, sem deploy:
+pergunta de novo a cada 6 h, ou ao abrir). Entrar e sair valem na próxima
+pergunta do app. Para mudar, sem deploy:
 
 ```bash
 ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts listar
@@ -993,29 +995,38 @@ As duas aceitam só o `profileToken`, como a foto: a resposta tem assunto e
 remetente da caixa de alguém.
 
 ### Dados e custo
-- `triagem:list` (LPUSH) recebe cada triagem (assunto, domínio do remetente,
-  **trecho**, decisão, confiança, motivo, versão do prompt) e cada desfecho. A
+- **Onde mora: no Supabase** (Postgres, plano gratuito), desde 12/11/2026. Até ali era
+  o Redis, e o Upstash gratuito (~500 mil comandos por mês) não aguentaria todo mundo
+  no piloto: eram ~8 mil comandos por pessoa por mês. No Supabase o limite é de espaço
+  (500 MB) e tráfego (5 GB/mês), não de comando. Tabelas em `supabase/triagem.sql`
+  (rodar no SQL Editor); acesso só pelo backend, com `SUPABASE_URL` e
+  `SUPABASE_SECRET_KEY` (`triagemBanco.ts`, chamadas REST diretas). O RLS fica ligado e
+  sem política: a chave publicável não lê nada.
+- `triagem_registro` recebe cada triagem (assunto, domínio do remetente, **trecho**,
+  decisão, confiança, motivo, versão do prompt) e cada desfecho, como texto JSON. A
   `copia-analise` leva para a tabela `triagem` do DuckDB a cada 2 h e **apaga do
-  Redis o que já copiou** (fica só o registro mais novo, de marcador). O backend
-  só grava nessa lista, nunca lê. Guardar o trecho por tempo indeterminado foi
-  decisão do dono (09 e 10/11/2026); quem guarda é o DuckDB.
-- Chaves auxiliares: `triagem:sug:<conta>` (sugestões pendentes),
-  `triagem:cursor:<conta>` (JSON `{ janela, vistas }`: onde a próxima busca começa e
-  as conversas já vistas da janela, quando havia mais de 10) e
-  `triagem:feito:<conta>:<messageId>` (30 dias, para não pagar IA duas vezes; é ele
-  que impede duas conferências juntas, app aberto em 2 PCs, de pagar a IA duas
-  vezes). A `triagem:trava:<conta>` e a `triagem:vistas:<conta>` saíram em 11/11/2026.
-- **Comandos do Redis** (o Upstash gratuito dá ~500 mil por mês; eram ~12 por
-  conferência até 11/11/2026): uma conferência sem nada novo gasta 3 (cursor +
-  dispensas, bandeja, cursor novo; o teste "conferencia sem nada novo" fixa isso),
-  mais 1 do token do Gmail e até 2 do `profileToken` e do piloto, quando a função da
-  Vercel não os tem na memória (12 h e 30 min; o token do Gmail, 55 s, só poupa
-  dentro da mesma conferência). Cada e-mail
-  novo soma ~3 (feito, encerrada, registro), e a conferência que chamou a IA soma 6
-  do registro de uso.
+  Supabase o que já copiou** (fica só o registro mais novo, de marcador). O backend
+  só grava nela, nunca lê. Guardar o trecho por tempo indeterminado foi decisão do
+  dono (09 e 10/11/2026); quem guarda é o DuckDB.
+- Tabelas auxiliares: `triagem_sugestao` (sugestões pendentes), `triagem_conta`
+  (`janela_ms` + `vistas`: onde a próxima busca começa e as conversas já vistas da
+  janela, quando havia mais de 10; e `dispensas`, o limiar da pessoa),
+  `triagem_feito` (30 dias, para não pagar IA duas vezes: o insert que não entra é o
+  que impede duas conferências juntas, app aberto em 2 PCs, de pagar a IA duas vezes)
+  e `triagem_encerrada` (30 dias). Os vencidos saem na primeira conferência do dia de
+  cada instância.
+- **Redis numa conferência:** zero, com o token do Gmail (55 s) e o robozinho (6 h) na
+  memória da função; o teste "conferencia sem nada novo" fixa isso. Sem eles, 1 de
+  cada. O `profileToken` → conta continua no Redis (12 h na memória).
+- **Troca de 12/11/2026:** `scripts/triagem-para-supabase.ts` levou o estado (piloto,
+  cursores, dispensas, bandejas, "feito", encerradas e o que restava da
+  `triagem:list`). Rodar com `--simular` antes. As chaves `triagem:*` antigas do Redis
+  ficaram (o `triagem:modelo` continua em uso).
 - **Custo:** ~1.530 tokens de entrada e ~70 de saída por triagem, US$ 0,0002 (Fase 0).
-  Fica no painel na fonte **"Triagem de e-mail"**, num registro por conferência
-  e **sem ramal**: com ramal, entraria no "IA sem chamado".
+  Vai para a tabela `triagem_uso` (um registro por conferência) e o `/admin` soma com o
+  `uso:*` do Redis (`usage.ts`): fonte **"Triagem de e-mail"**, **sem ramal** (com
+  ramal, entraria no "IA sem chamado"). Se o Supabase falhar, o painel sai sem a
+  triagem e o motivo vai para o `/admin/erros`.
 
 ### Fase 0 (medição no histórico)
 `scripts/triagem-fase0.ts` roda a triagem nas caixas desde uma data e compara com os
@@ -1028,12 +1039,15 @@ para a rodada ao chegar no valor.
 ### Robozinho: filtro com auditoria (desde 11/11/2026)
 Um modelo pequeno (`triagemModelo.ts`: regressão logística sobre TF-IDF de palavras
 genéricas) imita a decisão da IA e dá a nota de cada e-mail **antes** de chamá-la.
-- Nota abaixo do corte (0,02): o e-mail é descartado sem IA (`filtrado: true` na
-  `triagem:list`). **1 em cada 10 desses vai para a IA mesmo assim** (`auditoria: true`):
+- Nota abaixo do corte (0,02): o e-mail é descartado sem IA (`filtrado: true` no
+  `triagem_registro`). **1 em cada 10 desses vai para a IA mesmo assim** (`auditoria: true`):
   é o que mede o erro do robozinho em produção. Taxa em `TRIAGEM_AUDITORIA` (padrão 0,1).
 - Todo registro leva `notaModelo` e `versaoModelo`.
 - **O modelo mora no Redis (`triagem:modelo`), não no código:** este repositório é
   público e o vocabulário, mesmo genérico, tem sobrenomes. Sem modelo, nada é filtrado.
+  Não foi para o Supabase com o resto: são 176 KB, e baixado a cada conferência
+  gastaria o tráfego gratuito de lá. Fica 6 h na memória da função (trocar o modelo
+  vale em até 6 h).
   `scripts/triagem-modelo.ts ver | subir <modelo.json> | tirar` (tirar = desligar já).
 - Treino em Python (scikit-learn): `ml/exportar.py` do repositório privado `copia-analise` (Desktop/Database), com os e-mails da Fase 0 fora do git. A conta do
   backend é a mesma do Python: o teste sintético (`triagemModelo.test.ts`) confere até
