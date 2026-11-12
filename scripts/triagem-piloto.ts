@@ -1,6 +1,7 @@
-// Quem participa do piloto da triagem de e-mails (SET triagem:piloto no
-// Redis, ver src/services/triagemPiloto.ts). Muda na hora, sem deploy: na
+// Quem participa do piloto da triagem de e-mails (tabela triagem_piloto no
+// Supabase, ver src/services/triagemPiloto.ts). Muda na hora, sem deploy: na
 // proxima conferencia o app da pessoa mostra (ou esconde) os "Sugeridos".
+// Precisa de SUPABASE_URL e SUPABASE_SECRET_KEY no .env.
 //
 // Uso (na pasta do backend):
 //   ENV_FILE=../.env npx tsx scripts/triagem-piloto.ts listar
