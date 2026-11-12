@@ -241,6 +241,19 @@ export interface RelatorioUso {
   configurado: boolean;
 }
 
+// Ramal -> nome do usuario, como o app manda junto do uso de IA. A aba
+// "Online" do /admin usa para dar nome a quem esta conectado. 1 comando.
+export async function lerNomesDosRamais(): Promise<Record<string, string>> {
+  const r = getRedis();
+  if (!r) return {};
+  const hash = (await r.hgetall<Record<string, unknown>>(KEY_RAMAIS)) || {};
+  const nomes: Record<string, string> = {};
+  for (const [ramal, nome] of Object.entries(hash)) {
+    if (nome != null && String(nome).trim()) nomes[ramal] = String(nome).trim();
+  }
+  return nomes;
+}
+
 // Le e agrega todo o uso registrado.
 export async function getRelatorioUso(): Promise<RelatorioUso> {
   const r = getRedis();
