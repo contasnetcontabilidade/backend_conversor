@@ -377,3 +377,97 @@ export async function previaApresentacao(bytes: Buffer): Promise<PreviaAnexo> {
 
   return { tipo: "slides", slides, imagens, imagensOmitidas: omitidas };
 }
+
+// --- Miniatura na conversa do Chat ------------------------------------------
+
+// Como a tela desenha cada anexo: o mesmo criterio do revTipoAnexo do app, para
+// a rota e a tela concordarem. Imagem so nos tipos que o navegador desenha e
+// que nao carregam script (SVG e documento, nao foto).
+export type TipoVisualizacao =
+  | "imagem"
+  | "pdf"
+  | "video"
+  | "planilha"
+  | "word"
+  | "slides"
+  | "texto"
+  | "";
+const MIME_IMAGEM_SEGURA = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+]);
+export function tipoVisualizacao(mime: string, nome: string): TipoVisualizacao {
+  const m = String(mime || "").toLowerCase();
+  const ext = String(nome || "")
+    .toLowerCase()
+    .replace(/^.*\./, "");
+  if (m.startsWith("image/")) return MIME_IMAGEM_SEGURA.has(m) ? "imagem" : "";
+  if (m === "application/pdf" || ext === "pdf") return "pdf";
+  if (m.startsWith("video/") || ["mp4", "webm", "ogv"].includes(ext)) return "video";
+  // Antes do text/: CSV chega como text/plain, mas e tabela.
+  const conversao = tipoConversao(m, nome);
+  if (conversao === "planilha" || conversao === "csv") return "planilha";
+  if (conversao === "documento") return "word";
+  if (conversao === "apresentacao") return "slides";
+  if (m.startsWith("text/") || ["xml", "txt", "json", "log"].includes(ext)) return "texto";
+  return "";
+}
+
+// Tetos da miniatura: so o bastante para reconhecer o arquivo sem abrir. A
+// previa inteira de um .docx escaneado passa de 10 MB de imagem; a miniatura
+// leva no maximo uma, pequena.
+const MINI_LINHAS = 6;
+const MINI_COLUNAS = 5;
+const MINI_CELULA = 40;
+const MINI_TEXTO = 600;
+const MINI_LINHAS_SLIDE = 6;
+const MINI_IMAGEM_BYTES = 300 * 1024;
+
+export type MiniaturaAnexo =
+  | { tipo: "tabela"; linhas: string[][]; totalLinhas: number; abas: number }
+  | { tipo: "documento"; texto: string; imagem?: ImagemPrevia }
+  | { tipo: "slides"; total: number; linhas: string[]; imagem?: ImagemPrevia }
+  | { tipo: "texto"; texto: string };
+
+// Imagem so quando nao ha texto (documento escaneado, deck de imagens): num
+// arquivo com texto ela seria o logo do cabecalho.
+function imagemPequena(imagens: ImagemPrevia[]): ImagemPrevia | undefined {
+  // base64 tem ~4/3 do tamanho original.
+  return imagens.find((i) => (i.base64.length * 3) / 4 <= MINI_IMAGEM_BYTES);
+}
+
+export function miniaturaDaPrevia(p: PreviaAnexo): MiniaturaAnexo {
+  if (p.tipo === "tabela") {
+    return {
+      tipo: "tabela",
+      linhas: p.linhas
+        .slice(0, MINI_LINHAS)
+        .map((l) => l.slice(0, MINI_COLUNAS).map((c) => String(c ?? "").slice(0, MINI_CELULA))),
+      totalLinhas: p.totalLinhas,
+      abas: p.abas.length,
+    };
+  }
+  if (p.tipo === "documento") {
+    const texto = p.texto.slice(0, MINI_TEXTO);
+    if (texto) return { tipo: "documento", texto };
+    const imagem = imagemPequena(p.imagens);
+    return imagem ? { tipo: "documento", texto: "", imagem } : { tipo: "documento", texto: "" };
+  }
+  const primeiro = p.slides.find((s) => s.linhas.length);
+  const linhas = (primeiro?.linhas || [])
+    .slice(0, MINI_LINHAS_SLIDE)
+    .map((l) => l.slice(0, 120));
+  const base = { tipo: "slides" as const, total: p.slides.length, linhas };
+  if (linhas.length) return base;
+  const imagem = imagemPequena(p.imagens);
+  return imagem ? { ...base, imagem } : base;
+}
+
+// .txt, .xml, .json e .log: o comeco do arquivo, com a mesma regra de
+// codificacao do CSV (NF-e antiga e log de sistema vem em Latin-1).
+export function miniaturaDeTexto(bytes: Buffer): MiniaturaAnexo {
+  return { tipo: "texto", texto: textoDoCsv(bytes).slice(0, MINI_TEXTO) };
+}
