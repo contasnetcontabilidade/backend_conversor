@@ -5,12 +5,16 @@ import { ramaisConectados } from "./ably";
 import { lerNomesDosRamais } from "./usage";
 
 // Aba "Online" do /admin: quem esta com o app aberto agora, em qual versao e
-// desde quando. Tudo do lado do backend, sem versao nova do app.
+// desde quando.
 //
 // - Online: ocupacao dos canais do Ably (ver ramaisConectados).
-// - Versao: o Electron poe "<nome-do-app>/<versao>" no User-Agent de toda
-//   chamada feita pela TELA do app. As do processo principal (vinculo, foto,
-//   token do Ably) saem como "node" e nao servem. A ultima versao vista e
+// - Versao: desde a 1.9.5 o proprio app manda versao, setor e nome do PC no
+//   pedido de token do Ably, que sai ao abrir e a cada renovacao do token.
+//   Fica no registro "a:<ramal>", separado do "r:<ramal>" de baixo: a anotacao
+//   pelo User-Agent nao traz setor nem PC, e sobrescreveria os dois.
+// - Versoes anteriores: o Electron poe "<nome-do-app>/<versao>" no User-Agent
+//   de toda chamada feita pela TELA do app. As do processo principal (vinculo,
+//   foto, token do Ably) saem como "node" e nao servem. A ultima versao vista e
 //   anotada em dois pontos: nas chamadas com ramal (previa, criar, resumo,
 //   feedback; middleware versaoApp) e na conferencia das Sugestoes, que traz a
 //   conta Google e o setor e roda sozinha ~20 s depois de o app abrir.
@@ -29,7 +33,7 @@ function getRedis(): Redis | null {
   return redis;
 }
 
-const KEY_VISTO = "online:visto"; // HASH  r:<ramal> | c:<conta> -> Visto (JSON)
+const KEY_VISTO = "online:visto"; // HASH  a:<ramal> | r:<ramal> | c:<conta> -> Visto (JSON)
 const keyAbriu = (dia: string) => `online:abriu:${dia}`; // HASH campo -> ms da 1a chamada do dia
 const ABRIU_TTL_SEG = 3 * 24 * 3600; // o painel so le o dia de hoje
 export const REGRAVAR_MS = 60 * 60_000;
@@ -40,7 +44,8 @@ export interface Visto {
   v: string; // versao do app
   t: number; // ms da gravacao (precisao de REGRAVAR_MS)
   r?: string; // ramal (so nos registros por conta; vem do vinculo do app)
-  s?: string; // setor do perfil (so nos registros por conta)
+  s?: string; // setor do perfil (registros por conta e "a:")
+  pc?: string; // nome do PC (so nos registros "a:")
 }
 
 // "... (KHTML, like Gecko) conversor-wav-txt-desktop/1.9.4 Chrome/134.0.6998.205 Electron/35.1.2 Safari/537.36"
@@ -48,6 +53,16 @@ const RE_VERSAO_UA = /\s[^\s/]+\/(\d+\.\d+\.\d+)\s+Chrome\/[\d.]+\s+Electron\/[\
 export function versaoDoUserAgent(ua: unknown): string {
   const m = RE_VERSAO_UA.exec(String(ua || ""));
   return m ? m[1] : "";
+}
+
+// Versao e nome do PC que o app manda no pedido de token do Ably. Vem de fora
+// e vai para o Redis e para o HTML do painel: so passa o formato esperado.
+export function versaoValida(v: unknown): string {
+  const s = String(v || "").trim();
+  return /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(s) ? s : "";
+}
+export function pcValido(pc: unknown): string {
+  return String(pc || "").trim().replace(/[^\w.-]/g, "").slice(0, 40);
 }
 
 export function compararVersoes(a: string, b: string): number {
@@ -79,6 +94,7 @@ export function diaLocal(ms: number): string {
 export interface Anotado {
   v: string;
   s: string;
+  pc?: string;
   t: number;
   dia: string;
 }
@@ -86,18 +102,24 @@ const anotados = new Map<string, Anotado>();
 const ramalDaContaMem = new Map<string, { ramal: string; em: number }>();
 let diaComTtl = ""; // ultimo dia em que esta instancia ja pos o EXPIRE no abriu
 
-// O que precisa ir para o Redis agora. Versao ou setor novos gravam na hora;
-// o resto espera REGRAVAR_MS. O "abriu" vai 1x por dia (HSETNX: a primeira
-// instancia do dia e quem vale).
+// O que precisa ir para o Redis agora. Versao, setor ou PC novos gravam na
+// hora; o resto espera REGRAVAR_MS. O "abriu" vai 1x por dia (HSETNX: a
+// primeira instancia do dia e quem vale).
 export function oQueGravar(
   antes: Anotado | undefined,
   v: string,
   s: string,
   agora: number,
+  pc = "",
 ): { visto: boolean; abriu: boolean; dia: string } {
   const dia = diaLocal(agora);
   return {
-    visto: !antes || antes.v !== v || antes.s !== s || agora - antes.t >= REGRAVAR_MS,
+    visto:
+      !antes ||
+      antes.v !== v ||
+      antes.s !== s ||
+      (antes.pc || "") !== pc ||
+      agora - antes.t >= REGRAVAR_MS,
     abriu: !antes || antes.dia !== dia,
     dia,
   };
@@ -108,6 +130,9 @@ export interface RegistroVisto {
   ramal?: string; // chamadas que trazem o ramal no corpo ou na query
   conta?: string; // conferencia das Sugestoes (conta Google)
   setor?: string;
+  // Pedido de token do Ably (app 1.9.5+): versao e PC vem do proprio app, nao
+  // do User-Agent, e o registro e o "a:<ramal>".
+  ably?: { versao?: unknown; pc?: unknown };
   // Vinculo conta -> ramal que o app grava ao abrir. So e chamado quando ha o
   // que gravar, e o resultado fica 12 h na memoria (1 GET a menos no Redis).
   ramalDaConta?: () => Promise<string>;
@@ -118,26 +143,36 @@ const memVisto = new Map<string, Visto>();
 const memAbriu = new Map<string, number>(); // `${dia}|${campo}`
 
 export async function registrarVistoApp(p: RegistroVisto): Promise<void> {
-  const v = versaoDoUserAgent(p.userAgent);
-  const conta = String(p.conta || "").trim().toLowerCase();
+  const ably = p.ably;
+  const v = ably ? versaoValida(ably.versao) : versaoDoUserAgent(p.userAgent);
+  const conta = ably ? "" : String(p.conta || "").trim().toLowerCase();
   const ramal = String(p.ramal || "").trim();
-  const campo = conta ? `c:${conta}` : RE_RAMAL.test(ramal) ? `r:${ramal}` : "";
+  const campo = conta
+    ? `c:${conta}`
+    : RE_RAMAL.test(ramal)
+      ? `${ably ? "a" : "r"}:${ramal}`
+      : "";
   if (!v || !campo) return;
 
   const agora = Date.now();
-  const setor = conta ? String(p.setor || "").trim().slice(0, 80) : "";
+  const setor = conta || ably ? String(p.setor || "").trim().slice(0, 80) : "";
+  const pc = ably ? pcValido(ably.pc) : "";
   const antes = anotados.get(campo);
-  const g = oQueGravar(antes, v, setor, agora);
+  const g = oQueGravar(antes, v, setor, agora, pc);
   if (!g.visto && !g.abriu) return;
   // Anota antes de gravar: se o Redis falhar, as proximas chamadas nao repetem
   // a falha a cada requisicao (o erro fica no log).
-  anotados.set(campo, { v, s: setor, t: g.visto ? agora : antes!.t, dia: g.dia });
+  anotados.set(campo, { v, s: setor, pc, t: g.visto ? agora : antes!.t, dia: g.dia });
 
   const visto: Visto = { v, t: agora };
   if (conta && g.visto) {
     const r = await ramalGuardado(conta, p.ramalDaConta);
     if (r) visto.r = r;
     if (setor) visto.s = setor;
+  }
+  if (ably) {
+    if (setor) visto.s = setor;
+    if (pc) visto.pc = pc;
   }
 
   const r = getRedis();
@@ -236,6 +271,7 @@ export interface PessoaOnline {
   nome: string;
   contas: string[];
   setor: string;
+  pc: string; // PC da ultima conexao (app 1.9.5+); "" = nao informado
   versao: string; // "" = ainda sem versao vista
   vistoEm: number | null; // ultima gravacao (precisao de REGRAVAR_MS)
   abriuEm: number | null; // 1a chamada de hoje
@@ -271,12 +307,14 @@ function lerVisto(valor: unknown): Visto | null {
     t: Number(x.t) || 0,
     ...(x.r ? { r: String(x.r) } : {}),
     ...(x.s ? { s: String(x.s) } : {}),
+    ...(x.pc ? { pc: String(x.pc) } : {}),
   };
 }
 
 // Junta Ably + registros + nomes numa linha por ramal. Pura, para o teste.
 // Quem tem conta Google entra pelo ramal do vinculo; sem vinculo, fica numa
-// linha so da conta.
+// linha so da conta. Os registros "a:" (o proprio app, 1.9.5+) e "r:" do
+// mesmo ramal caem na mesma linha.
 export function juntarPessoas(e: {
   conectados: Map<string, number>;
   vistos: Record<string, unknown>;
@@ -285,7 +323,7 @@ export function juntarPessoas(e: {
   agora: number;
 }): PessoaOnline[] {
   const hoje = diaLocal(e.agora);
-  const linhas = new Map<string, PessoaOnline & { t: number }>();
+  const linhas = new Map<string, PessoaOnline & { t: number; tSetor: number; tPc: number }>();
   const linha = (ramal: string, chaveSemRamal: string) => {
     const k = ramal ? `r:${ramal}` : chaveSemRamal;
     let p = linhas.get(k);
@@ -295,12 +333,15 @@ export function juntarPessoas(e: {
         nome: "",
         contas: [],
         setor: "",
+        pc: "",
         versao: "",
         vistoEm: null,
         abriuEm: null,
         maquinas: (ramal && e.conectados.get(ramal)) || 0,
         status: "offline",
         t: 0,
+        tSetor: -1,
+        tPc: -1,
       };
       linhas.set(k, p);
     }
@@ -314,7 +355,16 @@ export function juntarPessoas(e: {
     const conta = campo.startsWith("c:") ? campo.slice(2) : "";
     const p = linha(conta ? visto.r || "" : campo.slice(2), campo);
     if (conta && !p.contas.includes(conta)) p.contas.push(conta);
-    if (visto.s) p.setor = visto.s;
+    // Setor e PC do registro mais recente: quem trocou de setor no perfil ou
+    // de maquina aparece com o atual, nao com o que o HASH listou por ultimo.
+    if (visto.s && visto.t >= p.tSetor) {
+      p.setor = visto.s;
+      p.tSetor = visto.t;
+    }
+    if (visto.pc && visto.t >= p.tPc) {
+      p.pc = visto.pc;
+      p.tPc = visto.t;
+    }
     if (visto.t >= p.t) {
       p.t = visto.t;
       p.versao = visto.v;
@@ -324,7 +374,7 @@ export function juntarPessoas(e: {
     if (abriu && (!p.abriuEm || abriu < p.abriuEm)) p.abriuEm = abriu;
   }
 
-  return [...linhas.values()].map(({ t: _t, ...p }): PessoaOnline => {
+  return [...linhas.values()].map(({ t: _t, tSetor: _s, tPc: _p, ...p }): PessoaOnline => {
     const usouHoje = !!p.abriuEm || (!!p.vistoEm && diaLocal(p.vistoEm) === hoje);
     return {
       ...p,
