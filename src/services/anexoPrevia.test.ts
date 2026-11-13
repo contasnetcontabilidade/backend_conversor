@@ -1,11 +1,60 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { strToU8, zipSync } from "fflate";
 import {
   miniaturaDaPrevia,
   miniaturaDeTexto,
+  previaDocumentoFormatada,
   tipoVisualizacao,
   type PreviaAnexo,
 } from "./anexoPrevia";
+
+// PNG de 1x1 e um .docx minimo com texto, imagem, texto e uma imagem EMF (que
+// navegador nenhum abre), nessa ordem.
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
+function docxComImagens(): Buffer {
+  const imagem = (rid: string) =>
+    '<w:p><w:r><w:drawing><wp:inline><wp:extent cx="952500" cy="952500"/><wp:docPr id="1" name="Imagem"/>' +
+    '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="0" name="img"/><pic:cNvPicPr/></pic:nvPicPr>' +
+    `<pic:blipFill><a:blip r:embed="${rid}"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+  const par = (t: string) => `<w:p><w:r><w:t>${t}</w:t></w:r></w:p>`;
+  return Buffer.from(
+    zipSync({
+      "[Content_Types].xml": strToU8(
+        '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+          '<Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>' +
+          '<Default Extension="emf" ContentType="image/x-emf"/>' +
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      ),
+      "_rels/.rels": strToU8(
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      ),
+      "word/_rels/document.xml.rels": strToU8(
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>' +
+          '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.emf"/></Relationships>',
+      ),
+      "word/document.xml": strToU8(
+        '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+          'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>' +
+          par("Passo 1: acesse o portal") +
+          imagem("rId5") +
+          par("Passo 2: clique em Configurações") +
+          imagem("rId6") +
+          "</w:body></w:document>",
+      ),
+      "word/media/image1.png": new Uint8Array(PNG_1X1),
+      "word/media/image2.emf": new Uint8Array([1, 2, 3, 4]),
+    }),
+  );
+}
 
 // Tem que bater com o revTipoAnexo do app: e o que decide qual rota a tela
 // chama para cada anexo da conversa.
@@ -88,6 +137,19 @@ test("miniatura do PowerPoint: primeiro slide com texto", () => {
     total: 2,
     linhas: ["Fechamento de outubro", "a", "b", "c", "d", "e"],
   });
+});
+
+test("Word formatado: imagem no lugar dela, EMF contada como omitida", async () => {
+  const p = await previaDocumentoFormatada(docxComImagens());
+  assert.equal(p.tipo, "documento");
+  if (p.tipo !== "documento") return;
+  const html = p.html || "";
+  const passo1 = html.indexOf("Passo 1");
+  const img = html.indexOf('src="data:image/png;base64,');
+  const passo2 = html.indexOf("Passo 2");
+  assert.ok(passo1 >= 0 && img > passo1 && passo2 > img, html);
+  assert.equal(p.imagensOmitidas, 1); // a EMF
+  assert.deepEqual(p.imagens, []); // nada solto no fim
 });
 
 test("miniatura de texto decodifica Latin-1 e corta", () => {
