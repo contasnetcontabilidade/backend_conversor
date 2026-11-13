@@ -684,6 +684,45 @@ export async function baixarAnexoChat(
   return Buffer.from(await resp.arrayBuffer());
 }
 
+// "spaces/X/messages/Y/attachments/Z" -> espaco e mensagem; null fora desse
+// formato. O id vem da tela e vira caminho na API do Chat com o token da
+// pessoa: sem esta checagem, "spaces/X/members" ou um ".." passariam como
+// leitura qualquer. Espaco e mensagem nao comecam com ponto pelo mesmo motivo.
+export function partesDoAnexo(
+  anexoId: string,
+): { espaco: string; mensagem: string } | null {
+  const m =
+    /^(spaces\/[\w-][\w.-]*)\/messages\/[\w-][\w.-]*(?=\/attachments\/[^/]+$)/.exec(
+      String(anexoId || ""),
+    );
+  return m ? { espaco: m[1], mensagem: m[0] } : null;
+}
+
+// Um anexo pelo proprio id, para a miniatura da conversa (GET /chat/imagem).
+// Primeiro o cache por mensagem que a paginacao acabou de gravar: 1 leitura no
+// Redis e nenhuma no Google. Sem ele, le so ESTA mensagem, sem os nomes:
+// obterMensagens leria o nome de cada membro do espaco a cada imagem, e a
+// imagem nao precisa de nome.
+export async function anexoPeloId(
+  email: string,
+  anexoId: string,
+): Promise<AnexoChat | null> {
+  const partes = partesDoAnexo(anexoId);
+  if (!partes) return null;
+  const msg =
+    (await cacheGet<MensagemChat>(
+      `chat:msg2:${email}:${partes.mensagem}`,
+    ).catch(() => null)) ||
+    normalizarMensagem(
+      await comVagaNoEspaco(partes.espaco, () =>
+        chatGet(email, `/${partes.mensagem}`),
+      ),
+      partes.espaco,
+      {},
+    );
+  return (msg?.anexos || []).find((a) => a.id === anexoId) || null;
+}
+
 // Uma pagina de mensagens do espaco, mais recentes primeiro.
 //
 // Custa 1 chamada ao Google por pagina: o messages.list ja devolve text, sender e
