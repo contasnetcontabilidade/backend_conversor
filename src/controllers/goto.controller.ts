@@ -34,6 +34,7 @@ import {
   marcarChamadoAberto,
 } from "../services/store";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
+import { registrarVistoAppNoFundo } from "../services/appOnline";
 
 function publicWebhookUrl(): string {
   const base = process.env.GOTO_PUBLIC_BASE || "https://backend-conversor.vercel.app";
@@ -564,6 +565,20 @@ export async function gotoAblyTokenController(req: Request, res: Response) {
       statusCode: 400,
       code: "RAMAL_REQUIRED",
       message: "Informe o parametro 'ramal'.",
+    });
+  }
+  // Desde a 1.9.5 o app manda versao, setor e nome do PC aqui. Este pedido sai
+  // ao abrir e a cada renovacao do token, entao e o que deixa a aba Online do
+  // /admin exata para todo mundo com o app aberto, inclusive quem nao tem
+  // Google e nao usou nada no dia. App antigo nao manda versao e nada e anotado.
+  const q = (nome: string) =>
+    typeof req.query[nome] === "string" ? (req.query[nome] as string) : "";
+  if (q("versao")) {
+    registrarVistoAppNoFundo({
+      userAgent: req.header("user-agent"),
+      ramal,
+      setor: q("setor"),
+      ably: { versao: q("versao"), pc: q("pc") },
     });
   }
   const tokenRequest = await createRamalTokenRequest(ramal);
