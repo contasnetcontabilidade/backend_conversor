@@ -649,8 +649,10 @@ async function removerMarcadorPosCriar(
 }
 
 // Se a conversa estava nos "Sugeridos" da triagem, o chamado criado e o rotulo
-// "virou chamado" do aprendizado e tira a sugestao da lista do app. Best-effort:
-// falha aqui nao pode desfazer um chamado que ja existe.
+// "virou chamado" do aprendizado e tira a sugestao da lista do app. Se nao
+// estava, a conversa so fica encerrada, para nao ser sugerida depois (ver
+// registrarDesfecho). Best-effort: falha aqui nao pode desfazer um chamado que
+// ja existe.
 async function anotarSugestaoQueVirouChamado(chave?: string, threadId?: string) {
   if (!chave || !threadId) return;
   const conta = await getContaDoEmail(chave).catch(() => null);
