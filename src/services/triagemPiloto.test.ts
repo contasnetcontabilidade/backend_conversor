@@ -343,6 +343,23 @@ test("'nao e chamado' tira a sugestao e vira rotulo; sem sugestao nao anota nada
   );
 });
 
+test("chamado criado antes da sugestao encerra a conversa: a conferencia nao sugere nem paga a IA", async () => {
+  const p = await piloto();
+  assert.equal(await p.registrarDesfecho(CONTA, "t1", "virou_chamado"), false);
+  const r = await p.conferirCaixa(CONTA, { setor: "Suporte" });
+  assert.deepEqual(r.sugestoes, []);
+  assert.equal(chamadasIa, 1, "so o t2 vai para a IA; o t1 ja virou chamado");
+  assert.equal(registros().filter((l) => l.tipo === "desfecho").length, 0, "sem sugestao, sem rotulo");
+  assert.equal(cursorGravado().dispensas, 0);
+});
+
+test("outro desfecho sem sugestao nao encerra a conversa", async () => {
+  const p = await piloto();
+  assert.equal(await p.registrarDesfecho(CONTA, "t1", "nao_e_chamado", "outro"), false);
+  const r = await p.conferirCaixa(CONTA, { setor: "Suporte" });
+  assert.deepEqual(r.sugestoes.map((s) => s.threadId), ["t1"]);
+});
+
 test("'nao e para mim' e 'ja virou chamado' tem desfecho proprio, fora do negativo do aprendizado", async () => {
   const p = await piloto();
   assert.equal(p.desfechoDoMotivo("nao_e_para_mim"), "nao_e_para_mim");
