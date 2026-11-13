@@ -36,6 +36,9 @@ export type PreviaAnexo =
   | {
       tipo: "documento";
       texto: string;
+      // So na previa formatada (previaDocumentoFormatada): o app limpa antes de
+      // por na tela.
+      html?: string;
       imagens: ImagemPrevia[];
       imagensOmitidas: number;
     }
@@ -292,6 +295,49 @@ function imagensDoZip(
     });
   }
   return { imagens, omitidas };
+}
+
+// Word FORMATADO para o visualizador do app 1.9.5+: o HTML do mammoth, com
+// cada imagem no lugar dela no documento, titulos, listas e tabelas (pedido em
+// 13/11/2026: as imagens iam todas para o fim).
+//
+// O HTML NAO e limpo aqui: quem o poe na tela e o app, e e la que ele passa por
+// uma lista fechada de tags (revHtmlSeguro). O mammoth escapa o texto do
+// documento; o que sobra de risco sao os links (href), que o app descarta.
+// Cabecalho e rodape do Word ficam de fora (o mammoth nao os le).
+//
+// Teto proprio para as imagens: elas vao embutidas na resposta, e a Vercel
+// corta resposta em 4,5 MB (o base64 infla ~33%). A que passa do teto vira
+// <img> sem src, que o app descarta e conta.
+const MAX_BYTES_IMAGENS_HTML = 3 * 1024 * 1024;
+const IMG_MIME_HTML = new Set(Object.values(IMG_MIME));
+
+export async function previaDocumentoFormatada(bytes: Buffer): Promise<PreviaAnexo> {
+  let acumulado = 0;
+  let omitidas = 0;
+  const { value } = await mammoth.convertToHtml(
+    { buffer: bytes },
+    {
+      convertImage: mammoth.images.imgElement(async (imagem) => {
+        const mime = String(imagem.contentType || "").toLowerCase();
+        const dados = await imagem.readAsBuffer();
+        // EMF/WMF (vetor do Office) nenhum navegador abre.
+        if (!IMG_MIME_HTML.has(mime) || acumulado + dados.length > MAX_BYTES_IMAGENS_HTML) {
+          omitidas += 1;
+          return { src: "" };
+        }
+        acumulado += dados.length;
+        return { src: `data:${mime};base64,${dados.toString("base64")}` };
+      }),
+    },
+  );
+  return {
+    tipo: "documento",
+    texto: "",
+    html: String(value || ""),
+    imagens: [],
+    imagensOmitidas: omitidas,
+  };
 }
 
 export async function previaDocumento(bytes: Buffer): Promise<PreviaAnexo> {
