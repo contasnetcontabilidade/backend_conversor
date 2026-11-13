@@ -37,6 +37,7 @@ import {
   previaApresentacao,
   previaCsv,
   previaDocumento,
+  previaDocumentoFormatada,
   previaPlanilha,
   tipoConversao,
 } from "../services/anexoPrevia";
@@ -277,7 +278,11 @@ export async function gmailAnexoPreviaController(req: Request, res: Response) {
         ? await previaCsv(bytes)
         : conversao === "apresentacao"
           ? await previaApresentacao(bytes)
-          : await previaDocumento(bytes);
+          : // formato=html: app 1.9.5+ (Word com as imagens no lugar). O
+            // 1.9.4 nao manda e segue recebendo texto + imagens soltas.
+            queryDe(req)("formato") === "html"
+            ? await previaDocumentoFormatada(bytes)
+            : await previaDocumento(bytes);
 
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
