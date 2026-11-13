@@ -198,6 +198,16 @@ export interface AnexoChat {
   hora: string; // createTime da mensagem
 }
 
+// Arquivo do Google Drive citado na mensagem (link colado ou "anexar do
+// Drive"). Nao e baixado: ler o conteudo exigiria a API do Drive com escopo
+// novo. A aba Chat mostra nome e tipo, e o clique abre no navegador.
+export interface ArquivoDrive {
+  id: string; // name do anexo, "spaces/X/messages/Y/attachments/Z"
+  nome: string; // contentName (titulo do arquivo no Drive)
+  mime: string; // contentType, ex. application/vnd.google-apps.spreadsheet
+  link: string;
+}
+
 export interface MensagemChat {
   id: string; // "spaces/X/messages/Y"
   spaceId: string;
@@ -210,6 +220,8 @@ export interface MensagemChat {
   editado: boolean;
   temAnexo: boolean;
   anexos: AnexoChat[];
+  // Opcional: mensagem que estava no cache antes deste campo existir nao o tem.
+  drive?: ArquivoDrive[];
 }
 
 export interface PaginaMensagens {
@@ -583,7 +595,8 @@ function normalizarMensagem(
   // So anexo ENVIADO (attachmentDataRef). Arquivo do Drive compartilhado no chat
   // vem como driveDataRef e exigiria a API do Drive com escopo novo — ou seja,
   // todo mundo reconectando. Na varredura dos espacos, 12 de 12 anexos eram
-  // enviados; nenhum do Drive.
+  // enviados; nenhum do Drive. Desde 13/11/2026 os do Drive vao a parte, em
+  // `drive`, so com nome e link (o app abre no navegador).
   const anexosLista: AnexoChat[] = anexos
     .filter((a: { attachmentDataRef?: { resourceName?: string } }) =>
       Boolean(a?.attachmentDataRef?.resourceName),
@@ -599,6 +612,7 @@ function normalizarMensagem(
       hora,
     }))
     .filter((a: AnexoChat) => a.id && a.resourceName);
+  const drive = arquivosDoDrive(anexos);
 
   return {
     id: String(bruta.name || ""),
@@ -616,7 +630,42 @@ function normalizarMensagem(
     editado: Boolean(bruta.lastUpdateTime),
     temAnexo,
     anexos: anexosLista,
+    drive,
   };
+}
+
+// Endereco do arquivo no Drive a partir do id e do tipo. O formato por tipo
+// abre direto no editor certo; o resto (PDF, Excel enviado ao Drive) cai no
+// visualizador do Drive. O id e conferido porque vai para uma URL que o app
+// abre no navegador.
+const LINK_POR_MIME: Record<string, string> = {
+  "application/vnd.google-apps.spreadsheet": "https://docs.google.com/spreadsheets/d/{id}/edit",
+  "application/vnd.google-apps.document": "https://docs.google.com/document/d/{id}/edit",
+  "application/vnd.google-apps.presentation": "https://docs.google.com/presentation/d/{id}/edit",
+  "application/vnd.google-apps.form": "https://docs.google.com/forms/d/{id}/edit",
+  "application/vnd.google-apps.folder": "https://drive.google.com/drive/folders/{id}",
+};
+export function linkDoDrive(arquivoId: string, mime: string): string {
+  if (!/^[\w-]{10,200}$/.test(String(arquivoId || ""))) return "";
+  const modelo =
+    LINK_POR_MIME[String(mime || "").toLowerCase()] || "https://drive.google.com/file/d/{id}/view";
+  return modelo.replace("{id}", arquivoId);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function arquivosDoDrive(anexos: any[]): ArquivoDrive[] {
+  return anexos
+    .filter((a) => a?.driveDataRef?.driveFileId)
+    .map((a) => {
+      const mime = String(a.contentType || "");
+      return {
+        id: String(a.name || ""),
+        nome: String(a.contentName || "Arquivo do Google Drive"),
+        mime,
+        link: linkDoDrive(String(a.driveDataRef.driveFileId), mime),
+      };
+    })
+    .filter((d) => d.link);
 }
 
 // ---------------------------------------------------------------------------
