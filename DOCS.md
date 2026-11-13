@@ -703,6 +703,7 @@ implementação (`garantirSecaoChamado` espelha `garantirMarcador`).
 | GET | `/api/chat/status` | A conta já autorizou o Chat? Devolve também `pageSize` e a URL de reconexão |
 | GET | `/api/chat/spaces?fonte=secao\|todas` | Conversas da seção `Chamado` (padrão) ou todas |
 | GET | `/api/chat/messages?spaceId=&pageSize=&pageToken=&desde=` | Uma página de mensagens (mais recentes primeiro) + marca `feito` |
+| GET | `/api/chat/imagem?id=` | Imagem enviada na conversa (PNG, JPEG, GIF, WebP, BMP), para a miniatura da aba Chat. Não depende de seleção; acima de 4 MB responde 413 e a conversa mostra só a etiqueta do anexo (a Vercel corta resposta em 4,5 MB) |
 | POST | `/api/chat/chamado/preview` | Lê a seleção, resume com a IA e devolve **o mesmo shape** do preview de e-mail |
 | POST | `/api/chat/chamado/criar` | Cria no Suite360, com idempotência e marca de "chamado gerado" |
 
