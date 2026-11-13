@@ -50,11 +50,15 @@ import {
   type RefResolvida,
 } from "../services/suite360";
 import {
+  miniaturaDaPrevia,
+  miniaturaDeTexto,
   previaApresentacao,
   previaCsv,
   previaDocumento,
   previaPlanilha,
+  textoDoCsv,
   tipoConversao,
+  tipoVisualizacao,
 } from "../services/anexoPrevia";
 import { ensureBodyObject, getOptionalString } from "../utils/request";
 
@@ -791,26 +795,26 @@ export async function chatAnexoPreviaController(req: Request, res: Response) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /chat/imagem — imagem enviada na conversa, para a miniatura da aba Chat
+// GET /chat/arquivo, /chat/arquivo/miniatura e /chat/arquivo/previa — anexos
+// mostrados na propria conversa da aba Chat
 // ---------------------------------------------------------------------------
 
-// Diferente do /chat/anexo, nao depende de selecao nem de preview: a conversa
-// mostra a imagem antes de alguem marcar a mensagem. Quem garante o acesso e o
+// Diferente do /chat/anexo, nao dependem de selecao nem de preview: a conversa
+// mostra o anexo antes de alguem marcar a mensagem. Quem garante o acesso e o
 // Google, porque tudo e lido com o token da propria pessoa.
+//
+// - arquivo: os bytes de imagem, PDF, video e texto (texto ja em UTF-8);
+// - miniatura: resumo pequeno de planilha, Word, PowerPoint e texto;
+// - previa: a conversao inteira, para abrir grande no visualizador.
 
-// SVG fica de fora: e documento (pode trazer script e link externo), nao foto.
-const MIME_MINIATURA = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/bmp",
-]);
 // A Vercel corta a resposta da funcao em 4,5 MB. Acima disto a conversa mostra
 // so a etiqueta do anexo, como antes.
-const MINIATURA_MAX_BYTES = 4 * 1024 * 1024;
+const ARQUIVO_MAX_BYTES = 4 * 1024 * 1024;
+// O anexo de uma mensagem nao muda: o app guarda o que baixou e nao pede de
+// novo ao reabrir a conversa. "private" porque a URL leva o token do perfil.
+const CACHE_ANEXO = "private, max-age=604800";
 
-export async function chatImagemController(req: Request, res: Response) {
+async function anexoDaConversa(req: Request) {
   const email = await contaComChat(req);
   const id = qs(req, "id");
   const anexo = id ? await anexoPeloId(email, id) : null;
@@ -818,33 +822,75 @@ export async function chatImagemController(req: Request, res: Response) {
     throw new AppError({
       statusCode: 404,
       code: "CHAT_ANEXO_NAO_ENCONTRADO",
-      message: "Imagem não encontrada nesta conversa.",
+      message: "Anexo não encontrado nesta conversa.",
     });
   }
-  const mime = anexo.mime.toLowerCase();
-  if (!MIME_MINIATURA.has(mime)) {
-    throw new AppError({
-      statusCode: 415,
-      code: "CHAT_ANEXO_NAO_E_IMAGEM",
-      message: `"${anexo.nome}" não é uma imagem que o app mostre na conversa.`,
-    });
-  }
+  return { email, anexo, tipo: tipoVisualizacao(anexo.mime, anexo.nome) };
+}
+
+function semVisualizacao(nome: string): AppError {
+  return new AppError({
+    statusCode: 415,
+    code: "CHAT_ANEXO_SEM_VISUALIZACAO",
+    message: `O app não mostra "${nome}" na conversa.`,
+  });
+}
+
+// Mesma conversao do /chat/anexo/previa.
+async function converterPrevia(bytes: Buffer, mime: string, nome: string, aba?: string) {
+  const conversao = tipoConversao(mime, nome);
+  if (conversao === "planilha") return previaPlanilha(bytes, aba || undefined);
+  if (conversao === "csv") return previaCsv(bytes);
+  if (conversao === "apresentacao") return previaApresentacao(bytes);
+  return previaDocumento(bytes);
+}
+
+export async function chatArquivoController(req: Request, res: Response) {
+  const { email, anexo, tipo } = await anexoDaConversa(req);
+  if (!["imagem", "pdf", "video", "texto"].includes(tipo)) throw semVisualizacao(anexo.nome);
   const bytes = await baixarAnexoChat(email, anexo.resourceName);
-  if (bytes.length > MINIATURA_MAX_BYTES) {
+  if (bytes.length > ARQUIVO_MAX_BYTES) {
     throw new AppError({
       statusCode: 413,
-      code: "CHAT_IMAGEM_GRANDE",
+      code: "CHAT_ARQUIVO_GRANDE",
       message:
-        `A imagem "${anexo.nome}" tem ${formatarBytes(bytes.length)} e é ` +
-        "grande demais para aparecer na conversa.",
+        `"${anexo.nome}" tem ${formatarBytes(bytes.length)} e é grande demais ` +
+        "para aparecer na conversa. Ele vai inteiro no chamado.",
     });
   }
-  res.setHeader("Content-Type", mime);
-  res.setHeader("Content-Length", String(bytes.length));
-  // O anexo de uma mensagem nao muda: o app guarda a imagem e nao pede de novo
-  // ao reabrir a conversa. "private" porque a URL leva o token do perfil.
-  res.setHeader("Cache-Control", "private, max-age=604800");
-  res.status(200).send(bytes);
+  // Texto sai sempre como text/plain em UTF-8: um .html ou .xml do Chat nunca
+  // e servido como pagina, e o Latin-1 de sistema antigo chega legivel.
+  const corpo = tipo === "texto" ? Buffer.from(textoDoCsv(bytes), "utf-8") : bytes;
+  res.setHeader(
+    "Content-Type",
+    tipo === "texto" ? "text/plain; charset=utf-8" : anexo.mime.toLowerCase(),
+  );
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Length", String(corpo.length));
+  res.setHeader("Cache-Control", CACHE_ANEXO);
+  res.status(200).send(corpo);
+}
+
+export async function chatArquivoMiniaturaController(req: Request, res: Response) {
+  const { email, anexo, tipo } = await anexoDaConversa(req);
+  if (!["planilha", "word", "slides", "texto"].includes(tipo)) throw semVisualizacao(anexo.nome);
+  // Sem o teto de 4,5 MB: o arquivo so entra na funcao (Google -> Vercel); o
+  // que sai para o app e o resumo, de poucos KB.
+  const bytes = await baixarAnexoChat(email, anexo.resourceName);
+  const miniatura =
+    tipo === "texto"
+      ? miniaturaDeTexto(bytes)
+      : miniaturaDaPrevia(await converterPrevia(bytes, anexo.mime, anexo.nome));
+  res.setHeader("Cache-Control", CACHE_ANEXO);
+  res.status(200).json({ ok: true, data: miniatura });
+}
+
+export async function chatArquivoPreviaController(req: Request, res: Response) {
+  const { email, anexo, tipo } = await anexoDaConversa(req);
+  if (!["planilha", "word", "slides"].includes(tipo)) throw semVisualizacao(anexo.nome);
+  const bytes = await baixarAnexoChat(email, anexo.resourceName);
+  const previa = await converterPrevia(bytes, anexo.mime, anexo.nome, qs(req, "aba"));
+  res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
 
 export async function chatCriarController(req: Request, res: Response) {
