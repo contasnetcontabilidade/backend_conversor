@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import { AppError, getErrorMessage } from "../lib/errors";
 import { chatHabilitado, temEscopoChat } from "../services/gmailAuth";
 import {
+  anexoPeloId,
   baixarAnexoChat,
   chaveDaSelecao,
   garantirSecaoChamado,
@@ -787,6 +788,63 @@ export async function chatAnexoPreviaController(req: Request, res: Response) {
           : await previaDocumento(bytes);
 
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
+}
+
+// ---------------------------------------------------------------------------
+// GET /chat/imagem — imagem enviada na conversa, para a miniatura da aba Chat
+// ---------------------------------------------------------------------------
+
+// Diferente do /chat/anexo, nao depende de selecao nem de preview: a conversa
+// mostra a imagem antes de alguem marcar a mensagem. Quem garante o acesso e o
+// Google, porque tudo e lido com o token da propria pessoa.
+
+// SVG fica de fora: e documento (pode trazer script e link externo), nao foto.
+const MIME_MINIATURA = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+]);
+// A Vercel corta a resposta da funcao em 4,5 MB. Acima disto a conversa mostra
+// so a etiqueta do anexo, como antes.
+const MINIATURA_MAX_BYTES = 4 * 1024 * 1024;
+
+export async function chatImagemController(req: Request, res: Response) {
+  const email = await contaComChat(req);
+  const id = qs(req, "id");
+  const anexo = id ? await anexoPeloId(email, id) : null;
+  if (!anexo) {
+    throw new AppError({
+      statusCode: 404,
+      code: "CHAT_ANEXO_NAO_ENCONTRADO",
+      message: "Imagem não encontrada nesta conversa.",
+    });
+  }
+  const mime = anexo.mime.toLowerCase();
+  if (!MIME_MINIATURA.has(mime)) {
+    throw new AppError({
+      statusCode: 415,
+      code: "CHAT_ANEXO_NAO_E_IMAGEM",
+      message: `"${anexo.nome}" não é uma imagem que o app mostre na conversa.`,
+    });
+  }
+  const bytes = await baixarAnexoChat(email, anexo.resourceName);
+  if (bytes.length > MINIATURA_MAX_BYTES) {
+    throw new AppError({
+      statusCode: 413,
+      code: "CHAT_IMAGEM_GRANDE",
+      message:
+        `A imagem "${anexo.nome}" tem ${formatarBytes(bytes.length)} e é ` +
+        "grande demais para aparecer na conversa.",
+    });
+  }
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Content-Length", String(bytes.length));
+  // O anexo de uma mensagem nao muda: o app guarda a imagem e nao pede de novo
+  // ao reabrir a conversa. "private" porque a URL leva o token do perfil.
+  res.setHeader("Cache-Control", "private, max-age=604800");
+  res.status(200).send(bytes);
 }
 
 export async function chatCriarController(req: Request, res: Response) {
