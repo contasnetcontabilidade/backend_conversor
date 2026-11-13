@@ -5,9 +5,11 @@ import {
   diaLocal,
   juntarPessoas,
   oQueGravar,
+  pcValido,
   REGRAVAR_MS,
   versaoDoReleases,
   versaoDoUserAgent,
+  versaoValida,
 } from "./appOnline";
 
 // O que o Electron manda nas chamadas feitas pela tela do app.
@@ -65,6 +67,45 @@ test("grava na 1a vez, depois so com versao nova ou passada 1 hora", () => {
   // Virou o dia: o "abriu" do dia novo vai mesmo dentro da hora.
   const ontem = { ...antes, dia: "2026-11-11" };
   assert.equal(oQueGravar(ontem, "1.9.4", "", AGORA + 60_000).abriu, true);
+  // Trocou de maquina: grava na hora. Mesmo PC dentro da hora, nao.
+  const comPc = { ...antes, pc: "PC-FISCAL-03" };
+  assert.equal(oQueGravar(comPc, "1.9.4", "", AGORA + 60_000, "PC-FISCAL-03").visto, false);
+  assert.equal(oQueGravar(comPc, "1.9.4", "", AGORA + 60_000, "PC-SUPORTE-01").visto, true);
+});
+
+// Vem do pedido de token do Ably e vai para o Redis e para o HTML do painel.
+test("versao e PC mandados pelo app so passam no formato esperado", () => {
+  assert.equal(versaoValida("1.9.5"), "1.9.5");
+  assert.equal(versaoValida(" 1.10.0 "), "1.10.0");
+  assert.equal(versaoValida("1.9"), "");
+  assert.equal(versaoValida("1.9.5<script>"), "");
+  assert.equal(versaoValida(undefined), "");
+  assert.equal(pcValido("PC-FISCAL-03"), "PC-FISCAL-03");
+  assert.equal(pcValido('PC"><img src=x>'), "PCimgsrcx");
+  assert.equal(pcValido("x".repeat(60)).length, 40);
+});
+
+test("registro do app (a:) e o da tela (r:) do mesmo ramal viram uma linha", () => {
+  const pessoas = juntarPessoas({
+    conectados: new Map([["410", 1]]),
+    vistos: {
+      // A tela anotou depois, mas sem setor nem PC: os do app continuam.
+      "a:410": { v: "1.9.5", t: AGORA - HORA, s: "Pessoal", pc: "PC-DP-07" },
+      "r:410": { v: "1.9.5", t: AGORA - 10 * 60_000 },
+      // Conta com setor antigo, de antes da troca no perfil.
+      "c:dani@contas.com.br": { v: "1.9.4", t: AGORA - 5 * HORA, r: "410", s: "Fiscal" },
+    },
+    abriu: { "a:410": AGORA - 2 * HORA },
+    nomes: { "410": "Dani" },
+    agora: AGORA,
+  });
+  assert.equal(pessoas.length, 1);
+  const dani = pessoas[0];
+  assert.equal(dani.versao, "1.9.5");
+  assert.equal(dani.setor, "Pessoal"); // o mais recente, nao o da conta
+  assert.equal(dani.pc, "PC-DP-07");
+  assert.equal(dani.abriuEm, AGORA - 2 * HORA);
+  assert.deepEqual(dani.contas, ["dani@contas.com.br"]);
 });
 
 test("junta Ably, registro do ramal e registro da conta numa linha so", () => {
