@@ -55,6 +55,7 @@ import {
   previaApresentacao,
   previaCsv,
   previaDocumento,
+  previaDocumentoFormatada,
   previaPlanilha,
   textoDoCsv,
   tipoConversao,
@@ -789,7 +790,10 @@ export async function chatAnexoPreviaController(req: Request, res: Response) {
         ? await previaCsv(bytes)
         : conversao === "apresentacao"
           ? await previaApresentacao(bytes)
-          : await previaDocumento(bytes);
+          : // formato=html: o mesmo do /gmail/anexo/previa (app 1.9.5+).
+            qs(req, "formato") === "html"
+            ? await previaDocumentoFormatada(bytes)
+            : await previaDocumento(bytes);
 
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
@@ -836,13 +840,19 @@ function semVisualizacao(nome: string): AppError {
   });
 }
 
-// Mesma conversao do /chat/anexo/previa.
-async function converterPrevia(bytes: Buffer, mime: string, nome: string, aba?: string) {
+// Mesma conversao do /chat/anexo/previa. formatado: o Word sai em HTML com as
+// imagens no lugar (visualizador); sem ele, texto puro (miniatura).
+async function converterPrevia(
+  bytes: Buffer,
+  mime: string,
+  nome: string,
+  opcoes: { aba?: string; formatado?: boolean } = {},
+) {
   const conversao = tipoConversao(mime, nome);
-  if (conversao === "planilha") return previaPlanilha(bytes, aba || undefined);
+  if (conversao === "planilha") return previaPlanilha(bytes, opcoes.aba || undefined);
   if (conversao === "csv") return previaCsv(bytes);
   if (conversao === "apresentacao") return previaApresentacao(bytes);
-  return previaDocumento(bytes);
+  return opcoes.formatado ? previaDocumentoFormatada(bytes) : previaDocumento(bytes);
 }
 
 export async function chatArquivoController(req: Request, res: Response) {
@@ -889,7 +899,11 @@ export async function chatArquivoPreviaController(req: Request, res: Response) {
   const { email, anexo, tipo } = await anexoDaConversa(req);
   if (!["planilha", "word", "slides"].includes(tipo)) throw semVisualizacao(anexo.nome);
   const bytes = await baixarAnexoChat(email, anexo.resourceName);
-  const previa = await converterPrevia(bytes, anexo.mime, anexo.nome, qs(req, "aba"));
+  const previa = await converterPrevia(bytes, anexo.mime, anexo.nome, {
+    aba: qs(req, "aba"),
+    // Rota nova (so o app 1.9.5+ chama): o Word ja sai formatado.
+    formatado: true,
+  });
   res.status(200).json({ ok: true, data: { nome: anexo.nome, ...previa } });
 }
 
