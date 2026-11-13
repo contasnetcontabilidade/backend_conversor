@@ -698,11 +698,11 @@ export function partesDoAnexo(
   return m ? { espaco: m[1], mensagem: m[0] } : null;
 }
 
-// Um anexo pelo proprio id, para a miniatura da conversa (GET /chat/imagem).
-// Primeiro o cache por mensagem que a paginacao acabou de gravar: 1 leitura no
-// Redis e nenhuma no Google. Sem ele, le so ESTA mensagem, sem os nomes:
-// obterMensagens leria o nome de cada membro do espaco a cada imagem, e a
-// imagem nao precisa de nome.
+// Um anexo pelo proprio id, para a miniatura da conversa (GET /chat/arquivo e
+// vizinhas). Primeiro o cache por mensagem que a paginacao acabou de gravar: 1
+// leitura no Redis e nenhuma no Google. Sem ele, le so ESTA mensagem, sem os
+// nomes: obterMensagens leria o nome de cada membro do espaco a cada anexo, e
+// o anexo nao precisa de nome.
 export async function anexoPeloId(
   email: string,
   anexoId: string,
