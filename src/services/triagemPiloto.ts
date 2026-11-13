@@ -193,7 +193,8 @@ function limiarPelasDispensas(dispensas: number): number {
 }
 
 // Tira a sugestao da lista e anota o que a pessoa fez com ela. false = nao
-// havia sugestao pendente para essa conversa (nada e anotado).
+// havia sugestao pendente para essa conversa (nada e anotado; "virou chamado"
+// so encerra a conversa).
 export async function registrarDesfecho(
   email: string,
   threadId: string,
@@ -202,7 +203,16 @@ export async function registrarDesfecho(
 ): Promise<boolean> {
   const c = conta(email);
   const banco = bancoDaTriagem();
-  if (!(await banco.tirarSugestao(c, threadId))) return false;
+  if (!(await banco.tirarSugestao(c, threadId))) {
+    // Chamado criado de uma conversa que nao estava na bandeja (a pessoa foi
+    // mais rapida que o relogio de 20 min, ou o chamado e de antes de ela
+    // entrar no piloto): sem encerrar, a conferencia seguinte sugeria algo ja
+    // feito. Em 13/11/2026, 4 sugestoes do Alberto eram chamados da vespera,
+    // vindos da janela de 24 h de quem entra. Nao vira registro nem mexe no
+    // limiar: nao havia sugestao para julgar.
+    if (desfecho === "virou_chamado") await banco.encerrar(c, threadId, daquiA(ENCERRADA_MS));
+    return false;
+  }
   await registrarNaLista({ tipo: "desfecho", conta: c, threadId, desfecho, ...(motivo ? { motivo } : {}) });
   // "Ignorada" nao encerra: se a pessoa responder depois, a conversa pode
   // voltar como respondida (e ai sim avisar).
