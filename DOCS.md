@@ -198,7 +198,7 @@ src/
 | `POST` | `/goto/webhook/:token` | Recebe eventos de ligação do GoTo; responde**200 na hora** e roteia em segundo plano. *(isento)* |
 | `GET`  | `/goto/eventos`        | Polling do desktop: drena os eventos "call-ended" pendentes da fila.                                       |
 | `GET`  | `/goto/historico`      | `?ramal&limit` — últimas ligações de um ramal (API de call-history).                                 |
-| `GET`  | `/goto/ably-token`     | `?ramal` — devolve um TokenRequest do Ably escopado só naquele ramal.                                  |
+| `GET`  | `/goto/ably-token`     | `?ramal` — devolve um TokenRequest do Ably escopado só naquele ramal. Desde a 1.9.5 o app manda também `versao`, `setor` e `pc`, anotados para a aba Online. |
 | `POST` | `/goto/chamado`        | Baixa a gravação, transcreve e resume para um`conversationSpaceId`.                                    |
 
 ### 4.3 Suite360 (`suite360.controller.ts`)
@@ -225,14 +225,15 @@ src/
 
 ### Aba "Online" do `/admin` (`appOnline.ts`)
 
-Mostra quem está com o app aberto agora, separado por setor, com a versão de cada um e a lista de quem precisa atualizar. **Não depende de versão nova do app.**
+Mostra quem está com o app aberto agora, separado por setor, com a versão de cada um, o PC e a lista de quem precisa atualizar.
 
 - **Online** = ocupação do canal `ramal:<ramal>` no Ably (`ramaisConectados`, uma chamada só à API REST v2 com `by=value`). Todo app aberto, até minimizado na bandeja, assina o canal do ramal; o número de assinantes é o de máquinas. Quem não configurou ramal não conecta no Ably e não aparece como online.
-- **Versão** = o Electron põe `<nome-do-app>/<versão>` no `User-Agent` de toda chamada feita pela **tela** do app. As do processo principal (vínculo, foto, token do Ably) saem como `node` e não servem. A versão é anotada em dois pontos:
+- **Versão, setor e PC pelo próprio app (1.9.5+):** o app manda `versao`, `setor` e `pc` (nome do Windows) junto do `ramal` no `GET /api/goto/ably-token`, que sai ao abrir e a cada renovação do token (~1 h). Fica no registro `a:<ramal>`, separado do `r:<ramal>` abaixo, porque a anotação pelo `User-Agent` não traz setor nem PC e os apagaria. Com o ramal aberto em duas máquinas, o PC mostrado é o da última conexão.
+- **Versões anteriores à 1.9.5** = o Electron põe `<nome-do-app>/<versão>` no `User-Agent` de toda chamada feita pela **tela** do app. As do processo principal (vínculo, foto, token do Ably) saem como `node` e não servem. A versão é anotada em dois pontos:
   - middleware `versaoApp`: chamadas com `ramal` no corpo JSON ou na query (prévia, criar chamado, resumo, feedback);
   - conferência das Sugestões (`/gmail/triagem/conferir`): roda sozinha ~20 s depois de o app abrir, para todo mundo com conta Google, e traz o setor. O ramal da conta vem do vínculo (`ramalDaConta`).
 - **Versão mais nova** = o `RELEASES` do release `latest` no GitHub, o mesmo arquivo que o app lê para se atualizar (cache de 10 min). Se o GitHub não responder, vale a maior versão vista, e a aba avisa.
-- **Redis** (o gratuito já está apertado): `online:visto` (HASH `r:<ramal>`/`c:<conta>` → `{v, t, r?, s?}`) é gravado **no máximo 1 vez por hora por pessoa** por instância (versão ou setor novos gravam na hora), mais `online:abriu:<dia>` (HSETNX, 1 vez por dia, TTL de 3 dias). Por isso a "última atividade" tem precisão de 1 h. Cada leitura do painel custa 3 comandos (os dois HASHes + `uso:ramais`); a aba atualiza a cada 1 min, só aberta e visível.
+- **Redis** (o gratuito já está apertado): `online:visto` (HASH `a:<ramal>`/`r:<ramal>`/`c:<conta>` → `{v, t, r?, s?, pc?}`) é gravado **no máximo 1 vez por hora por pessoa** por instância (versão, setor ou PC novos gravam na hora), mais `online:abriu:<dia>` (HSETNX, 1 vez por dia, TTL de 3 dias). Por isso a "última atividade" tem precisão de 1 h. Cada leitura do painel custa 3 comandos (os dois HASHes + `uso:ramais`); a aba atualiza a cada 1 min, só aberta e visível.
 - **Status:** `online` (Ably), `saiu` (fora agora, mas usou o app hoje) e `offline`. O que não deu para ler (Ably, Redis, GitHub) volta em `avisos` e aparece na aba.
 
 ### Formato de resposta
