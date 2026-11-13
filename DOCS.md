@@ -706,7 +706,7 @@ implementação (`garantirSecaoChamado` espelha `garantirMarcador`).
 | GET | `/api/chat/messages?spaceId=&pageSize=&pageToken=&desde=` | Uma página de mensagens (mais recentes primeiro) + marca `feito`. Cada mensagem traz `anexos` (enviados no Chat) e `drive` (arquivos do Google Drive citados: nome, tipo e link; o conteúdo não é lido, isso exigiria o escopo do Drive) |
 | GET | `/api/chat/arquivo?id=` | Bytes de imagem (PNG, JPEG, GIF, WebP, BMP), PDF, vídeo e texto enviados na conversa, para a miniatura e o visualizador da aba Chat. Texto sai sempre como `text/plain` UTF-8. Não depende de seleção; acima de 4 MB responde 413 e a conversa mostra só a etiqueta do anexo (a Vercel corta resposta em 4,5 MB) |
 | GET | `/api/chat/arquivo/miniatura?id=` | Resumo pequeno de planilha, Word, PowerPoint e texto para a miniatura (6 linhas × 5 colunas, 600 caracteres, 1º slide com texto; imagem só de documento sem texto, até 300 KB) |
-| GET | `/api/chat/arquivo/previa?id=&aba=` | Conversão inteira de planilha, Word e PowerPoint, para abrir grande (a mesma do `/chat/anexo/previa`) |
+| GET | `/api/chat/arquivo/previa?id=&aba=` | Conversão inteira de planilha, Word e PowerPoint, para abrir grande. O Word sai **formatado** (`html` do mammoth, com cada imagem no lugar; até 3 MB de imagens por causa do teto da Vercel). `/chat/anexo/previa` e `/gmail/anexo/previa` dão o mesmo com `formato=html` (app 1.9.5+); sem ele, texto puro + imagens soltas, como a 1.9.4 espera. O app limpa o `html` por lista fechada antes de pôr na tela |
 | POST | `/api/chat/chamado/preview` | Lê a seleção, resume com a IA e devolve **o mesmo shape** do preview de e-mail |
 | POST | `/api/chat/chamado/criar` | Cria no Suite360, com idempotência e marca de "chamado gerado" |
 
