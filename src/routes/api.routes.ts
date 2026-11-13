@@ -63,8 +63,10 @@ import {
 import {
   chatAnexoController,
   chatAnexoPreviaController,
+  chatArquivoController,
+  chatArquivoMiniaturaController,
+  chatArquivoPreviaController,
   chatCriarController,
-  chatImagemController,
   chatMessagesController,
   chatPreviewController,
   chatSpacesController,
@@ -172,7 +174,9 @@ apiRouter.get("/chat/spaces", asyncHandler(chatSpacesController));
 apiRouter.get("/chat/messages", asyncHandler(chatMessagesController));
 apiRouter.get("/chat/anexo", asyncHandler(chatAnexoController));
 apiRouter.get("/chat/anexo/previa", asyncHandler(chatAnexoPreviaController));
-apiRouter.get("/chat/imagem", asyncHandler(chatImagemController));
+apiRouter.get("/chat/arquivo", asyncHandler(chatArquivoController));
+apiRouter.get("/chat/arquivo/miniatura", asyncHandler(chatArquivoMiniaturaController));
+apiRouter.get("/chat/arquivo/previa", asyncHandler(chatArquivoPreviaController));
 apiRouter.post("/chat/chamado/preview", asyncHandler(chatPreviewController));
 apiRouter.post("/chat/chamado/criar", asyncHandler(chatCriarController));
 
