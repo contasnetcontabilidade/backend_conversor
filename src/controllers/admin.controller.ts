@@ -623,6 +623,7 @@ html[data-theme=light]{--on-ok:#137a50;--on-old:#8a5c00;--on-maq:#12578f}
 .on-tag.old{background:rgba(224,169,59,.14);color:var(--on-old)}
 .on-tag.nd{background:rgba(147,160,189,.14);color:var(--muted)}
 .on-tag.maq{background:rgba(18,87,143,.2);color:var(--on-maq)}
+.on-tag.pc{border:1px solid var(--border);color:var(--text);font-weight:500;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -2020,7 +2021,10 @@ function cartaoOnline(p,nova){
     +'<div style="min-width:0"><div class="on-nome" title="'+escAttr(p.nome)+'">'+escFb(p.nome)+'</div>'
     +'<div class="on-linha">'+(p.ramal?"Ramal "+escFb(p.ramal)+" · ":"")+rot+'</div></div></div>'
     +'<div class="on-tags"><span class="on-tag '+t+'">'+escFb(p.versao||"sem versão")+'</span>'
-    +(p.maquinas>1?'<span class="on-tag maq">'+p.maquinas+' máquinas</span>':'')+'</div>'
+    +(p.maquinas>1?'<span class="on-tag maq">'+p.maquinas+' máquinas</span>':'')
+    // PC da ultima conexao (app 1.9.5+). Com o ramal em duas maquinas, e o da
+    // que conectou por ultimo; o title avisa para ninguem ler como lista.
+    +(p.pc?'<span class="on-tag pc" title="'+escAttr("PC da última conexão"+(p.maquinas>1?" (o ramal está aberto em "+p.maquinas+" máquinas)":""))+'">'+escFb(p.pc)+'</span>':'')+'</div>'
     +'<div class="on-linha ell" title="'+escAttr(contas.join(", "))+'">'+escFb(conta)+'</div>'
     +'<div class="on-linha">'+escFb(tempo)+'</div></div>';
 }
