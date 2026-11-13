@@ -961,7 +961,10 @@ a pessoa, pela revisão de sempre.
   da pessoa para 0,9; abrir chamado de uma sugestão volta para 0,85. "Não é para mim" e "Já
   virou chamado" não contam.
 - **Conversa encerrada** (qualquer desfecho menos "ignorada") não volta a ser sugerida
-  por 30 dias, nem com resposta nova.
+  por 30 dias, nem com resposta nova. Chamado criado de uma conversa que **não** estava
+  na bandeja também a encerra (desde 13/11/2026), sem virar rótulo: antes, a conferência
+  seguinte sugeria algo já feito (chamado aberto antes do relógio de 20 min, ou antes de
+  a pessoa entrar no piloto).
 - **Busca:** fora só as abas Promoções e Social. A aba Fóruns entra, porque 5 dos 36
   chamados do Gabriel na Fase 0 vieram de lá (e-mail mandado para grupo).
 - **Desfechos** (o rótulo do aprendizado): "virou chamado" é anotado quando o chamado
